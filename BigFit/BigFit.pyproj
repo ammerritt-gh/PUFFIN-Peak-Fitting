@@ -22,9 +22,13 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="main.py" />
+    <Compile Include="Model Test.py" />
+    <Compile Include="models\dho_voigt_model.py" />
+    <Compile Include="models\models.py" />
+    <Compile Include="models\__init__.py" />
   </ItemGroup>
   <ItemGroup>
-    <Folder Include="model\" />
+    <Folder Include="models\" />
     <Folder Include="worker\" />
     <Folder Include="view\" />
   </ItemGroup>
