@@ -1,32 +1,37 @@
-# main.py
+﻿# main.py
 import sys
 from PySide6.QtWidgets import QApplication
-
-# Import your modules from the project structure
-from model.model_state import ModelState
-from viewmodel.fitter_vm import FitterViewModel
+from models.model_state import ModelState
 from view.main_window import MainWindow
+from viewmodel.fitter_vm import FitterViewModel
 
 
 def main():
-    """Entry point for the MVVM-based PUMA Fitter application."""
     app = QApplication(sys.argv)
 
-    # --- Model layer ---
-    model = ModelState()
-
-    # --- ViewModel layer ---
-    viewmodel = FitterViewModel(model)
-
-    # --- View layer ---
+    # Model + ViewModel + View
+    model_state = ModelState()
+    viewmodel = FitterViewModel(model_state)
     window = MainWindow(viewmodel)
-    window.resize(1200, 800)
-    window.show()
 
-    # --- Start event loop ---
+    # Connect ViewModel → View signals
+    viewmodel.plot_updated.connect(window.update_plot_data)
+    viewmodel.log_message.connect(window.append_log)
+
+    # Connect View → ViewModel inputs
+    window.gauss_spin.valueChanged.connect(
+        lambda v: viewmodel.apply_parameters(gauss=v, lorentz=window.lorentz_spin.value(), temp=window.temp_spin.value())
+    )
+    window.lorentz_spin.valueChanged.connect(
+        lambda v: viewmodel.apply_parameters(gauss=window.gauss_spin.value(), lorentz=v, temp=window.temp_spin.value())
+    )
+    window.temp_spin.valueChanged.connect(
+        lambda v: viewmodel.apply_parameters(gauss=window.gauss_spin.value(), lorentz=window.lorentz_spin.value(), temp=v)
+    )
+
+    window.show()
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
     main()
-

@@ -25,10 +25,18 @@
     <Compile Include="Model Test.py" />
     <Compile Include="models\dho_voigt_model.py" />
     <Compile Include="models\models.py" />
+    <Compile Include="models\model_state.py" />
     <Compile Include="models\__init__.py" />
+    <Compile Include="viewmodel\fitter_vm.py" />
+    <Compile Include="viewmodel\__init__.py" />
+    <Compile Include="view\main_window.py" />
+    <Compile Include="view\__init__.py" />
+    <Compile Include="worker\fit_worker.py" />
+    <Compile Include="worker\__init__.py" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="models\" />
+    <Folder Include="viewmodel\" />
     <Folder Include="worker\" />
     <Folder Include="view\" />
   </ItemGroup>
