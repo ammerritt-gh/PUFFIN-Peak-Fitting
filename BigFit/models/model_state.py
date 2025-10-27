@@ -1,4 +1,4 @@
-# model/model_state.py
+﻿# model/model_state.py
 import numpy as np
 from models.dho_voigt_model import DhoVoigtComposite
 
