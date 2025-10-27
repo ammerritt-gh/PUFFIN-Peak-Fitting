@@ -1,5 +1,6 @@
 ﻿# model/data_loader.py
 import os
+from typing import Optional
 import numpy as np
 import pandas as pd
 from PySide6.QtWidgets import QFileDialog, QMessageBox
@@ -12,9 +13,24 @@ DATA_FILE_FILTER = "Data Files (*.dat *.txt *.csv)"
 
 def resolve_default_input_dir():
     """Find a good default input directory."""
+    # Prefer the configured default_load_folder when available
+    try:
+        # import wrapper from package to avoid importing submodule at module-import time
+        from dataio import get_config
+        cfg = get_config()
+        cfg_folder = cfg.default_load_folder or None
+        if cfg_folder and os.path.isdir(cfg_folder):
+            return cfg_folder
+    except Exception:
+        # fall back if config not available
+        pass
+
+    # Next try environment variable
     env = os.environ.get("FMO_ANALYSIS_INPUT_DIR")
     if env and os.path.isdir(env):
         return env
+
+    # Finally, use ~/Documents
     docs = os.path.join(os.path.expanduser("~"), "Documents")
     return docs
 

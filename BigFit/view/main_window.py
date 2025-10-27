@@ -1,7 +1,8 @@
 ﻿# view/main_window.py
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QPushButton,
-    QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox
+    QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
+    QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog
 )
 from PySide6.QtCore import Qt
 import pyqtgraph as pg
@@ -78,11 +79,15 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("Save Data")
         fit_btn = QPushButton("Run Fit")
         update_btn = QPushButton("Update Plot")
+        reload_cfg_btn = QPushButton("Reload Config")
+        config_btn = QPushButton("Edit Config")
 
         layout.addWidget(QLabel("Data Controls"))
         layout.addWidget(load_btn)
         layout.addWidget(save_btn)
         layout.addWidget(fit_btn)
+        layout.addWidget(reload_cfg_btn)
+        layout.addWidget(config_btn)
         layout.addWidget(update_btn)
         layout.addStretch(1)
 
@@ -95,6 +100,8 @@ class MainWindow(QMainWindow):
             save_btn.clicked.connect(self.viewmodel.save_data)
             fit_btn.clicked.connect(self.viewmodel.run_fit)
             update_btn.clicked.connect(self.viewmodel.update_plot)
+            reload_cfg_btn.clicked.connect(getattr(self.viewmodel, "reload_config", lambda: None))
+            config_btn.clicked.connect(self._on_edit_config_clicked)
 
     def _init_right_dock(self):
         self.right_dock = QDockWidget("Parameters", self)
@@ -182,3 +189,81 @@ class MainWindow(QMainWindow):
             lorentz=self.lorentz_spin.value(),
             temp=self.temp_spin.value()
         )
+
+    # --------------------------
+    # Config dialog (view-only)
+    # --------------------------
+    class _ConfigDialog(QDialog):
+        def __init__(self, parent, cfg_dict):
+            super().__init__(parent)
+            self.setWindowTitle("Edit Configuration")
+            form = QFormLayout(self)
+
+            # default load folder
+            self.load_edit = QLineEdit(self)
+            self.load_edit.setText(str(cfg_dict.get("default_load_folder", "")))
+            load_h = QHBoxLayout()
+            load_h.addWidget(self.load_edit)
+            browse_load = QPushButton("Browse")
+            load_h.addWidget(browse_load)
+            form.addRow("Default Load Folder:", load_h)
+            browse_load.clicked.connect(self._browse_load)
+
+            # default save folder
+            self.save_edit = QLineEdit(self)
+            self.save_edit.setText(str(cfg_dict.get("default_save_folder", "")))
+            save_h = QHBoxLayout()
+            save_h.addWidget(self.save_edit)
+            browse_save = QPushButton("Browse")
+            save_h.addWidget(browse_save)
+            form.addRow("Default Save Folder:", save_h)
+            browse_save.clicked.connect(self._browse_save)
+
+            # buttons
+            buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            form.addRow(buttons)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+
+        def _browse_load(self):
+            d = QFileDialog.getExistingDirectory(self, "Select Default Load Folder", self.load_edit.text() or "")
+            if d:
+                self.load_edit.setText(d)
+
+        def _browse_save(self):
+            d = QFileDialog.getExistingDirectory(self, "Select Default Save Folder", self.save_edit.text() or "")
+            if d:
+                self.save_edit.setText(d)
+
+    def _on_edit_config_clicked(self):
+        """Open the configuration editor dialog (view-only)."""
+        if not self.viewmodel:
+            self.append_log("No ViewModel available to edit configuration.")
+            return
+
+        # Ask ViewModel for current config values (ViewModel handles logic)
+        try:
+            cfg = self.viewmodel.get_config()
+        except Exception as e:
+            self.append_log(f"Failed to load configuration: {e}")
+            return
+
+        dlg = self._ConfigDialog(self, cfg)
+        if dlg.exec() == QDialog.Accepted:
+            # collect values and instruct ViewModel to save them
+            new_load = dlg.load_edit.text().strip()
+            new_save = dlg.save_edit.text().strip()
+            try:
+                ok = self.viewmodel.save_config(default_load_folder=new_load, default_save_folder=new_save)
+                if ok:
+                    self.append_log("Configuration saved.")
+                    # reload ViewModel config and refresh UI as needed
+                    if hasattr(self.viewmodel, "reload_config"):
+                        try:
+                            self.viewmodel.reload_config()
+                        except Exception:
+                            pass
+                else:
+                    self.append_log("Configuration save failed.")
+            except Exception as e:
+                self.append_log(f"Error saving configuration: {e}")
