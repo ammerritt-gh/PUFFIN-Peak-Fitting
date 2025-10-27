@@ -74,53 +74,88 @@ def load_data_from_file(filepath: str):
             toks = [t for t in toks if t != "" and t != ","]
             return toks
 
-        # Find first line that contains at least three numeric tokens (x, y, error).
-        def numeric_tokens_from_line(line):
-            toks = split_line(line)
+        # Find first line that looks like numeric data (most tokens parse as float)
+        def is_numeric_row(tokens):
+            """Return True if a line looks like numeric data."""
+            if len(tokens) < 2:
+                return False
+            num_ok = 0
+            for t in tokens:
+                s = t.strip().strip(",")
+                # reject if contains alphabetic characters or '='
+                if re.search(r"[A-Za-z=]", s):
+                    return False
+                try:
+                    float(s)
+                    num_ok += 1
+                except Exception:
+                    pass
+            return num_ok >= 2 and num_ok >= 0.5 * len(tokens)
+
+        # --- Find first numeric data row ---
+        start_idx = None
+        for i, line in enumerate(raw_lines):
+            tokens = split_line(line)
+            if is_numeric_row(tokens):
+                start_idx = i
+                break
+        if start_idx is None:
+            raise ValueError("No numeric data rows found in file.")
+
+        # --- Skip unit rows just before numeric data ---
+        if start_idx > 0:
+            prev_line = split_line(raw_lines[start_idx - 1])
+            if all(re.match(r"^[A-Za-zµμ]+(/[A-Za-z]+)?$", t) for t in prev_line if t):
+                start_idx += 1
+
+        # --- Improved header detection ---
+        header_tokens = None
+        best_header_score = -1
+        for j in range(max(0, start_idx - 5), start_idx):
+            candidate = raw_lines[j].strip()
+            if candidate == "":
+                continue
+            toks = split_line(candidate)
+            if not toks:
+                continue
+            norm = [re.sub(r"[^a-z0-9/]+", "", t.strip().lower()) for t in toks]
+            letter_frac = sum(1 for t in toks if re.search(r"[A-Za-z]", t)) / len(toks)
+            num_frac = sum(1 for t in toks if re.search(r"[0-9]", t)) / len(toks)
+            key_matches = 0
+            for t in norm:
+                if any(k in t for k in energy_keywords | counts_keywords | error_keywords):
+                    key_matches += 1
+            score = key_matches * 2 + letter_frac - num_frac
+            if score > best_header_score:
+                best_header_score = score
+                header_tokens = toks
+
+        # Manually parse numeric rows to avoid pandas tokenization/deprecation issues.
+        numeric_rows = []
+        for line in raw_lines[start_idx:]:
+            s = line.strip()
+            if s == "" or s.lstrip().startswith("#"):
+                continue
+            toks = split_line(s)
             nums = []
             for t in toks:
                 t2 = t.strip().strip(",")
                 try:
                     nums.append(float(t2))
                 except Exception:
+                    # skip non-numeric tokens (e.g. trailing commas or stray text)
                     pass
-            return nums
-
-        start_idx = None
-        for i, line in enumerate(raw_lines):
-            nums = numeric_tokens_from_line(line)
-            if len(nums) >= 3:
-                start_idx = i
-                break
-        # If no 3-number line found, fall back to first 2-number line
-        if start_idx is None:
-            for i, line in enumerate(raw_lines):
-                nums = numeric_tokens_from_line(line)
-                if len(nums) >= 2:
-                    start_idx = i
-                    break
-        if start_idx is None:
-            raise ValueError("No numeric data rows found in file.")
-
-        # Parse numeric rows starting at start_idx. For each row take first 3 numeric values (x,y,error).
-        numeric_rows = []
-        for line in raw_lines[start_idx:]:
-            if line.strip() == "" or line.lstrip().startswith("#"):
-                continue
-            nums = numeric_tokens_from_line(line)
-            if len(nums) >= 3:
-                numeric_rows.append(nums[:3])
-            elif len(nums) == 2:
-                numeric_rows.append([nums[0], nums[1], np.nan])
-            else:
-                # skip lines without at least 2 numeric values
-                continue
+            if len(nums) >= 2:
+                numeric_rows.append(nums)
 
         if not numeric_rows:
             raise ValueError("No numeric data rows found after parsing.")
 
-        # Build DataFrame from numeric_rows (each row has exactly 3 entries now)
-        arr = np.array(numeric_rows, dtype=float)
+        # Make a rectangular array (pad shorter rows with NaN)
+        max_cols = max(len(r) for r in numeric_rows)
+        arr = np.full((len(numeric_rows), max_cols), np.nan, dtype=float)
+        for i, r in enumerate(numeric_rows):
+            arr[i, : len(r)] = r
         df = pd.DataFrame(arr)
 
         if df.shape[1] < 2:
@@ -136,10 +171,49 @@ def load_data_from_file(filepath: str):
             s = re.sub(r"[^a-z0-9]+", "", s)
             return s
 
-        # We constructed df so columns 0,1,2 correspond to energy, counts, error
-        energy = pd.to_numeric(df.iloc[:, 0], errors="coerce").to_numpy(dtype=float)
-        counts = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
-        errors = pd.to_numeric(df.iloc[:, 2], errors="coerce").to_numpy(dtype=float)
+        counts_keywords = {"counts", "count", "cts", "intensity", "y", "countsmin", "counts/min", "countspermin", "countsmin"}
+        error_keywords = {"error", "err", "sigma", "unc", "uncertainty", "std"}
+
+        col_labels = []
+        if header_tokens:
+            # ensure header_tokens length covers df columns if possible
+            for i in range(df.shape[1]):
+                if i < len(header_tokens):
+                    col_labels.append(norm_label(header_tokens[i]))
+                else:
+                    col_labels.append("")
+        else:
+            col_labels = [""] * df.shape[1]
+
+        # Map columns to energy, counts, error
+        energy_col = None
+        counts_col = None
+        error_col = None
+        for idx, lab in enumerate(col_labels):
+            if any(k in lab for k in energy_keywords) and energy_col is None:
+                energy_col = idx
+            elif any(k in lab for k in counts_keywords) and counts_col is None:
+                counts_col = idx
+            elif any(k in lab for k in error_keywords) and error_col is None:
+                error_col = idx
+
+        # Fallback positional mapping
+        if energy_col is None:
+            energy_col = 0
+        if counts_col is None:
+            counts_col = 1 if df.shape[1] > 1 else 0
+        if error_col is None and df.shape[1] > 2:
+            error_col = 2
+
+        # Extract columns safely (coerce to numeric)
+        def col_to_array(index):
+            if index is None or index >= df.shape[1]:
+                return None
+            return pd.to_numeric(df.iloc[:, index], errors="coerce").to_numpy(dtype=float)
+
+        energy = col_to_array(energy_col)
+        counts = col_to_array(counts_col)
+        errors = col_to_array(error_col) if error_col is not None else None
 
         # If counts or energy contain NaNs, try to drop rows with NaNs
         valid_mask = np.isfinite(energy) & np.isfinite(counts)
