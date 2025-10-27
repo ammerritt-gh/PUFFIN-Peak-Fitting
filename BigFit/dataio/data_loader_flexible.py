@@ -109,6 +109,11 @@ def load_data_from_file(filepath: str):
                 start_idx += 1
 
         # --- Improved header detection ---
+        # keyword sets used for header matching (must be defined before using them)
+        energy_keywords = {"energy", "en", "e", "x", "xaxis", "omega"}
+        counts_keywords = {"counts", "count", "cts", "intensity", "y", "countsmin", "countspermin", "counts/min"}
+        error_keywords = {"error", "err", "sigma", "unc", "uncertainty", "std"}
+
         header_tokens = None
         best_header_score = -1
         for j in range(max(0, start_idx - 5), start_idx):
@@ -170,9 +175,6 @@ def load_data_from_file(filepath: str):
             s = re.sub(r"[/\s\-\_]+", "", s)
             s = re.sub(r"[^a-z0-9]+", "", s)
             return s
-
-        counts_keywords = {"counts", "count", "cts", "intensity", "y", "countsmin", "counts/min", "countspermin", "countsmin"}
-        error_keywords = {"error", "err", "sigma", "unc", "uncertainty", "std"}
 
         col_labels = []
         if header_tokens:

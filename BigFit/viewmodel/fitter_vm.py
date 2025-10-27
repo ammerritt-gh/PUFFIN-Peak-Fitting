@@ -5,6 +5,7 @@ import numpy as np
 from models.model_state import ModelState
 from dataio.data_loader import select_and_load_files
 from dataio.data_saver import save_dataset
+import typing as _typing
 
 
 class FitterViewModel(QObject):
@@ -52,6 +53,57 @@ class FitterViewModel(QObject):
         y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
         save_dataset(self.state.x_data, self.state.y_data, y_fit=y_fit)
         self.log_message.emit("Data saved successfully.")
+
+    # --------------------------
+    # Configuration accessors (ViewModel handles logic/persistence)
+    # --------------------------
+    def get_config(self) -> dict:
+        """Return a minimal dict of configuration values for the view to edit."""
+        try:
+            # lazy import to avoid circular import
+            from dataio import get_config as _get_cfg
+            cfg = _get_cfg()
+            return {
+                "default_load_folder": cfg.default_load_folder,
+                "default_save_folder": cfg.default_save_folder,
+                "config_path": str(cfg.config_path),
+            }
+        except Exception as e:
+            raise RuntimeError(f"Unable to read configuration: {e}") from e
+
+    def save_config(self, default_load_folder: _typing.Optional[str] = None, default_save_folder: _typing.Optional[str] = None) -> bool:
+        """Save provided configuration fields to disk. Returns True on success."""
+        try:
+            from dataio import get_config as _get_cfg
+            # get singleton, update fields, save
+            cfg = _get_cfg()
+            if default_load_folder is not None:
+                cfg.default_load_folder = str(default_load_folder)
+            if default_save_folder is not None:
+                cfg.default_save_folder = str(default_save_folder)
+            cfg.save()
+            # force reload of singleton so other callers see changes
+            _get_cfg(recreate=True)
+            self.log_message.emit("Configuration saved.")
+            return True
+        except Exception as e:
+            self.log_message.emit(f"Failed to save configuration: {e}")
+            return False
+
+    def reload_config(self):
+        """Reload the project's configuration from disk and notify UI."""
+        try:
+            # import here to avoid circular import at module import time
+            from dataio import get_config
+            cfg = get_config(recreate=True)
+            self.log_message.emit(f"Config reloaded from: {cfg.config_path}")
+        except Exception as e:
+            self.log_message.emit(f"Failed to reload config: {e}")
+        # refresh plot in case default folders or parameters changed
+        try:
+            self.update_plot()
+        except Exception:
+            pass
 
     # --------------------------
     # Fit + Plot logic
