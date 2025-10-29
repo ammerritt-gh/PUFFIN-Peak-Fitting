@@ -2,7 +2,8 @@
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QPushButton,
     QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
-    QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog
+    QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog,
+    QScrollArea, QSpinBox, QCheckBox
 )
 from PySide6.QtCore import Qt
 import pyqtgraph as pg
@@ -21,6 +22,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("PUMA Peak Fitter")
         self.viewmodel = viewmodel
+        self.param_widgets = {}   # name -> widget
 
         # --- Central Plot ---
         self.plot_widget = pg.PlotWidget(title="Data and Fit")
@@ -29,8 +31,9 @@ class MainWindow(QMainWindow):
 
         # --- Docks ---
         self._init_left_dock()
-        self._init_right_dock()
+        # create the bottom (log) dock before the right dock so logging is available
         self._init_bottom_dock()
+        self._init_right_dock()
 
         for dock in [self.left_dock, self.right_dock, self.bottom_dock]:
             dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -104,37 +107,70 @@ class MainWindow(QMainWindow):
             config_btn.clicked.connect(self._on_edit_config_clicked)
 
     def _init_right_dock(self):
+        # Replaced static parameter controls with a dynamic, scrollable form.
         self.right_dock = QDockWidget("Parameters", self)
-        param_widget = QWidget()
-        layout = QFormLayout(param_widget)
+        container = QWidget()
+        vlayout = QVBoxLayout(container)
 
-        self.gauss_spin = QDoubleSpinBox()
-        self.gauss_spin.setRange(0.01, 10.0)
-        self.gauss_spin.setValue(1.14)
-        layout.addRow("Gaussian FWHM:", self.gauss_spin)
+        # Model selector placed at the top of the parameters panel
+        self.model_selector = QComboBox()
+        # Provide common model names; viewmodel.get_parameters / get_model_spec will accept these.
+        self.model_selector.addItems(["Voigt", "DHO+Voigt", "Gaussian", "DHO"])
+        vlayout.addWidget(QLabel("Model:"))
+        vlayout.addWidget(self.model_selector)
 
-        self.lorentz_spin = QDoubleSpinBox()
-        self.lorentz_spin.setRange(0.01, 10.0)
-        self.lorentz_spin.setValue(0.28)
-        layout.addRow("Lorentzian FWHM:", self.lorentz_spin)
+        # set initial selection from viewmodel/state if available
+        try:
+            if self.viewmodel:
+                initial = getattr(self.viewmodel.state, "model_name", None)
+                if initial:
+                    idx = self.model_selector.findText(str(initial), Qt.MatchFixedString)
+                    if idx >= 0:
+                        self.model_selector.setCurrentIndex(idx)
+        except Exception:
+            pass
 
-        self.temp_spin = QDoubleSpinBox()
-        self.temp_spin.setRange(0.1, 500.0)
-        self.temp_spin.setValue(10.0)
-        layout.addRow("Temperature (K):", self.temp_spin)
+        # when user changes model, instruct viewmodel and refresh the parameter panel
+        def _on_model_selected(idx):
+            name = self.model_selector.currentText()
+            try:
+                if self.viewmodel and hasattr(self.viewmodel, "set_model"):
+                    self.viewmodel.set_model(name)
+                # refresh UI parameters for the selected model
+                self._refresh_parameters()
+            except Exception as e:
+                self.append_log(f"Failed to switch model: {e}")
 
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(["Voigt", "DHO+Voigt", "Gaussian"])
-        layout.addRow("Model:", self.model_combo)
+        self.model_selector.currentIndexChanged.connect(_on_model_selected)
 
+        # Scrollable area to hold the form (so many parameters fit)
+        self.param_scroll = QScrollArea()
+        self.param_scroll.setWidgetResizable(True)
+
+        # initial empty form widget (will be replaced by _populate_parameters)
+        self.param_form_widget = QWidget()
+        self.param_form = QFormLayout(self.param_form_widget)
+        self.param_scroll.setWidget(self.param_form_widget)
+
+        vlayout.addWidget(self.param_scroll)
+
+        # Apply + Refresh buttons
+        btn_h = QHBoxLayout()
         apply_btn = QPushButton("Apply")
-        layout.addRow(apply_btn)
+        refresh_btn = QPushButton("Refresh")
+        btn_h.addWidget(apply_btn)
+        btn_h.addWidget(refresh_btn)
+        vlayout.addLayout(btn_h)
 
-        self.right_dock.setWidget(param_widget)
+        self.right_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.right_dock)
 
+        # Connect to ViewModel (if present)
         if self.viewmodel:
             apply_btn.clicked.connect(self._on_apply_clicked)
+            refresh_btn.clicked.connect(self._refresh_parameters)
+            # initial populate
+            self._refresh_parameters()
 
     def _init_bottom_dock(self):
         self.bottom_dock = QDockWidget("Log", self)
@@ -148,7 +184,18 @@ class MainWindow(QMainWindow):
     # View-only public methods
     # --------------------------
     def append_log(self, msg: str):
-        self.log_text.append(msg)
+        # Safely append to the log widget if present; otherwise fall back to stdout.
+        try:
+            if hasattr(self, "log_text") and self.log_text is not None:
+                self.log_text.append(msg)
+            else:
+                print(msg)
+        except Exception:
+            # avoid raising from logging
+            try:
+                print(msg)
+            except Exception:
+                pass
 
     def update_plot_data(self, x, y_data, y_fit=None, y_err=None):
         # Draw scatter points
@@ -184,11 +231,168 @@ class MainWindow(QMainWindow):
     def _on_apply_clicked(self):
         if not self.viewmodel:
             return
-        self.viewmodel.apply_parameters(
-            gauss=self.gauss_spin.value(),
-            lorentz=self.lorentz_spin.value(),
-            temp=self.temp_spin.value()
-        )
+
+        # Collect values dynamically from widgets into a dict
+        params = {}
+        for name, widget in self.param_widgets.items():
+            try:
+                if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
+                    params[name] = widget.value()
+                elif isinstance(widget, QCheckBox):
+                    params[name] = widget.isChecked()
+                elif isinstance(widget, QComboBox):
+                    params[name] = widget.currentText()
+                elif isinstance(widget, QLineEdit):
+                    params[name] = widget.text()
+                else:
+                    # fallback: try to read "value" attribute if a custom widget
+                    params[name] = getattr(widget, "value", lambda: None)()
+            except Exception:
+                params[name] = None
+
+        # Send params dict to ViewModel; ViewModel handles validation/usage
+        try:
+            # ViewModel.apply_parameters should accept a dict of {name: value}
+            self.viewmodel.apply_parameters(params)
+            self.append_log("Parameters applied.")
+        except Exception as e:
+            self.append_log(f"Failed to apply parameters: {e}")
+
+    # --------------------------
+    # Dynamic parameter helpers
+    # --------------------------
+    def _refresh_parameters(self):
+        """Ask the ViewModel for parameter specs and rebuild the form."""
+        if not self.viewmodel:
+            return
+        try:
+            specs = getattr(self.viewmodel, "get_parameters", lambda: {})()
+            if specs is None:
+                specs = {}
+            # allow list-like or dict-like returns
+            if isinstance(specs, list):
+                # list of (name, spec) or list of names -> convert to dict
+                converted = {}
+                for item in specs:
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        converted[item[0]] = item[1]
+                    elif isinstance(item, str):
+                        converted[item] = None
+                specs = converted
+            elif not isinstance(specs, dict):
+                # unknown shape — nothing to do
+                specs = {}
+            self._populate_parameters(specs)
+            self.append_log("Parameter panel refreshed.")
+        except Exception as e:
+            self.append_log(f"Failed to refresh parameters: {e}")
+
+    def _populate_parameters(self, specs: dict):
+        """Populate the parameter form from a specs dict.
+
+        Each specs entry may be:
+          name: value                      # infer type from value
+          name: { 'value': v, 'type': 'float'|'int'|'str'|'bool'|'choice',
+                  'min': ..., 'max': ..., 'choices': [...], 'decimals': ..., 'step': ... }
+        Note: 'decimals' controls the number of decimal places shown by the
+        QDoubleSpinBox (display precision). 'step' controls the single-step
+        increment used when the user clicks the up/down arrows.
+        """
+        # Build a fresh form widget and replace the scroll area's widget
+        new_widget = QWidget()
+        new_form = QFormLayout(new_widget)
+        new_param_widgets = {}
+
+        for name, spec in specs.items():
+            # Normalize spec into dict with at least 'value' and 'type'
+            if isinstance(spec, dict):
+                val = spec.get("value")
+                ptype = spec.get("type", None)
+            else:
+                val = spec
+                ptype = None
+
+            # Infer type if not provided
+            if ptype is None:
+                if isinstance(val, bool):
+                    ptype = "bool"
+                elif isinstance(val, int) and not isinstance(val, bool):
+                    ptype = "int"
+                elif isinstance(val, float):
+                    ptype = "float"
+                elif isinstance(val, (list, tuple)):
+                    ptype = "choice"
+                else:
+                    ptype = "str"
+
+            widget = None
+            try:
+                if ptype == "float":
+                    w = QDoubleSpinBox()
+                    # Apply provided min/max if available, otherwise use safe large bounds
+                    w.setRange(spec.get("min", -1e9), spec.get("max", 1e9) if isinstance(spec, dict) else 1e9)
+                    # 'decimals' controls how many decimal places the spinbox displays.
+                    w.setDecimals(spec.get("decimals", 6) if isinstance(spec, dict) else 6)
+                    # 'step' controls the increment when the user clicks arrows or presses keys
+                    w.setSingleStep(spec.get("step", 0.1) if isinstance(spec, dict) else 0.1)
+                    if val is not None:
+                        w.setValue(float(val))
+                    widget = w
+
+                elif ptype == "int":
+                    w = QSpinBox()
+                    w.setRange(int(spec.get("min", -2147483648)), int(spec.get("max", 2147483647)))
+                    w.setSingleStep(int(spec.get("step", 1)))
+                    if val is not None:
+                        w.setValue(int(val))
+                    widget = w
+
+                elif ptype == "bool":
+                    w = QCheckBox()
+                    w.setChecked(bool(val))
+                    widget = w
+
+                elif ptype == "choice":
+                    w = QComboBox()
+                    choices = []
+                    if isinstance(spec, dict) and "choices" in spec:
+                        choices = spec.get("choices") or []
+                    elif isinstance(val, (list, tuple)):
+                        choices = list(val)
+                    for c in choices:
+                        w.addItem(str(c))
+                    # set current
+                    cur = spec.get("value") if isinstance(spec, dict) else (val[0] if val else "")
+                    if cur is not None:
+                        idx = w.findText(str(cur))
+                        if idx >= 0:
+                            w.setCurrentIndex(idx)
+                    widget = w
+
+                else:  # str and fallback
+                    w = QLineEdit()
+                    if val is not None:
+                        w.setText(str(val))
+                    widget = w
+            except Exception:
+                # on any error, fallback to a simple line edit
+                w = QLineEdit()
+                if val is not None:
+                    w.setText(str(val))
+                widget = w
+
+            new_form.addRow(name + ":", widget)
+            new_param_widgets[name] = widget
+
+        # Replace the widget shown in the scroll area (frees old widgets)
+        self.param_scroll.takeWidget()
+        self.param_scroll.setWidget(new_widget)
+        self.param_form_widget = new_widget
+        self.param_form = new_form
+        self.param_widgets = new_param_widgets
+
+        # No legacy fallbacks: the view exposes only the dynamic param_widgets mapping.
+        # Consumers should read parameters from param_widgets or use the ViewModel API.
 
     # --------------------------
     # Config dialog (view-only)

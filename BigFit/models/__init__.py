@@ -1,4 +1,24 @@
-# model/__init__.py
-from .dho_voigt_model import DhoVoigtComposite
-from .models import Voigt, convolute_voigt_dho
+# models/__init__.py
 
+from .model_specs import (
+    get_model_spec,
+    Parameter,
+    BaseModelSpec,
+    GaussianModelSpec,
+    VoigtModelSpec,
+    DHOModelSpec,
+    DHOVoigtModelSpec,
+)
+
+from .model_state import ModelState
+
+__all__ = [
+    "get_model_spec",
+    "Parameter",
+    "BaseModelSpec",
+    "GaussianModelSpec",
+    "VoigtModelSpec",
+    "DHOModelSpec",
+    "DHOVoigtModelSpec",
+    "ModelState",
+]
