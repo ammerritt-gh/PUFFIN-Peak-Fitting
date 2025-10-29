@@ -315,6 +315,31 @@ class BaseModelSpec:
         # default no-op
         return
 
+    def get_param_values(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Return a plain dict of parameter name -> simple value.
+        If overrides provided, they take precedence."""
+        out = {}
+        for name, p in self.params.items():
+            try:
+                base = getattr(p, "value", None)
+            except Exception:
+                base = None
+            out[name] = base
+        if overrides:
+            for k, v in overrides.items():
+                try:
+                    out[k] = v
+                except Exception:
+                    pass
+        return out
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        """Default evaluation: return zeros. Subclasses may accept optional params dict."""
+        try:
+            return np.zeros_like(np.asarray(x, dtype=float))
+        except Exception:
+            return np.array([])
+
 # Concrete model specs
 class GaussianModelSpec(BaseModelSpec):
     def __init__(self):
@@ -325,6 +350,16 @@ class GaussianModelSpec(BaseModelSpec):
                            hint="Gaussian FWHM", decimals=6, step=0.01))
         self.add(Parameter("Center", value=0.0, ptype="float",
                            hint="Peak center (x-axis)"))
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        try:
+            pvals = self.get_param_values(params)
+            Area = float(pvals.get("Area", 1.0))
+            Width = float(pvals.get("Width", 0.1))
+            Center = float(pvals.get("Center", 0.0))
+            return Gaussian(np.asarray(x, dtype=float), Area=Area, Width=Width, Center=Center)
+        except Exception:
+            return super().evaluate(x, params)
 
 class VoigtModelSpec(BaseModelSpec):
     def __init__(self):
@@ -348,6 +383,17 @@ class VoigtModelSpec(BaseModelSpec):
                 self.params["center"].value = float(arrx[idx])
         except Exception:
             pass
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        try:
+            pvals = self.get_param_values(params)
+            Area = float(pvals.get("Area", 1.0))
+            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
+            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
+            center = float(pvals.get("center", 0.0))
+            return Voigt(np.asarray(x, dtype=float), Area=Area, gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm, center=center)
+        except Exception:
+            return super().evaluate(x, params)
 
 class DHOModelSpec(BaseModelSpec):
     def __init__(self):
@@ -377,6 +423,31 @@ class DHOModelSpec(BaseModelSpec):
         except Exception:
             pass
 
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        """Simple visible DHO-like curve (no instrument convolution here)."""
+        try:
+            arr = np.asarray(x, dtype=float)
+            pvals = self.get_param_values(params)
+            center_spec = float(pvals.get("center", 0.0))
+            phonon_energy = float(pvals.get("phonon_energy", 5.0))
+            damping = float(pvals.get("damping", 0.5))
+            phonon_amp = float(pvals.get("phonon_amplitude", 0.1))
+            elastic_amp = float(pvals.get("elastic_amplitude", 0.0))
+            BG = float(pvals.get("BG", 0.0))
+            T = float(pvals.get("T", 10.0))
+
+            x_shifted = arr - center_spec
+            stokes = Stokes_DHO(x_shifted, amplitude=phonon_amp, damping=damping, center=phonon_energy)
+            try:
+                astokes_amp = phonon_amp / np.exp(phonon_energy / (kB * T))
+            except Exception:
+                astokes_amp = phonon_amp
+            astokes = antiStokes_DHO(x_shifted, amplitude=astokes_amp, damping=damping, center=phonon_energy)
+            elastic = narrow_gaussian_delta(arr, center_spec, amplitude=elastic_amp, fwhm=0.1)
+            return stokes + astokes + elastic + BG
+        except Exception:
+            return super().evaluate(x, params)
+
 class DHOVoigtModelSpec(BaseModelSpec):
     """Composite DHO convolved with Voigt resolution + elastic Voigt."""
     def __init__(self):
@@ -404,6 +475,28 @@ class DHOVoigtModelSpec(BaseModelSpec):
                 self.params["center"].value = float(arrx[idx])
         except Exception:
             pass
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        """Use the convolute_voigt_dho helper to produce a visible, realistic line."""
+        try:
+            arr = np.asarray(x, dtype=float)
+            pvals = self.get_param_values(params)
+            phonon_energy = float(pvals.get("phonon_energy", 5.0))
+            damping = float(pvals.get("damping", 0.5))
+            phonon_amplitude = float(pvals.get("phonon_amplitude", 0.1))
+            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
+            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
+            elastic_amplitude = float(pvals.get("elastic_amplitude", 0.0))
+            BG = float(pvals.get("BG", 0.0))
+            T = float(pvals.get("T", 10.0))
+            center = float(pvals.get("center", 0.0))
+
+            return convolute_voigt_dho(arr, phonon_energy=phonon_energy, center=center,
+                                       gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm,
+                                       damping=damping, phonon_amplitude=phonon_amplitude,
+                                       elastic_amplitude=elastic_amplitude, BG=BG, T=T, peak='all')
+        except Exception:
+            return super().evaluate(x, params)
 
 # Factory / helper
 def get_model_spec(model_name: str) -> BaseModelSpec:
