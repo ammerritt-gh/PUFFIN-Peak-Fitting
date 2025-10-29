@@ -16,6 +16,7 @@ class FitterViewModel(QObject):
 
     plot_updated = Signal(object, object, object, object)  # x, y_data, y_fit, y_err
     log_message = Signal(str)
+    parameters_updated = Signal()
 
     def __init__(self, model_state=None):
         super().__init__()
@@ -186,6 +187,38 @@ class FitterViewModel(QObject):
                 if result is not None:
                     # store fit result on state and update plot
                     self.state.fit_result = result
+
+                    # Apply fit result back into model_spec.params where possible so UI will reflect fitted values
+                    try:
+                        spec = getattr(self.state, "model_spec", None)
+                        if spec is not None and hasattr(spec, "params"):
+                            for k, v in result.items():
+                                if k in spec.params:
+                                    try:
+                                        spec.params[k].value = v
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
+                    # Also set attributes on any concrete model object for consistency
+                    try:
+                        mdl = getattr(self.state, "model", None)
+                        if mdl is not None:
+                            for k, v in result.items():
+                                try:
+                                    setattr(mdl, k, v)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                    # Notify views that parameters changed so UI can refresh widgets
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
+
                     self.plot_updated.emit(x, y, y_fit, err)
                     self.log_message.emit("Fit completed successfully.")
                 else:
