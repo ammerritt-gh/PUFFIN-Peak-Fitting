@@ -5,9 +5,10 @@ from PySide6.QtWidgets import (
     QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog,
     QScrollArea, QSpinBox, QCheckBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 import pyqtgraph as pg
 import numpy as np
+from .input_handler import InputHandler
 
 # -- color palette (change these) --
 PLOT_BG = "white"       # plot background
@@ -18,6 +19,9 @@ AXIS_COLOR = "black"    # axis and tick labels
 GRID_ALPHA = 0.5
 
 class MainWindow(QMainWindow):
+    # Signal emitted when parameters are updated (for reconnecting signals)
+    parameters_updated = Signal()
+    
     def __init__(self, viewmodel=None):
         super().__init__()
         self.setWindowTitle("PUMA Peak Fitter")
@@ -28,6 +32,10 @@ class MainWindow(QMainWindow):
         self.plot_widget = pg.PlotWidget(title="Data and Fit")
         self.setCentralWidget(self.plot_widget)
         self._init_plot()
+        
+        # --- Input Handler ---
+        self.input_handler = InputHandler(self.plot_widget)
+        self._connect_input_handler()
 
         # --- Docks ---
         self._init_left_dock()
@@ -471,3 +479,122 @@ class MainWindow(QMainWindow):
                     self.append_log("Configuration save failed.")
             except Exception as e:
                 self.append_log(f"Error saving configuration: {e}")
+    
+    # --------------------------
+    # Input Handler Integration
+    # --------------------------
+    def _connect_input_handler(self):
+        """Connect input_handler signals to view methods."""
+        if not hasattr(self, 'input_handler') or self.input_handler is None:
+            return
+        
+        try:
+            # Connect mouse events
+            self.input_handler.mouse_clicked.connect(self._on_plot_clicked)
+            self.input_handler.mouse_moved.connect(self._on_plot_mouse_moved)
+            
+            # Connect keyboard events
+            self.input_handler.key_pressed.connect(self._on_plot_key_pressed)
+            
+            # Connect wheel events
+            self.input_handler.wheel_scrolled.connect(self._on_plot_wheel_scrolled)
+            
+            self.append_log("Input handler connected successfully.")
+        except Exception as e:
+            self.append_log(f"Failed to connect input handler: {e}")
+    
+    def _on_plot_clicked(self, x, y, button):
+        """
+        Handle plot click events.
+        
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space  
+            button: Mouse button used
+        """
+        try:
+            # Log the click for now - can be extended for interactive features
+            self.append_log(f"Plot clicked at ({x:.2f}, {y:.2f})")
+            
+            # Notify viewmodel if it has a handler
+            if self.viewmodel and hasattr(self.viewmodel, 'handle_plot_click'):
+                self.viewmodel.handle_plot_click(x, y, button)
+        except Exception as e:
+            self.append_log(f"Error handling plot click: {e}")
+    
+    def _on_plot_mouse_moved(self, x, y):
+        """
+        Handle plot mouse move events.
+        
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space
+        """
+        # Can be used for live cursor position display or dragging operations
+        # For now, just pass to viewmodel if it has a handler
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, 'handle_plot_mouse_move'):
+                self.viewmodel.handle_plot_mouse_move(x, y)
+        except Exception:
+            pass
+    
+    def _on_plot_key_pressed(self, key, modifiers):
+        """
+        Handle keyboard events on the plot.
+        
+        Args:
+            key: Qt key code
+            modifiers: Qt keyboard modifiers
+        """
+        try:
+            # Handle common shortcuts
+            if key == Qt.Key_R:
+                # Reset view
+                self.append_log("Reset view (R key)")
+                try:
+                    self.plot_widget.getViewBox().autoRange()
+                except Exception:
+                    pass
+            elif key == Qt.Key_Space:
+                # Clear selection or refresh
+                self.append_log("Space key pressed")
+                if self.viewmodel and hasattr(self.viewmodel, 'handle_key_press'):
+                    self.viewmodel.handle_key_press(key, modifiers)
+            else:
+                # Pass other keys to viewmodel
+                if self.viewmodel and hasattr(self.viewmodel, 'handle_key_press'):
+                    self.viewmodel.handle_key_press(key, modifiers)
+        except Exception as e:
+            self.append_log(f"Error handling key press: {e}")
+    
+    def _on_plot_wheel_scrolled(self, delta, modifiers):
+        """
+        Handle mouse wheel events on the plot.
+        
+        Args:
+            delta: Wheel delta (positive = up, negative = down)
+            modifiers: Qt keyboard modifiers
+        """
+        try:
+            # Determine if modifiers are pressed
+            is_ctrl = bool(modifiers & Qt.ControlModifier)
+            is_shift = bool(modifiers & Qt.ShiftModifier)
+            is_alt = bool(modifiers & Qt.AltModifier)
+            
+            # Log for debugging
+            mods_str = []
+            if is_ctrl:
+                mods_str.append("Ctrl")
+            if is_shift:
+                mods_str.append("Shift")
+            if is_alt:
+                mods_str.append("Alt")
+            mods_text = "+".join(mods_str) if mods_str else "None"
+            
+            self.append_log(f"Wheel scrolled: delta={delta}, modifiers={mods_text}")
+            
+            # Pass to viewmodel for parameter adjustments
+            if self.viewmodel and hasattr(self.viewmodel, 'handle_wheel_scroll'):
+                self.viewmodel.handle_wheel_scroll(delta, modifiers)
+        except Exception as e:
+            self.append_log(f"Error handling wheel scroll: {e}")

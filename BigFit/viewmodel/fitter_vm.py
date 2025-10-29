@@ -353,3 +353,121 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+    
+    # --------------------------
+    # Input event handlers (integrated from PySide_Fitter_PyQtGraph.py patterns)
+    # --------------------------
+    def handle_plot_click(self, x, y, button):
+        """
+        Handle plot click events from the view.
+        
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space
+            button: Mouse button used
+        """
+        try:
+            self.log_message.emit(f"Plot clicked at data coords: ({x:.3f}, {y:.3f})")
+            # Future: Add logic for selecting/manipulating peaks or markers
+            # For now, just log the event
+        except Exception as e:
+            self.log_message.emit(f"Error in handle_plot_click: {e}")
+    
+    def handle_plot_mouse_move(self, x, y):
+        """
+        Handle plot mouse move events from the view.
+        
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space
+        """
+        # Can be used for live cursor tracking or dragging operations
+        # Keep silent to avoid log spam
+        pass
+    
+    def handle_key_press(self, key, modifiers):
+        """
+        Handle keyboard events from the plot.
+        
+        Args:
+            key: Qt key code
+            modifiers: Qt keyboard modifiers
+        """
+        try:
+            from PySide6.QtCore import Qt
+            
+            # Handle specific keys
+            if key == Qt.Key_Space:
+                self.log_message.emit("Space key: Clear selection")
+                # Future: Clear any active selections
+            elif key == Qt.Key_F:
+                # Example: Trigger fit
+                self.log_message.emit("F key: Run fit")
+                try:
+                    self.run_fit()
+                except Exception as e:
+                    self.log_message.emit(f"Fit failed: {e}")
+            elif key == Qt.Key_U:
+                # Example: Update plot
+                self.log_message.emit("U key: Update plot")
+                try:
+                    self.update_plot()
+                except Exception:
+                    pass
+            # Add more key handlers as needed
+                
+        except Exception as e:
+            self.log_message.emit(f"Error in handle_key_press: {e}")
+    
+    def handle_wheel_scroll(self, delta, modifiers):
+        """
+        Handle mouse wheel scroll events with keyboard modifiers.
+        
+        Can be used to adjust parameters interactively.
+        
+        Args:
+            delta: Wheel delta (positive = scroll up)
+            modifiers: Qt keyboard modifiers
+        """
+        try:
+            from PySide6.QtCore import Qt
+            
+            is_ctrl = bool(modifiers & Qt.ControlModifier)
+            is_shift = bool(modifiers & Qt.ShiftModifier)
+            is_alt = bool(modifiers & Qt.AltModifier)
+            
+            # Determine scroll direction
+            step = 1 if delta > 0 else -1
+            
+            # Example: Use Ctrl+Wheel to adjust a parameter
+            if is_ctrl and not is_shift and not is_alt:
+                # Adjust first parameter (if any)
+                try:
+                    specs = self.get_parameters()
+                    if specs:
+                        # Get first parameter name
+                        param_name = next(iter(specs.keys()))
+                        spec = specs[param_name]
+                        
+                        # Get current value
+                        if isinstance(spec, dict):
+                            current_val = spec.get('value', 0)
+                        else:
+                            current_val = spec
+                        
+                        # Calculate new value (10% step)
+                        if isinstance(current_val, (int, float)):
+                            factor = 1.1 if step > 0 else 0.9
+                            new_val = current_val * factor
+                            
+                            # Apply the parameter change
+                            self.apply_parameters({param_name: new_val})
+                            self.log_message.emit(f"Ctrl+Wheel: Adjusted {param_name} to {new_val:.3f}")
+                except Exception as e:
+                    self.log_message.emit(f"Could not adjust parameter: {e}")
+            
+            # Future: Add more modifier combinations for different parameters
+            # e.g., Shift+Wheel, Alt+Wheel, etc.
+                
+        except Exception as e:
+            self.log_message.emit(f"Error in handle_wheel_scroll: {e}")
