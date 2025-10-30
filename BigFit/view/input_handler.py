@@ -15,13 +15,13 @@ class InputHandler(QObject):
     
     Signals:
         mouse_clicked: Emitted when plot is clicked with (x, y, button)
-        mouse_moved: Emitted when mouse moves with (x, y) in data coordinates
+        mouse_moved: Emitted when mouse moves with (x, y, buttons) in data coordinates
         key_pressed: Emitted when key is pressed with (key_code, modifiers)
         wheel_scrolled: Emitted when wheel scrolled with (delta, modifiers)
     """
     
     mouse_clicked = Signal(float, float, object)  # x, y, button
-    mouse_moved = Signal(float, float)  # x, y in data coordinates
+    mouse_moved = Signal(float, float, object)  # x, y in data coordinates, buttons
     key_pressed = Signal(int, object)  # key code, modifiers
     wheel_scrolled = Signal(int, object)  # delta, modifiers
     
@@ -99,8 +99,17 @@ class InputHandler(QObject):
             x = float(mousePoint.x())
             y = float(mousePoint.y())
             
-            # Emit signal
-            self.mouse_moved.emit(x, y)
+            # Determine button state if available on the event
+            buttons = 0
+            try:
+                # QGraphicsSceneMouseEvent has buttons()
+                if hasattr(event, "buttons"):
+                    buttons = event.buttons()
+            except Exception:
+                buttons = 0
+            
+            # Emit signal (x, y, buttons)
+            self.mouse_moved.emit(x, y, buttons)
             
         except Exception as e:
             print(f"Mouse move error: {e}")
@@ -140,10 +149,6 @@ class InputHandler(QObject):
                 
                 # Emit signal
                 self.wheel_scrolled.emit(delta, modifiers)
-                
-                # Check if we should handle it (block default zoom behavior)
-                # Return True to block, False to allow default
-                # For now, let the handler decide via signal
                 
         except Exception as e:
             print(f"Event filter error: {e}")
