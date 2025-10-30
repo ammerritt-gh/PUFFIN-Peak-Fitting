@@ -301,7 +301,7 @@ class MainWindow(QMainWindow):
         Each specs entry may be:
           name: value                      # infer type from value
           name: { 'value': v, 'type': 'float'|'int'|'str'|'bool'|'choice',
-                  'min': ..., 'max': ..., 'choices': [...], 'decimals': ..., 'step': ... }
+                  'min': ..., 'max': ..., 'choices': [...], 'decimals': ..., 'step': ..., 'input': ..., 'hint': ... }
         Note: 'decimals' controls the number of decimal places shown by the
         QDoubleSpinBox (display precision). 'step' controls the single-step
         increment used when the user clicks the up/down arrows.
@@ -382,15 +382,79 @@ class MainWindow(QMainWindow):
                     if val is not None:
                         w.setText(str(val))
                     widget = w
+
+                # Attach hints/tooltip
+                input_hint = None
+                if isinstance(spec, dict):
+                    input_hint = spec.get("input") or spec.get("input_hint")
+                    help_hint = spec.get("hint")
+                else:
+                    help_hint = None
+
+                # set tooltip from help hint and input hint (string or structured)
+                try:
+                    tt = help_hint or ""
+                    display_hint = ""
+                    if input_hint:
+                        # if structured dict, produce a concise human-readable summary
+                        if isinstance(input_hint, dict):
+                            parts = []
+                            for k, v in input_hint.items():
+                                if k == "wheel":
+                                    mods = ",".join(v.get("modifiers", [])) if isinstance(v, dict) else ""
+                                    parts.append(f"Wheel{(' + ' + mods) if mods else ''}: {v.get('action')}")
+                                elif k == "drag":
+                                    parts.append(f"Drag: {v.get('action')}")
+                                elif k == "hotkey":
+                                    parts.append(f"Hotkey: {v.get('key') if isinstance(v, dict) else str(v)}")
+                                else:
+                                    parts.append(f"{k}: {str(v)}")
+                            display_hint = "; ".join(parts)
+                        else:
+                            display_hint = str(input_hint)
+                        if display_hint:
+                            tt = (tt + "\n" + display_hint).strip()
+                    if tt and widget is not None:
+                        widget.setToolTip(tt)
+                except Exception:
+                    pass
+
+                # If there's an input hint, show a small label beside the control
+                if input_hint:
+                    container = QWidget()
+                    h = QHBoxLayout(container)
+                    h.setContentsMargins(0, 0, 0, 0)
+                    h.addWidget(widget)
+                    # show the display_hint (from above) or a short textual fallback
+                    hint_text = display_hint if 'display_hint' in locals() and display_hint else (str(input_hint) if not isinstance(input_hint, dict) else "interactive")
+                    hint_label = QLabel(hint_text)
+                    hint_label.setToolTip(widget.toolTip() or hint_text)
+                    try:
+                        hint_label.setStyleSheet("color: gray; font-size: 11px;")
+                    except Exception:
+                        pass
+                    h.addWidget(hint_label)
+                    new_form.addRow(name + ":", container)
+                else:
+                    new_form.addRow(name + ":", widget)
+
+                new_param_widgets[name] = widget
+
             except Exception:
                 # on any error, fallback to a simple line edit
                 w = QLineEdit()
                 if val is not None:
                     w.setText(str(val))
-                widget = w
-
-            new_form.addRow(name + ":", widget)
-            new_param_widgets[name] = widget
+                # set tooltip if available
+                try:
+                    if isinstance(spec, dict):
+                        t = spec.get("hint") or spec.get("input") or ""
+                        if t:
+                            w.setToolTip(t)
+                except Exception:
+                    pass
+                new_form.addRow(name + ":", w)
+                new_param_widgets[name] = w
 
         # Replace the widget shown in the scroll area (frees old widgets)
         self.param_scroll.takeWidget()
@@ -398,9 +462,6 @@ class MainWindow(QMainWindow):
         self.param_form_widget = new_widget
         self.param_form = new_form
         self.param_widgets = new_param_widgets
-
-        # No legacy fallbacks: the view exposes only the dynamic param_widgets mapping.
-        # Consumers should read parameters from param_widgets or use the ViewModel API.
 
     # --------------------------
     # Config dialog (view-only)
@@ -513,59 +574,214 @@ class MainWindow(QMainWindow):
             button: Mouse button used
         """
         try:
-            # Log the click for now - can be extended for interactive features
+            # Log the click
             self.append_log(f"Plot clicked at ({x:.2f}, {y:.2f})")
-            
-            # Notify viewmodel if it has a handler
+
+            # Try to select a parameter near the click if viewmodel is present.
+            # If selection succeeds we enter selection mode; otherwise clear any selection.
+            try:
+                picked = False
+                if self.viewmodel:
+                    picked = self._try_select_param(x, y, button)
+                if not picked:
+                    # clicking away clears selection and falls back to normal behavior
+                    self._clear_selection()
+            except Exception:
+                pass
+
+            # Notify viewmodel of the click as well (viewmodel may need it)
             if self.viewmodel and hasattr(self.viewmodel, 'handle_plot_click'):
                 self.viewmodel.handle_plot_click(x, y, button)
         except Exception as e:
             self.append_log(f"Error handling plot click: {e}")
-    
-    def _on_plot_mouse_moved(self, x, y):
+
+    def _try_select_param(self, x, y, button):
+        """Attempt to select a parameter for interactive input.
+
+        Selection criteria:
+          - parameter spec must include a 'drag' input action
+          - parameter must have a numeric 'value' to compare against click x
+          - click must be within a threshold of the parameter value (threshold ~ 2% of x-range)
+
+        Returns True if selection started; False otherwise.
         """
-        Handle plot mouse move events.
-        
-        Args:
-            x: X coordinate in data space
-            y: Y coordinate in data space
-        """
-        # Can be used for live cursor position display or dragging operations
-        # For now, just pass to viewmodel if it has a handler
+        if not self.viewmodel:
+            return False
         try:
-            if self.viewmodel and hasattr(self.viewmodel, 'handle_plot_mouse_move'):
-                self.viewmodel.handle_plot_mouse_move(x, y)
+            specs = getattr(self.viewmodel, "get_parameters", lambda: {})() or {}
+            # compute x-range from data if available
+            xdata = getattr(self.viewmodel.state, "x_data", None)
+            try:
+                if xdata is not None and len(xdata) >= 2:
+                    xr = float(np.max(xdata) - np.min(xdata))
+                else:
+                    xr = 1.0
+            except Exception:
+                xr = 1.0
+            # threshold: 2% of x-range or a small absolute lower bound
+            threshold = max(0.02 * xr, 1e-3)
+
+            closest = None
+            best_dist = None
+            for pname, pspec in specs.items():
+                try:
+                    if not isinstance(pspec, dict):
+                        continue
+                    inp = pspec.get("input") or pspec.get("input_hint")
+                    if not inp or not isinstance(inp, dict):
+                        continue
+                    # only consider parameters that declare 'drag'
+                    if "drag" not in inp:
+                        continue
+                    val = pspec.get("value")
+                    if val is None:
+                        continue
+                    # must be numeric
+                    try:
+                        vnum = float(val)
+                    except Exception:
+                        continue
+                    dist = abs(float(x) - vnum)
+                    if dist <= threshold and (best_dist is None or dist < best_dist):
+                        best_dist = dist
+                        closest = pname
+                except Exception:
+                    continue
+
+            if closest is None:
+                return False
+
+            # Ask ViewModel to begin selection for this parameter
+            try:
+                started = False
+                if hasattr(self.viewmodel, "begin_selection"):
+                    started = self.viewmodel.begin_selection(closest, x, y)
+                if not started:
+                    # As fallback, set a simple interactive drag flag in viewmodel state
+                    try:
+                        self.viewmodel.state._selected_param = closest
+                        self.viewmodel.state._interactive_drag_info = {"handlers": [], "last_x": float(x), "last_y": float(y)}
+                        started = True
+                    except Exception:
+                        started = False
+                if started:
+                    self._set_selection_active(closest)
+                    return True
+            except Exception:
+                pass
         except Exception:
             pass
-    
+        return False
+
+    def _set_selection_active(self, pname):
+        """Mark UI as in selection mode for a parameter and disable ViewBox mouse interactions."""
+        try:
+            self.append_log(f"Selected parameter for interactive input: {pname}")
+            try:
+                vb = self.plot_widget.getViewBox()
+                if vb is not None:
+                    # disable mouse panning/zooming so drag/wheel go to parameter control
+                    vb.setMouseEnabled(False, False)
+                    # optionally change cursor (kept simple)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _clear_selection(self):
+        """Clear interactive selection and restore normal UI (panning/zoom enabled)."""
+        try:
+            # instruct viewmodel to end selection if it has such API
+            try:
+                if self.viewmodel and hasattr(self.viewmodel, "end_selection"):
+                    self.viewmodel.end_selection()
+                else:
+                    # clear any state flags if fallback used
+                    if self.viewmodel:
+                        try:
+                            if hasattr(self.viewmodel.state, "_selected_param"):
+                                delattr(self.viewmodel.state, "_selected_param")
+                        except Exception:
+                            try:
+                                setattr(self.viewmodel.state, "_selected_param", None)
+                            except Exception:
+                                pass
+                            pass
+                        try:
+                            if hasattr(self.viewmodel.state, "_interactive_drag_info"):
+                                delattr(self.viewmodel.state, "_interactive_drag_info")
+                        except Exception:
+                            try:
+                                setattr(self.viewmodel.state, "_interactive_drag_info", None)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # re-enable viewbox interactions
+            try:
+                vb = self.plot_widget.getViewBox()
+                if vb is not None:
+                    vb.setMouseEnabled(True, True)
+            except Exception:
+                pass
+
+            self.append_log("Selection cleared. UI interactions restored.")
+        except Exception:
+            pass
+
     def _on_plot_key_pressed(self, key, modifiers):
         """
         Handle keyboard events on the plot.
-        
-        Args:
-            key: Qt key code
-            modifiers: Qt keyboard modifiers
+
+        Reserve Space to clear selection and restore UI.
         """
         try:
-            # Handle common shortcuts
+            # Space = deselect / revert to normal UI
+            if key == Qt.Key_Space:
+                self._clear_selection()
+                # also forward a simple message to viewmodel if desired
+                try:
+                    if self.viewmodel and hasattr(self.viewmodel, "handle_key_press"):
+                        self.viewmodel.handle_key_press(key, modifiers)
+                except Exception:
+                    pass
+                return
+
+            # other keys: same as before
             if key == Qt.Key_R:
-                # Reset view
                 self.append_log("Reset view (R key)")
                 try:
                     self.plot_widget.getViewBox().autoRange()
                 except Exception:
                     pass
-            elif key == Qt.Key_Space:
-                # Clear selection or refresh
-                self.append_log("Space key pressed")
-                if self.viewmodel and hasattr(self.viewmodel, 'handle_key_press'):
-                    self.viewmodel.handle_key_press(key, modifiers)
             else:
-                # Pass other keys to viewmodel
                 if self.viewmodel and hasattr(self.viewmodel, 'handle_key_press'):
                     self.viewmodel.handle_key_press(key, modifiers)
         except Exception as e:
             self.append_log(f"Error handling key press: {e}")
+    
+    def _on_plot_mouse_moved(self, x, y, buttons=None):
+        """
+        Handle plot mouse move events.
+
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space
+            buttons: mouse button state (optional)
+        """
+        # Can be used for live cursor position display or dragging operations
+        # For now, pass to viewmodel if it has a handler (include buttons)
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, 'handle_plot_mouse_move'):
+                # Some existing code paths may expect two args — call defensively
+                try:
+                    self.viewmodel.handle_plot_mouse_move(x, y, buttons)
+                except TypeError:
+                    # fallback to prior signature
+                    self.viewmodel.handle_plot_mouse_move(x, y)
+        except Exception:
+            pass
     
     def _on_plot_wheel_scrolled(self, delta, modifiers):
         """
