@@ -35,6 +35,12 @@ class MainWindow(QMainWindow):
         self.auto_apply_debounce_ms = 0
         # whether auto-apply is enabled (can add UI toggle later)
         self.auto_apply_enabled = True
+        # Last plotted arrays (x, y, y_fit) for selection logic
+        self._last_plot_arrays = (None, None, None)
+        # selected curve id/name (e.g., 'fit' or 'data')
+        self._selected_curve = None
+        # store original pen/visuals for curves so we can restore them
+        self._curve_original_opts = {}
 
         # --- Central Plot ---
         self.plot_widget = pg.PlotWidget(title="Data and Fit")
@@ -248,7 +254,14 @@ class MainWindow(QMainWindow):
             yfit_arr = np.asarray(y_fit, dtype=float)
             self.fit_curve.setData(x_arr, yfit_arr)
         else:
+            yfit_arr = None
             self.fit_curve.clear()
+
+        # store last plotted arrays for selection logic
+        try:
+            self._last_plot_arrays = (x_arr, y_arr, yfit_arr)
+        except Exception:
+            self._last_plot_arrays = (None, None, None)
 
     def _on_apply_clicked(self):
         if not self.viewmodel:
@@ -691,15 +704,43 @@ class MainWindow(QMainWindow):
             # Log the click
             self.append_log(f"Plot clicked at ({x:.2f}, {y:.2f})")
 
-            # Try to select a parameter near the click if viewmodel is present.
+            # First, try to select a plotted curve near the click (fit/data)
+            try:
+                picked_curve = False
+                try:
+                    picked_curve = self._try_select_curve(x, y)
+                except Exception:
+                    picked_curve = False
+                if picked_curve:
+                    return
+            except Exception:
+                pass
+
+            # If no curve selected, try to select a parameter near the click if viewmodel is present.
             # If selection succeeds we enter selection mode; otherwise clear any selection.
             try:
                 picked = False
                 if self.viewmodel:
                     picked = self._try_select_param(x, y, button)
-                if not picked:
-                    # clicking away clears selection and falls back to normal behavior
-                    self._clear_selection()
+                if picked:
+                    # if a curve was previously selected, clear its highlight
+                    try:
+                        if getattr(self, '_selected_curve', None) is not None:
+                            try:
+                                self._highlight_curve(self._selected_curve, False)
+                            except Exception:
+                                pass
+                            self._selected_curve = None
+                    except Exception:
+                        pass
+                else:
+                    # clicking away: only clear selection if no curve is currently selected.
+                    # (Requirement: clicking empty space should NOT deselect a curve.)
+                    if getattr(self, '_selected_curve', None) is None:
+                        try:
+                            self._clear_selection()
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
@@ -787,10 +828,126 @@ class MainWindow(QMainWindow):
             pass
         return False
 
+    def _try_select_curve(self, x, y):
+        """Attempt to select a plotted curve (fit line or data scatter) near (x,y).
+        Returns True if a curve was selected.
+        """
+        try:
+            x_arr, y_arr, yfit_arr = getattr(self, "_last_plot_arrays", (None, None, None))
+            # prefer fit curve if present
+            if yfit_arr is not None and x_arr is not None and len(x_arr) >= 2:
+                try:
+                    # nearest index in x
+                    idx = int(np.argmin(np.abs(x_arr - float(x))))
+                    fit_y = float(yfit_arr[idx])
+                    # compute a threshold from y-range
+                    try:
+                        yr = float(np.nanmax(y_arr) - np.nanmin(y_arr))
+                    except Exception:
+                        yr = max(abs(fit_y), 1.0)
+                    threshold = max(0.02 * yr, 1e-6)
+                    if abs(float(y) - fit_y) <= threshold:
+                        # select fit curve
+                        self._selected_curve = 'fit'
+                        # highlight selection
+                        try:
+                            self._highlight_curve('fit', True)
+                        except Exception:
+                            pass
+                        self._set_selection_active('fit')
+                        return True
+                except Exception:
+                    pass
+
+            # fallback: check scatter nearest point (Euclidean)
+            if y_arr is not None and x_arr is not None and len(x_arr) >= 1:
+                try:
+                    idx = int(np.argmin(np.abs(x_arr - float(x))))
+                    dx = float(x) - float(x_arr[idx])
+                    dy = float(y) - float(y_arr[idx])
+                    # use combined scale based on data ranges
+                    try:
+                        xr = float(np.nanmax(x_arr) - np.nanmin(x_arr))
+                        yr = float(np.nanmax(y_arr) - np.nanmin(y_arr))
+                    except Exception:
+                        xr = yr = 1.0
+                    # scaled distance
+                    dist = np.hypot(dx / max(xr, 1e-9), dy / max(yr, 1e-9))
+                    if dist <= 0.02:
+                        self._selected_curve = 'data'
+                        try:
+                            self._highlight_curve('data', True)
+                        except Exception:
+                            pass
+                        self._set_selection_active('data')
+                        return True
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+        return False
+
+    def _highlight_curve(self, name, enable=True):
+        """Visually highlight or un-highlight a named curve ('fit' or 'data')."""
+        try:
+            if name == 'fit':
+                item = getattr(self, 'fit_curve', None)
+                if item is None:
+                    return
+                # store original pen
+                try:
+                    if 'fit' not in self._curve_original_opts:
+                        self._curve_original_opts['fit'] = {'pen': item.opts.get('pen') if hasattr(item, 'opts') else None}
+                except Exception:
+                    pass
+                if enable:
+                    try:
+                        item.setPen(pg.mkPen('blue', width=4))
+                    except Exception:
+                        pass
+                else:
+                    # restore
+                    try:
+                        orig = self._curve_original_opts.get('fit', {}).get('pen')
+                        if orig is not None:
+                            item.setPen(orig)
+                        else:
+                            item.setPen(pg.mkPen(FIT_COLOR, width=2))
+                    except Exception:
+                        pass
+
+            elif name == 'data':
+                item = getattr(self, 'scatter', None)
+                if item is None:
+                    return
+                try:
+                    if 'data' not in self._curve_original_opts:
+                        self._curve_original_opts['data'] = {'size': getattr(item, 'size', None)}
+                except Exception:
+                    pass
+                if enable:
+                    try:
+                        # increase point size to indicate selection
+                        item.setSize(10)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        orig = self._curve_original_opts.get('data', {}).get('size')
+                        if orig is not None:
+                            item.setSize(orig)
+                        else:
+                            item.setSize(6)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _set_selection_active(self, pname):
         """Mark UI as in selection mode for a parameter and disable ViewBox mouse interactions."""
         try:
-            self.append_log(f"Selected parameter for interactive input: {pname}")
+            self.append_log(f"Selected: {pname}")
             try:
                 vb = self.plot_widget.getViewBox()
                 if vb is not None:
@@ -837,6 +994,17 @@ class MainWindow(QMainWindow):
                 vb = self.plot_widget.getViewBox()
                 if vb is not None:
                     vb.setMouseEnabled(True, True)
+            except Exception:
+                pass
+
+            # if a curve was selected, remove highlighting
+            try:
+                if getattr(self, '_selected_curve', None) is not None:
+                    try:
+                        self._highlight_curve(self._selected_curve, False)
+                    except Exception:
+                        pass
+                    self._selected_curve = None
             except Exception:
                 pass
 
