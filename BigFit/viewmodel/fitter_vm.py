@@ -16,6 +16,7 @@ class FitterViewModel(QObject):
 
     plot_updated = Signal(object, object, object, object)  # x, y_data, y_fit, y_err
     log_message = Signal(str)
+    parameters_updated = Signal()
 
     def __init__(self, model_state=None):
         super().__init__()
@@ -112,12 +113,128 @@ class FitterViewModel(QObject):
     # Fit + Plot logic
     # --------------------------
     def run_fit(self):
-        """Placeholder for fitting routine."""
-        y_fit = self.state.evaluate()
-        errs = getattr(self.state, "errors", None)
-        errs = None if errs is None else np.asarray(errs, dtype=float)
-        self.plot_updated.emit(self.state.x_data, self.state.y_data, y_fit, errs)
-        self.log_message.emit("Fit completed (mock).")
+        """Start an asynchronous fit using FitWorker (non-blocking)."""
+        # Prevent multiple concurrent fits
+        if getattr(self, "_fit_worker", None) is not None:
+            self.log_message.emit("A fit is already running.")
+            return
+
+        # basic data checks
+        x = getattr(self.state, "x_data", None)
+        y = getattr(self.state, "y_data", None)
+        if x is None or y is None:
+            self.log_message.emit("No data available to fit.")
+            return
+
+        err = getattr(self.state, "errors", None)
+
+        # obtain model_spec (use existing or create one)
+        model_spec = getattr(self.state, "model_spec", None)
+        if model_spec is None:
+            try:
+                from models import get_model_spec
+                model_spec = get_model_spec(getattr(self.state, "model_name", "voigt"))
+                setattr(self.state, "model_spec", model_spec)
+            except Exception as e:
+                self.log_message.emit(f"Unable to obtain model specification: {e}")
+                return
+
+        # ensure model_spec provides an evaluate function
+        model_func = getattr(model_spec, "evaluate", None)
+        if model_func is None:
+            self.log_message.emit("Selected model does not provide an evaluate(x, **params) function.")
+            return
+
+        # build initial parameters and bounds from model_spec.params
+        try:
+            params = {k: getattr(v, "value", v) for k, v in getattr(model_spec, "params", {}).items()}
+            lower = [v.min if getattr(v, "min", None) is not None else -np.inf for v in getattr(model_spec, "params", {}).values()]
+            upper = [v.max if getattr(v, "max", None) is not None else np.inf for v in getattr(model_spec, "params", {}).values()]
+            bounds = (lower, upper)
+        except Exception as e:
+            self.log_message.emit(f"Failed to build parameter/bounds list: {e}")
+            return
+
+        # wrap evaluate(x, **params) into curve_fit-style f(x, *args)
+        param_keys = list(params.keys())
+
+        def wrapped_func(xx, *args):
+            # build param dict from positional args (curve_fit provides positional params)
+            p = dict(zip(param_keys, args))
+            # IMPORTANT: some ModelSpec.evaluate implementations expect a single 'params' dict
+            # as the second positional argument (evaluate(x, params)). Others accept **kwargs.
+            # Pass the params dict positionally to support evaluate(x, params).
+            try:
+                return model_func(xx, p)
+            except TypeError:
+                # fallback: try as kwargs (in case evaluate accepts keyword args)
+                return model_func(xx, **p)
+
+        # lazy import of FitWorker to reduce module-time coupling
+        try:
+            from worker.fit_worker import FitWorker
+        except Exception as e:
+            self.log_message.emit(f"Failed to import FitWorker: {e}")
+            return
+
+        worker = FitWorker(x, y, wrapped_func, params, err, bounds)
+        self._fit_worker = worker
+
+        # connect progress updates
+        worker.progress.connect(lambda p: self.log_message.emit(f"Fit progress: {int(p*100)}%"))
+
+        # finished handler
+        def on_finished(result, y_fit):
+            try:
+                if result is not None:
+                    # store fit result on state and update plot
+                    self.state.fit_result = result
+
+                    # Apply fit result back into model_spec.params where possible so UI will reflect fitted values
+                    try:
+                        spec = getattr(self.state, "model_spec", None)
+                        if spec is not None and hasattr(spec, "params"):
+                            for k, v in result.items():
+                                if k in spec.params:
+                                    try:
+                                        spec.params[k].value = v
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
+
+                    # Also set attributes on any concrete model object for consistency
+                    try:
+                        mdl = getattr(self.state, "model", None)
+                        if mdl is not None:
+                            for k, v in result.items():
+                                try:
+                                    setattr(mdl, k, v)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                    # Notify views that parameters changed so UI can refresh widgets
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
+
+                    self.plot_updated.emit(x, y, y_fit, err)
+                    self.log_message.emit("Fit completed successfully.")
+                else:
+                    self.log_message.emit("Fit failed.")
+            finally:
+                # always clear the worker reference
+                try:
+                    self._fit_worker = None
+                except Exception:
+                    pass
+
+        worker.finished.connect(on_finished)
+        worker.start()
+        self.log_message.emit("Fit started in background...")
 
     def update_plot(self):
         """Update plot without running a fit."""

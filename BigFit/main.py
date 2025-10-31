@@ -17,6 +17,11 @@ def main():
     # Connect ViewModel → View signals
     viewmodel.plot_updated.connect(window.update_plot_data)
     viewmodel.log_message.connect(window.append_log)
+    # Refresh parameter panel when viewmodel reports parameter changes (e.g. after a fit)
+    try:
+        viewmodel.parameters_updated.connect(window._refresh_parameters)
+    except Exception:
+        pass
 
     # --- Dynamic parameter handling (replace legacy gauss_spin / lorentz_spin / temp_spin) ---
     def read_all_params():
