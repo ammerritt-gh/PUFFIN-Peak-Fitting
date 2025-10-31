@@ -210,6 +210,13 @@ def convolute_gaussian_dho(x_target, phonon_energy, center, gauss_fwhm, lorentz_
 
 from typing import Any, Dict, Optional, List
 
+# Allowed input action keys that model parameter specs may provide.
+# Models should use these keys (case-sensitive): "drag", "wheel", "hotkey".
+# - "drag": means left-click + drag to update a parameter (value usually comes from x or y)
+# - "wheel": means mouse-wheel; action dict may include "modifiers": ["Ctrl","Shift","Alt"]
+# - "hotkey": means a keyboard shortcut; action dict should specify key name and action.
+ALLOWED_INPUT_ACTIONS = ["drag", "wheel", "hotkey"]
+
 class Parameter:
     """Represents a single parameter with metadata usable by the view.
 
@@ -226,6 +233,16 @@ class Parameter:
                    only a display/precision hint for the widget.
       step       : single-step increment for numeric controls (maps to
                    QDoubleSpinBox.setSingleStep / QSpinBox.setSingleStep).
+      input_hint : Optional[Any]
+         - If None: no interactive input advertised.
+         - If a string: treated as a human-readable hint only.
+         - If a dict: structured interactive spec. Top-level keys should be in ALLOWED_INPUT_ACTIONS.
+           Examples:
+             { "drag":  { "action": "set", "value_from": "x" } }
+             { "wheel": { "modifiers": ["Ctrl"], "action": "scale", "factor": 1.05 } }
+             { "hotkey": { "key": "F", "action": "trigger_fit" } }
+         The view and ViewModel agree on the action semantics: "set" sets parameter to coordinate,
+         "scale" multiplies numeric parameter by factor, "increment" adds a step, etc.
     """
     def __init__(self,
                  name: str,
@@ -236,7 +253,8 @@ class Parameter:
                  choices: Optional[List[Any]] = None,
                  hint: str = "",
                  decimals: Optional[int] = None,
-                 step: Optional[float] = None):
+                 step: Optional[float] = None,
+                 input_hint: Optional[Any] = None):   # <-- note: can be str or structured dict
         self.name = name
         self.value = value
         # ptype recommended to be one of: "float","int","str","bool","choice"
@@ -252,6 +270,8 @@ class Parameter:
         self.decimals = decimals
         # single-step increment (float for QDoubleSpinBox, int for QSpinBox)
         self.step = step
+        # short text describing interactive input (hotkeys/wheel/mouse)
+        self.input_hint = input_hint
 
     def to_spec(self) -> Dict[str, Any]:
         """Export the parameter as a spec dict the view expects.
@@ -267,8 +287,7 @@ class Parameter:
           "hint"     -> help text for UI/tooltip
           "decimals" -> integer number of decimal places for float widgets
           "step"     -> numeric step increment for spin widgets
-
-        The view will use these keys to pick and configure widgets.
+          "input"    -> short text describing interactive input (hotkeys/wheel/mouse)
         """
         spec: Dict[str, Any] = {"value": self.value}
         if self.ptype:
@@ -287,6 +306,10 @@ class Parameter:
         if self.step is not None:
             # step is the widget increment (single step).
             spec["step"] = float(self.step)
+        if self.input_hint is not None:
+            # pass structured input metadata through under 'input' key.
+            # may be a str (hint) or a dict describing events/actions.
+            spec["input"] = self.input_hint
         return spec
 
 class BaseModelSpec:
@@ -365,13 +388,18 @@ class VoigtModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Voigt peak", decimals=6, step=0.1))
+                           hint="Integrated area of the Voigt peak", decimals=6, step=0.1,
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
         self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0,
-                           hint="Gaussian resolution FWHM", decimals=6, step=0.01))
+                           hint="Gaussian resolution FWHM", decimals=6, step=0.01,
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
         self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0,
-                           hint="Lorentzian FWHM (HWHM*2)", decimals=6, step=0.01))
+                           hint="Lorentzian FWHM (HWHM*2)", decimals=6, step=0.01,
+                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
+        # Use "drag" (left-click + drag) instead of simple click so clicks remain available for other UI parts.
         self.add(Parameter("center", value=0.0, ptype="float",
-                           hint="Peak center"))
+                           hint="Peak center",
+                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
 
     def initialize(self, data_x=None, data_y=None):
         # simple example: set center to x of max if data provided
@@ -399,18 +427,22 @@ class DHOModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
         self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0,
-                           hint="Phonon energy (meV)", decimals=4, step=0.1))
+                           hint="Phonon energy (meV)", decimals=4, step=0.1,
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
         self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6,
-                           hint="DHO damping parameter", decimals=4, step=0.01))
+                           hint="DHO damping parameter", decimals=4, step=0.01,
+                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
         self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0,
-                           hint="Phonon amplitude (area-like)", decimals=6, step=0.01))
+                           hint="Phonon amplitude (area-like)", decimals=6, step=0.01,
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
         self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0,
                            hint="Elastic (zero-energy) amplitude", decimals=6, step=0.01))
         self.add(Parameter("BG", value=0.0, ptype="float",
                            hint="Flat background"))
         self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1,
                            hint="Temperature (K)", decimals=2, step=0.1))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectral center"))
+        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectral center",
+                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
 
     def initialize(self, data_x=None, data_y=None):
         # as example, pick center near max if available
@@ -453,17 +485,26 @@ class DHOVoigtModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
         # include DHO params
-        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0, hint="Phonon energy (meV)"))
-        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6, hint="DHO damping"))
-        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0, hint="Phonon amplitude"))
+        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0, hint="Phonon energy (meV)",
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
+        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6, hint="DHO damping",
+                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
+        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0, hint="Phonon amplitude",
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
         # Voigt resolution params
-        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0, hint="Gaussian FWHM of resolution"))
-        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0, hint="Lorentzian FWHM of resolution"))
+        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0, hint="Gaussian FWHM of resolution",
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
+        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0, hint="Lorentzian FWHM of resolution",
+                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
         # elastic and BG
-        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0, hint="Elastic Voigt area"))
-        self.add(Parameter("BG", value=0.0, ptype="float", hint="Flat background"))
-        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1, hint="Temperature (K)"))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectrum center"))
+        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0, hint="Elastic Voigt area",
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
+        self.add(Parameter("BG", value=0.0, ptype="float", hint="Flat background",
+                           input_hint={"wheel": {"modifiers": ["Alt"], "action": "increment", "step": 0.01}}))
+        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1, hint="Temperature (K)",
+                           input_hint=None))
+        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectrum center",
+                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
 
     def initialize(self, data_x=None, data_y=None):
         # example: set center from data if available

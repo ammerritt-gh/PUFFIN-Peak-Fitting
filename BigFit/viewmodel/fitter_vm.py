@@ -21,6 +21,8 @@ class FitterViewModel(QObject):
     def __init__(self, model_state=None):
         super().__init__()
         self.state = model_state or ModelState()
+        # mapping of input event -> list of handlers built from parameter specs
+        self._input_map = {}
 
     # --------------------------
     # Data I/O
@@ -346,6 +348,13 @@ class FitterViewModel(QObject):
             # ensure we store the canonical name/spec for future calls
             setattr(self.state, "model_name", canonical)
             setattr(self.state, "model_spec", model_spec)
+
+            # Build input-action map for interactive controls
+            try:
+                self._input_map = self._build_input_map(specs)
+            except Exception:
+                self._input_map = {}
+
             return specs
 
         except Exception as e:
@@ -354,6 +363,123 @@ class FitterViewModel(QObject):
             except Exception:
                 print(f"Failed to build parameter specs: {e}")
             return {}
+
+    def _build_input_map(self, specs: dict) -> dict:
+        """
+        Build a mapping of input events -> handlers from parameter specs.
+        Each handler is a dict: { 'param': name, 'action': {...} }
+        Recognized event keys: 'click', 'drag', 'wheel', 'key'
+        The 'input' entry in a spec may be a str, list or a dict describing those keys.
+        """
+        from collections import defaultdict
+        mapping = defaultdict(list)
+        for pname, pspec in (specs or {}).items():
+            try:
+                inp = None
+                if isinstance(pspec, dict):
+                    inp = pspec.get("input")
+                # allow older string hints as label-only (skip)
+                if not inp:
+                    continue
+                # if it's a string, keep as hint-only and skip actionable mapping
+                if isinstance(inp, str):
+                    continue
+                # assume dict-like structure mapping event -> action-spec
+                if isinstance(inp, dict):
+                    for ev, act in inp.items():
+                        mapping[ev].append({"param": pname, "action": act})
+            except Exception:
+                continue
+        return dict(mapping)
+
+    # Selection lifecycle API
+    def begin_selection(self, pname: str, x: float, y: float) -> bool:
+        """Begin a selection/interactive session for parameter `pname`.
+        Returns True if a session was started."""
+        try:
+            # find drag handlers for this parameter
+            drag_handlers = [h for h in (self._input_map.get("drag", []) or []) if h.get("param") == pname]
+            if not drag_handlers:
+                return False
+            # store selected param and an interactive drag session with filtered handlers
+            setattr(self.state, "_selected_param", pname)
+            setattr(self.state, "_interactive_drag_info", {"handlers": drag_handlers, "last_x": float(x), "last_y": float(y)})
+            self.log_message.emit(f"Selection started for parameter: {pname}")
+            return True
+        except Exception as e:
+            try:
+                self.log_message.emit(f"Failed to begin selection for {pname}: {e}")
+            except Exception:
+                pass
+            return False
+
+    def end_selection(self):
+        """End any current selection / interactive session."""
+        try:
+            if hasattr(self.state, "_interactive_drag_info"):
+                try:
+                    del self.state._interactive_drag_info
+                except Exception:
+                    try:
+                        setattr(self.state, "_interactive_drag_info", None)
+                    except Exception:
+                        pass
+            if hasattr(self.state, "_selected_param"):
+                try:
+                    del self.state._selected_param
+                except Exception:
+                    try:
+                        setattr(self.state, "_selected_param", None)
+                    except Exception:
+                        pass
+            self.log_message.emit("Selection ended.")
+        except Exception:
+            pass
+
+    # --- helpers for interactive drag updates ---
+    def _get_param_value(self, pname):
+        """Return the current numeric value for a parameter from state.model or model_spec, or None."""
+        try:
+            mdl = getattr(self.state, "model", None)
+            if mdl is not None and hasattr(mdl, pname):
+                return getattr(mdl, pname)
+            ms = getattr(self.state, "model_spec", None)
+            if ms is not None and pname in ms.params:
+                return ms.params[pname].value
+        except Exception:
+            pass
+        return None
+
+    def _set_param_value(self, pname, value):
+        """Set parameter value via apply_parameters (keeps single codepath/update)."""
+        try:
+            # coerce numeric types where sensible
+            if isinstance(value, (np.floating, np.integer)):
+                value = float(value)
+            self.apply_parameters({pname: value})
+        except Exception as e:
+            try:
+                self.log_message.emit(f"Failed to set {pname}: {e}")
+            except Exception:
+                pass
+
+    def _modifiers_match(self, modifiers, required_mods):
+        """Return True if all required_mods (list of names) are present in modifiers."""
+        try:
+            from PySide6.QtCore import Qt
+            if not required_mods:
+                return True
+            for r in required_mods:
+                rn = str(r).lower()
+                if rn == "ctrl" and not bool(modifiers & Qt.ControlModifier):
+                    return False
+                if rn == "shift" and not bool(modifiers & Qt.ShiftModifier):
+                    return False
+                if rn == "alt" and not bool(modifiers & Qt.AltModifier):
+                    return False
+            return True
+        except Exception:
+            return False
 
     def set_model(self, model_name: str):
         """Switch the active model specification to `model_name`."""
@@ -470,3 +596,295 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+    
+    # --------------------------
+    # Input event handlers (integrated from PySide_Fitter_PyQtGraph.py patterns)
+    # --------------------------
+    def handle_plot_click(self, x, y, button):
+        """
+        Handle plot click events from the view.
+
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space
+            button: Mouse button used
+        """
+        try:
+            self.log_message.emit(f"Plot clicked at data coords: ({x:.3f}, {y:.3f})")
+            # Only use click here to start a drag session if a "drag" handler exists.
+            try:
+                from PySide6.QtCore import Qt
+                if button is not None and int(button) == int(Qt.LeftButton):
+                    drag_handlers = (self._input_map or {}).get("drag", [])
+                    if drag_handlers:
+                        # Start an interactive drag session storing handlers and initial coords.
+                        self.state._interactive_drag_info = {
+                            "handlers": drag_handlers,
+                            "last_x": float(x),
+                            "last_y": float(y)
+                        }
+                        self.log_message.emit(f"Interactive: started drag session for {[h.get('param') for h in drag_handlers]}")
+                # Do not perform immediate 'set' on plain click — clicks reserved for other UI parts.
+            except Exception:
+                pass
+
+            # Future: Add logic for selecting/manipulating peaks or markers
+            # For now, just log the event
+        except Exception as e:
+            self.log_message.emit(f"Error in handle_plot_click: {e}")
+
+    def handle_plot_mouse_move(self, x, y, buttons=None):
+        """
+        Handle plot mouse move events from the view.
+        If a button is pressed and the model declared a 'drag' action for a parameter,
+        update that parameter continuously. When no buttons are pressed, stop drag.
+        """
+        try:
+            from PySide6.QtCore import Qt
+            # Determine if left-button (or any) is pressed
+            left_pressed = False
+            try:
+                if buttons is not None:
+                    left_pressed = bool(int(buttons) & int(Qt.LeftButton))
+            except Exception:
+                left_pressed = False
+
+            # If a drag session was started, honor it
+            try:
+                drag_info = getattr(self.state, "_interactive_drag_info", None)
+                # If left button released, stop drag session (but keep selection until explicit end_selection)
+                if not left_pressed:
+                    if drag_info is not None:
+                        try:
+                            del self.state._interactive_drag_info
+                        except Exception:
+                            try:
+                                setattr(self.state, "_interactive_drag_info", None)
+                            except Exception:
+                                pass
+                    return
+
+                if drag_info is None:
+                    # No explicit session, but still allow declared handlers (fallback)
+                    handlers = (self._input_map or {}).get("drag", [])
+                    # If there is an explicit selected param, filter to it
+                    selected = getattr(self.state, "_selected_param", None)
+                    if selected:
+                        handlers = [h for h in handlers if h.get("param") == selected]
+                    if not handlers:
+                        return
+                    # Build a temporary session using handlers with last positions = current
+                    drag_info = {"handlers": handlers, "last_x": float(x), "last_y": float(y)}
+
+                # Compute deltas
+                last_x = float(drag_info.get("last_x", x))
+                last_y = float(drag_info.get("last_y", y))
+                dx = float(x) - last_x
+                dy = float(y) - last_y
+                # update last positions
+                drag_info["last_x"] = float(x)
+                drag_info["last_y"] = float(y)
+                # persist back if real session
+                if getattr(self.state, "_interactive_drag_info", None) is not None:
+                    self.state._interactive_drag_info = drag_info
+
+                # Apply handlers: allow separate horizontal ('h') and vertical ('v') actions
+                for h in drag_info.get("handlers", []):
+                    pname = h.get("param")
+                    act = h.get("action", {}) or {}
+                    # If action specifies separate horizontal/vertical sub-actions
+                    if isinstance(act, dict) and ("h" in act or "v" in act):
+                        # Horizontal part
+                        if "h" in act and abs(dx) > 0:
+                            ah = act["h"]
+                            # support 'set' (absolute), 'increment' (by step * sign), 'scale' (multiply by factor^sign)
+                            try:
+                                cur = self._get_param_value(pname)
+                                if ah.get("action") == "set":
+                                    val = x if ah.get("value_from", "x") == "x" else y
+                                    self._set_param_value(pname, float(val))
+                                elif ah.get("action") == "increment" and cur is not None:
+                                    step = float(ah.get("step", 0.01))
+                                    new = float(cur) + step * np.sign(dx)
+                                    self._set_param_value(pname, new)
+                                elif ah.get("action") == "scale" and cur is not None:
+                                    factor = float(ah.get("factor", 1.02))
+                                    mult = factor if dx > 0 else (1.0 / factor)
+                                    self._set_param_value(pname, float(cur) * mult)
+                            except Exception:
+                                pass
+                        # Vertical part — may target same param or different field via 'v.param'
+                        if "v" in act and abs(dy) > 0:
+                            av = act["v"]
+                            try:
+                                # by default vertical modifies the same parameter; handler may specify 'param_v'
+                                target = av.get("param", pname)
+                                cur = self._get_param_value(target)
+                                if av.get("action") == "set":
+                                    val = y if av.get("value_from", "y") == "y" else x
+                                    self._set_param_value(target, float(val))
+                                elif av.get("action") == "increment" and cur is not None:
+                                    step = float(av.get("step", 0.01))
+                                    new = float(cur) + step * np.sign(dy)
+                                    self._set_param_value(target, new)
+                                elif av.get("action") == "scale" and cur is not None:
+                                    factor = float(av.get("factor", 1.02))
+                                    mult = factor if dy > 0 else (1.0 / factor)
+                                    self._set_param_value(target, float(cur) * mult)
+                            except Exception:
+                                pass
+                    else:
+                        # Simple legacy behavior: treat action as a set-from-x on horizontal movement
+                        try:
+                            if abs(dx) > 0:
+                                if act.get("action") == "set":
+                                    vfrom = act.get("value_from", "x")
+                                    val = x if vfrom == "x" else y
+                                    self._set_param_value(pname, float(val))
+                                elif act.get("action") == "increment":
+                                    step = float(act.get("step", 0.01))
+                                    cur = self._get_param_value(pname)
+                                    if cur is not None:
+                                        new = float(cur) + step * np.sign(dx)
+                                        self._set_param_value(pname, new)
+                                elif act.get("action") == "scale":
+                                    factor = float(act.get("factor", 1.02))
+                                    cur = self._get_param_value(pname)
+                                    if cur is not None:
+                                        mult = factor if dx > 0 else (1.0 / factor)
+                                        self._set_param_value(pname, float(cur) * mult)
+                                else:
+                                    # fallback: absolute set to x
+                                    self._set_param_value(pname, float(x))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        except Exception:
+            # be quiet for mouse-move errors to avoid spam
+            return
+
+    def handle_key_press(self, key, modifiers):
+        """
+        Handle keyboard events from the plot.
+        
+        Args:
+            key: Qt key code
+            modifiers: Qt keyboard modifiers
+        """
+        try:
+            from PySide6.QtCore import Qt
+            
+            # Handle specific keys
+            if key == Qt.Key_Space:
+                self.log_message.emit("Space key: Clear selection")
+                # Future: Clear any active selections
+            elif key == Qt.Key_F:
+                # Example: Trigger fit
+                self.log_message.emit("F key: Run fit")
+                try:
+                    self.run_fit()
+                except Exception as e:
+                    self.log_message.emit(f"Fit failed: {e}")
+            elif key == Qt.Key_U:
+                # Example: Update plot
+                self.log_message.emit("U key: Update plot")
+                try:
+                    self.update_plot()
+                except Exception:
+                    pass
+            # Add more key handlers as needed
+                
+        except Exception as e:
+            self.log_message.emit(f"Error in handle_key_press: {e}")
+    
+    def handle_wheel_scroll(self, delta, modifiers):
+        """
+        Handle mouse wheel scroll events with keyboard modifiers.
+
+        Can be used to adjust parameters interactively.
+        """
+        try:
+            from PySide6.QtCore import Qt
+
+            is_ctrl = bool(modifiers & Qt.ControlModifier)
+            is_shift = bool(modifiers & Qt.ShiftModifier)
+            is_alt = bool(modifiers & Qt.AltModifier)
+
+            # Determine scroll direction
+            step_sign = 1 if delta > 0 else -1
+
+            # First consult input_map 'wheel' handlers
+            try:
+                handlers = (self._input_map or {}).get("wheel", [])
+                # if a parameter is selected, limit handlers to that parameter
+                selected = getattr(self.state, "_selected_param", None)
+                if selected:
+                    handlers = [h for h in handlers if h.get("param") == selected]
+                for h in handlers:
+                    pname = h.get("param")
+                    act = h.get("action", {}) or {}
+                    req_mods = [m for m in (act.get("modifiers") or [])]
+                    if not self._modifiers_match(modifiers, req_mods):
+                        continue
+                    # action types: scale (multiply by factor^sign), increment (add step * sign)
+                    if act.get("action") == "scale":
+                        factor = float(act.get("factor", 1.05))
+                        try:
+                            cur = self._get_param_value(pname)
+                            if isinstance(cur, (int, float)):
+                                mult = factor if step_sign > 0 else (1.0 / factor)
+                                new_val = float(cur) * mult
+                                self.apply_parameters({pname: new_val})
+                                self.log_message.emit(f"Interactive: wheel scaled {pname} -> {new_val:.4g}")
+                        except Exception as e:
+                            self.log_message.emit(f"Wheel scale failed for {pname}: {e}")
+                    elif act.get("action") == "increment":
+                        step = float(act.get("step", 0.1))
+                        try:
+                            cur = self._get_param_value(pname)
+                            if isinstance(cur, (int, float)):
+                                new_val = float(cur) + step * step_sign
+                                self.apply_parameters({pname: new_val})
+                                self.log_message.emit(f"Interactive: wheel increment {pname} -> {new_val:.4g}")
+                        except Exception as e:
+                            self.log_message.emit(f"Wheel increment failed for {pname}: {e}")
+                # if any handler consumed, return
+            except Exception:
+                pass
+
+            # Fallback: previous behavior - adjust first numeric parameter with Ctrl only (but if selected, try selected param)
+            selected = getattr(self.state, "_selected_param", None)
+            if selected:
+                try:
+                    cur = self._get_param_value(selected)
+                    if isinstance(cur, (int, float)):
+                        factor = 1.1 if step_sign > 0 else 0.9
+                        new_val = float(cur) * factor
+                        self.apply_parameters({selected: new_val})
+                        self.log_message.emit(f"Wheel on selected: Adjusted {selected} to {new_val:.3f}")
+                        return
+                except Exception:
+                    pass
+
+            if is_ctrl and not is_shift and not is_alt:
+                try:
+                    specs = self.get_parameters()
+                    if specs:
+                        param_name = next(iter(specs.keys()))
+                        spec = specs[param_name]
+                        if isinstance(spec, dict):
+                            current_val = spec.get('value', 0)
+                        else:
+                            current_val = spec
+                        if isinstance(current_val, (int, float)):
+                            factor = 1.1 if step_sign > 0 else 0.9
+                            new_val = current_val * factor
+                            self.apply_parameters({param_name: new_val})
+                            self.log_message.emit(f"Ctrl+Wheel: Adjusted {param_name} to {new_val:.3f}")
+                except Exception as e:
+                    self.log_message.emit(f"Could not adjust parameter (fallback): {e}")
+
+        except Exception as e:
+            self.log_message.emit(f"Error in handle_wheel_scroll: {e}")
