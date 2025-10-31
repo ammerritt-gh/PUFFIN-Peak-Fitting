@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog,
     QScrollArea, QSpinBox, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 import pyqtgraph as pg
 import numpy as np
 from .input_handler import InputHandler
@@ -27,6 +27,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PUMA Peak Fitter")
         self.viewmodel = viewmodel
         self.param_widgets = {}   # name -> widget
+        # debounce timers for auto-apply per-parameter
+        self._debounce_timers = {}
+        # debounce interval in milliseconds (tunable)
+        # debounce interval in milliseconds (tunable)
+        # 0 -> immediate apply; keep debounce available for future tuning
+        self.auto_apply_debounce_ms = 0
+        # whether auto-apply is enabled (can add UI toggle later)
+        self.auto_apply_enabled = True
 
         # --- Central Plot ---
         self.plot_widget = pg.PlotWidget(title="Data and Fit")
@@ -177,6 +185,12 @@ class MainWindow(QMainWindow):
         if self.viewmodel:
             apply_btn.clicked.connect(self._on_apply_clicked)
             refresh_btn.clicked.connect(self._refresh_parameters)
+            # When the ViewModel reports parameter changes (e.g. after a fit), refresh UI
+            try:
+                if hasattr(self.viewmodel, "parameters_updated"):
+                    self.viewmodel.parameters_updated.connect(self._refresh_parameters)
+            except Exception:
+                pass
             # initial populate
             self._refresh_parameters()
 
@@ -265,6 +279,88 @@ class MainWindow(QMainWindow):
             self.append_log("Parameters applied.")
         except Exception as e:
             self.append_log(f"Failed to apply parameters: {e}")
+
+    def _auto_apply_param(self, name, widget):
+        """Auto-apply a single parameter from its widget when the widget value changes.
+
+        This reads the new value from the widget and calls ViewModel.apply_parameters
+        with a single-entry dict. Signals are connected only after widgets are
+        initialized to avoid spurious triggers during panel population.
+        """
+        if not self.viewmodel:
+            return
+        try:
+            # Extract value depending on widget type
+            val = None
+            if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
+                val = widget.value()
+            elif isinstance(widget, QCheckBox):
+                val = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                val = widget.currentText()
+            elif isinstance(widget, QLineEdit):
+                val = widget.text()
+            else:
+                # fallback: try a value() callable
+                try:
+                    val = getattr(widget, "value")()
+                except Exception:
+                    val = None
+
+            # Apply single-parameter update via the ViewModel
+            try:
+                self.viewmodel.apply_parameters({name: val})
+            except Exception as e:
+                # do not raise; log instead
+                try:
+                    self.append_log(f"Auto-apply failed for {name}: {e}")
+                except Exception:
+                    pass
+        except Exception:
+            # be quiet on widget-read errors
+            pass
+
+    def _schedule_auto_apply(self, name, widget):
+        """Schedule a debounced auto-apply for parameter `name`.
+
+        Rapid widget changes will reset the timer; the ViewModel.apply will be
+        invoked only after `self.auto_apply_debounce_ms` of inactivity.
+        """
+        if not getattr(self, "auto_apply_enabled", True):
+            return
+        try:
+            # get existing timer or create one
+            t = self._debounce_timers.get(name)
+            if t is None:
+                t = QTimer(self)
+                t.setSingleShot(True)
+                # connect to call the actual apply
+                t.timeout.connect(lambda n=name, w=widget: self._auto_apply_param(n, w))
+                self._debounce_timers[name] = t
+            else:
+                # update the connected widget reference by reconnecting on timeout
+                try:
+                    # disconnect previous and reconnect to use the latest widget
+                    try:
+                        t.timeout.disconnect()
+                    except Exception:
+                        pass
+                    t.timeout.connect(lambda n=name, w=widget: self._auto_apply_param(n, w))
+                except Exception:
+                    pass
+
+            # restart timer
+            try:
+                t.stop()
+            except Exception:
+                pass
+            t.start(int(self.auto_apply_debounce_ms))
+        except Exception:
+            # fallback: immediate apply on any error
+            try:
+                self._auto_apply_param(name, widget)
+            except Exception:
+                pass
 
     # --------------------------
     # Dynamic parameter helpers
@@ -439,6 +535,19 @@ class MainWindow(QMainWindow):
                     new_form.addRow(name + ":", widget)
 
                 new_param_widgets[name] = widget
+                # Connect widget change signals to auto-apply (connect after initial value set)
+                try:
+                    # connect to a scheduler that debounces rapid changes
+                    if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
+                        widget.valueChanged.connect(lambda v, n=name, w=widget: self._schedule_auto_apply(n, w))
+                    elif isinstance(widget, QCheckBox):
+                        widget.stateChanged.connect(lambda s, n=name, w=widget: self._schedule_auto_apply(n, w))
+                    elif isinstance(widget, QComboBox):
+                        widget.currentIndexChanged.connect(lambda i, n=name, w=widget: self._schedule_auto_apply(n, w))
+                    elif isinstance(widget, QLineEdit):
+                        widget.textChanged.connect(lambda t, n=name, w=widget: self._schedule_auto_apply(n, w))
+                except Exception:
+                    pass
 
             except Exception:
                 # on any error, fallback to a simple line edit
@@ -455,6 +564,11 @@ class MainWindow(QMainWindow):
                     pass
                 new_form.addRow(name + ":", w)
                 new_param_widgets[name] = w
+                # Connect fallback widget signals
+                try:
+                    w.textChanged.connect(lambda t, n=name, w=w: self._schedule_auto_apply(n, w))
+                except Exception:
+                    pass
 
         # Replace the widget shown in the scroll area (frees old widgets)
         self.param_scroll.takeWidget()

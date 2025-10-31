@@ -64,13 +64,17 @@ def main():
                 pass
 
     # connect initially (if any params already present)
-    connect_param_signals()
+    # If the MainWindow provides its own per-widget auto-apply handler, skip
+    # the legacy global connect to avoid duplicate applies.
+    if not hasattr(window, "_auto_apply_param"):
+        connect_param_signals()
 
-    # reconnect whenever MainWindow rebuilds the parameters form
-    try:
-        window.parameters_updated.connect(connect_param_signals)
-    except Exception:
-        pass
+    # reconnect whenever MainWindow rebuilds the parameters form (only for legacy path)
+    if not hasattr(window, "_auto_apply_param"):
+        try:
+            window.parameters_updated.connect(connect_param_signals)
+        except Exception:
+            pass
 
     # Apply initial parameters to ViewModel
     try:
