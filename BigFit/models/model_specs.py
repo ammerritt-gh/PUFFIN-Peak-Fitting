@@ -372,11 +372,14 @@ class GaussianModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Gaussian peak", decimals=6, step=0.1))
+                           hint="Integrated area of the Gaussian peak", decimals=6, step=0.1,
+                           input_hint={"wheel": {"action": "scale", "factor": 1.1}}))
         self.add(Parameter("Width", value=1.0, ptype="float", minimum=1e-6,
-                           hint="Gaussian FWHM", decimals=6, step=0.01))
+                           hint="Gaussian FWHM", decimals=6, step=0.01,
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
         self.add(Parameter("Center", value=0.0, ptype="float",
-                           hint="Peak center (x-axis)"))
+                           hint="Peak center (x-axis)",
+                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
