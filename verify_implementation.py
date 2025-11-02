@@ -21,6 +21,13 @@ def verify_gaussian_spec():
     print("VERIFICATION: Gaussian Model Interactive Controls Implementation")
     print("=" * 70)
     
+    # Helper function to get input hint (handles both 'input_hint' and legacy 'input')
+    def get_input_hint(param_spec):
+        """Get input hint from parameter spec, checking both current and legacy names."""
+        if not isinstance(param_spec, dict):
+            return None
+        return param_spec.get("input_hint") or param_spec.get("input")
+    
     try:
         from models.model_specs import GaussianModelSpec
         
@@ -56,29 +63,24 @@ def verify_gaussian_spec():
             ("Center", "value", 0.0),
         ]
         
-        all_correct = True
         for param_name, key, expected in checks:
             param_spec = params.get(param_name, {})
             if not isinstance(param_spec, dict):
                 print(f"✗ FAIL: {param_name} spec is not a dict")
-                all_correct = False
-                continue
+                return False
                 
             actual = param_spec.get(key)
             if actual == expected:
                 print(f"  ✓ {param_name}.{key} = {actual}")
             else:
                 print(f"  ✗ FAIL: {param_name}.{key} = {actual}, expected {expected}")
-                all_correct = False
-        
-        if not all_correct:
-            return False
+                return False
         
         # Check input_hint configurations
         print("\nChecking input_hint configurations:")
         
         # Area should have wheel control (no modifier)
-        area_input = params["Area"].get("input_hint") or params["Area"].get("input")
+        area_input = get_input_hint(params["Area"])
         if not area_input:
             print("  ✗ FAIL: Area has no input hint")
             return False
@@ -100,7 +102,7 @@ def verify_gaussian_spec():
         print("  ✓ Area: wheel control configured (scale by 1.1)")
         
         # Width should have wheel control with Ctrl modifier
-        width_input = params["Width"].get("input_hint") or params["Width"].get("input")
+        width_input = get_input_hint(params["Width"])
         if not width_input:
             print("  ✗ FAIL: Width has no input hint")
             return False
@@ -124,7 +126,7 @@ def verify_gaussian_spec():
         print("  ✓ Width: Ctrl+wheel control configured (scale by 1.05)")
         
         # Center should have drag control
-        center_input = params["Center"].get("input_hint") or params["Center"].get("input")
+        center_input = get_input_hint(params["Center"])
         if not center_input:
             print("  ✗ FAIL: Center has no input hint")
             return False

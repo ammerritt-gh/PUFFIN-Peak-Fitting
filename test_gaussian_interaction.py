@@ -55,9 +55,13 @@ def test_input_hints():
     spec = GaussianModelSpec()
     params = spec.get_parameters()
     
+    # Helper function to get input hint (handles both 'input_hint' and legacy 'input')
+    def get_input_hint(param_spec):
+        return param_spec.get("input_hint") or param_spec.get("input")
+    
     print("\nParameter input hints:")
     for name, param_spec in params.items():
-        input_hint = param_spec.get("input")
+        input_hint = get_input_hint(param_spec)
         print(f"\n  {name}:")
         if input_hint:
             if isinstance(input_hint, dict):
@@ -69,17 +73,17 @@ def test_input_hints():
             print("    (no input hint)")
     
     # Verify input hints
-    area_input = params["Area"].get("input_hint") or params["Area"].get("input")
+    area_input = get_input_hint(params["Area"])
     assert area_input is not None, "Area should have input hint"
     assert "wheel" in area_input, "Area should have wheel control"
     assert area_input["wheel"]["action"] == "scale", "Area wheel should scale"
     
-    width_input = params["Width"].get("input_hint") or params["Width"].get("input")
+    width_input = get_input_hint(params["Width"])
     assert width_input is not None, "Width should have input hint"
     assert "wheel" in width_input, "Width should have wheel control"
     assert "Ctrl" in width_input["wheel"]["modifiers"], "Width wheel should require Ctrl"
     
-    center_input = params["Center"].get("input_hint") or params["Center"].get("input")
+    center_input = get_input_hint(params["Center"])
     assert center_input is not None, "Center should have input hint"
     assert "drag" in center_input, "Center should have drag control"
     assert center_input["drag"]["value_from"] == "x", "Center drag should use x coordinate"

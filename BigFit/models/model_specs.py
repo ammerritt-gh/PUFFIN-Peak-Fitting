@@ -11,6 +11,11 @@ import matplotlib.pyplot as plt
 kB = 0.086173324  # meV/K
 
 # Interactive control scaling factors
+# These values are chosen for smooth, intuitive parameter adjustment:
+# - AREA_WHEEL_SCALE_FACTOR (1.1 = 10%): Larger adjustment for peak amplitude
+#   to provide quick, visible changes when scrolling
+# - WIDTH_WHEEL_SCALE_FACTOR (1.05 = 5%): Smaller adjustment for peak width
+#   to provide finer control, as width changes are more sensitive to visual perception
 AREA_WHEEL_SCALE_FACTOR = 1.1  # 10% per scroll
 WIDTH_WHEEL_SCALE_FACTOR = 1.05  # 5% per scroll
 
