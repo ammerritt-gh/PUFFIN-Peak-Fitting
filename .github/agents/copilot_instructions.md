@@ -1,6 +1,6 @@
 ---
-name:
-description:
+name: BigFit Agent
+description: Gives explanations to copilot agents for BigFit structure.
 ---
 
 # My Agent
