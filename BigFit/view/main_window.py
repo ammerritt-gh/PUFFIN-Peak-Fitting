@@ -688,6 +688,13 @@ class MainWindow(QMainWindow):
             # Connect mouse events
             self.input_handler.mouse_clicked.connect(self._on_plot_clicked)
             self.input_handler.mouse_moved.connect(self._on_plot_mouse_moved)
+            # Debug: connect press/release/drag signals for logging
+            try:
+                self.input_handler.mouse_pressed.connect(self._on_mouse_pressed)
+                self.input_handler.mouse_released.connect(self._on_mouse_released)
+                self.input_handler.mouse_dragged.connect(self._on_mouse_dragged)
+            except Exception:
+                pass
             
             # Connect keyboard events
             self.input_handler.key_pressed.connect(self._on_plot_key_pressed)
@@ -698,6 +705,43 @@ class MainWindow(QMainWindow):
             self.append_log("Input handler connected successfully.")
         except Exception as e:
             self.append_log(f"Failed to connect input handler: {e}")
+
+    # --------------------------
+    # Debug mouse handlers
+    # --------------------------
+    def _btn_name(self, b):
+        try:
+            if b == Qt.LeftButton:
+                return "Left"
+            if b == Qt.RightButton:
+                return "Right"
+            if b == Qt.MidButton or b == Qt.MiddleButton:
+                return "Middle"
+        except Exception:
+            pass
+        return str(b)
+
+    def _on_mouse_pressed(self, x, y, button, items):
+        try:
+            items_text = ", ".join(items) if items else "None"
+            bname = self._btn_name(button)
+            self.append_log(f"Mouse pressed: btn={bname}, pos=({x:.3f}, {y:.3f}), hit={items_text}")
+        except Exception:
+            pass
+
+    def _on_mouse_released(self, x, y, button, items):
+        try:
+            items_text = ", ".join(items) if items else "None"
+            bname = self._btn_name(button)
+            self.append_log(f"Mouse released: btn={bname}, pos=({x:.3f}, {y:.3f}), hit={items_text}")
+        except Exception:
+            pass
+
+    def _on_mouse_dragged(self, dx, dy, dist):
+        try:
+            self.append_log(f"Mouse dragged: dx={dx:.4g}, dy={dy:.4g}, dist={dist:.4g}")
+        except Exception:
+            pass
     
     def _on_plot_clicked(self, x, y, button):
         """
