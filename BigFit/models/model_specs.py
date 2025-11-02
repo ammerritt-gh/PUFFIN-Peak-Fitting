@@ -316,6 +316,10 @@ class BaseModelSpec:
     """Base container for model parameter specs and initialisation."""
     def __init__(self):
         self.params: Dict[str, Parameter] = {}
+        # Flag to indicate whether this model is a constructed element
+        # (a starting point that should not be addable to other elements).
+        # Default: False (basic element)
+        self.is_constructed: bool = False
 
     def add(self, param: Parameter):
         self.params[param.name] = param
@@ -381,6 +385,29 @@ class GaussianModelSpec(BaseModelSpec):
             Width = float(pvals.get("Width", 0.1))
             Center = float(pvals.get("Center", 0.0))
             return Gaussian(np.asarray(x, dtype=float), Area=Area, Width=Width, Center=Center)
+        except Exception:
+            return super().evaluate(x, params)
+
+
+class LorentzModelSpec(BaseModelSpec):
+    def __init__(self):
+        super().__init__()
+        self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
+                           hint="Integrated area of the Lorentzian peak", decimals=6, step=0.1,
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
+        self.add(Parameter("Width", value=1.0, ptype="float", minimum=1e-6,
+                           hint="Lorentzian FWHM", decimals=6, step=0.01))
+        self.add(Parameter("Center", value=0.0, ptype="float",
+                           hint="Peak center (x-axis)",
+                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        try:
+            pvals = self.get_param_values(params)
+            Area = float(pvals.get("Area", 1.0))
+            Width = float(pvals.get("Width", 0.1))
+            Center = float(pvals.get("Center", 0.0))
+            return Lorentzian(np.asarray(x, dtype=float), Area=Area, Width=Width, Center=Center)
         except Exception:
             return super().evaluate(x, params)
 
@@ -480,10 +507,37 @@ class DHOModelSpec(BaseModelSpec):
         except Exception:
             return super().evaluate(x, params)
 
+
+class LinearBackgroundModelSpec(BaseModelSpec):
+    """Simple linear background: y = slope * x + constant"""
+    def __init__(self):
+        super().__init__()
+        # slope controlled by Ctrl+mouse wheel (scale)
+        self.add(Parameter("slope", value=0.0, ptype="float",
+                           hint="Linear slope (m)", decimals=6, step=0.01,
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
+        # constant (intercept) controlled by mouse wheel
+        self.add(Parameter("constant", value=0.0, ptype="float",
+                           hint="Constant background (b)", decimals=6, step=0.1,
+                           input_hint={"wheel": {"action": "increment", "step": 0.1}}))
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        try:
+            pvals = self.get_param_values(params)
+            m = float(pvals.get("slope", 0.0))
+            b = float(pvals.get("constant", 0.0))
+            arr = np.asarray(x, dtype=float)
+            return m * arr + b
+        except Exception:
+            return super().evaluate(x, params)
+
 class DHOVoigtModelSpec(BaseModelSpec):
     """Composite DHO convolved with Voigt resolution + elastic Voigt."""
     def __init__(self):
         super().__init__()
+        # This composite is a constructed element (starting point) and
+        # should not be addable to other models.
+        self.is_constructed = True
         # include DHO params
         self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0, hint="Phonon energy (meV)",
                            input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
@@ -540,15 +594,73 @@ class DHOVoigtModelSpec(BaseModelSpec):
             return super().evaluate(x, params)
 
 # Factory / helper
+# Programmatic model registry -------------------------------------------------
+# Each entry: key (canonical), display name, aliases, factory, is_constructed
+MODEL_REGISTRY = [
+    {"key": "voigt", "display": "Voigt", "factory": VoigtModelSpec, "is_constructed": False},
+    {"key": "dho+voigt", "display": "DHO+Voigt", "factory": DHOVoigtModelSpec, "is_constructed": True},
+    {"key": "gaussian", "display": "Gaussian", "factory": GaussianModelSpec, "is_constructed": False},
+    {"key": "dho", "display": "DHO", "factory": DHOModelSpec, "is_constructed": False},
+    {"key": "lorentzian", "display": "Lorentzian", "factory": LorentzModelSpec, "is_constructed": False},
+    {"key": "linear", "display": "Linear", "factory": LinearBackgroundModelSpec, "is_constructed": False},
+]
+
+
+def _find_registry_entry(name: str):
+    """Return the registry entry matching name (case-insensitive) or None.
+
+    Matching rules (STRICT):
+      - exact match on canonical key (case-insensitive)
+      - exact match on display name (case-insensitive)
+
+    This intentionally avoids tolerant/alias matching so that the UI
+    and other callers must use the canonical names exposed by
+    get_available_model_names().
+    """
+    if not name:
+        return None
+    s = str(name).strip().lower()
+    # direct key or display match only
+    for e in MODEL_REGISTRY:
+        if e["key"].lower() == s or (e.get("display") or "").lower() == s:
+            return e
+    return None
+
+
+def canonical_model_key(name: str) -> str:
+    """Return the canonical registry key for a model name or the cleaned input.
+
+    This is useful for storing a normalized model identifier in state.
+    """
+    ent = _find_registry_entry(name)
+    if ent:
+        return ent["key"]
+    # fallback: cleaned lowercase
+    return (name or "").strip().lower()
+
+
 def get_model_spec(model_name: str) -> BaseModelSpec:
-    name = (model_name or "").strip().lower()
-    if name in ("gauss", "gaussian", "gaussmodel", "gaussianmodel"):
-        return GaussianModelSpec()
-    if name in ("voigt", "voigtmodel"):
-        return VoigtModelSpec()
-    if name in ("dho", "dhomodel", "dhoonly"):
-        return DHOModelSpec()
-    if name in ("dho+voigt", "dho_voigt", "dho+voigtmodel", "dho+voigtmodel"):
-        return DHOVoigtModelSpec()
-    # default fallback
-    return BaseModelSpec()
+    """Create and return a ModelSpec instance for the requested model name.
+
+    The lookup accepts canonical keys, display names, or common aliases.
+    """
+    ent = _find_registry_entry(model_name)
+    if ent is None:
+        return BaseModelSpec()
+    try:
+        return ent["factory"]()
+    except Exception:
+        return BaseModelSpec()
+
+
+def get_available_model_names(addable_only: bool = False) -> list:
+    """Return a list of human-friendly model display names.
+
+    If addable_only is True, filter out models marked as constructed (not addable).
+    """
+    names = []
+    for e in MODEL_REGISTRY:
+        if addable_only and e.get("is_constructed"):
+            continue
+        names.append(e.get("display", e.get("key")))
+    return names
