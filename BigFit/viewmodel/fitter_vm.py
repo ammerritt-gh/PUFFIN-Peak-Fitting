@@ -372,7 +372,8 @@ class FitterViewModel(QObject):
             try:
                 inp = None
                 if isinstance(pspec, dict):
-                    inp = pspec.get("input")
+                    # Check both 'input' (from Parameter.to_spec()) and 'input_hint' (fallback)
+                    inp = pspec.get("input") or pspec.get("input_hint")
                 # allow older string hints as label-only (skip)
                 if not inp:
                     continue
