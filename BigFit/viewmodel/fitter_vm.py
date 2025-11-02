@@ -596,6 +596,12 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+        # Notify any views that parameter values have changed so they can refresh their widgets.
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            # avoid raising if no listeners or signal fails
+            pass
     
     # --------------------------
     # Input event handlers (integrated from PySide_Fitter_PyQtGraph.py patterns)
