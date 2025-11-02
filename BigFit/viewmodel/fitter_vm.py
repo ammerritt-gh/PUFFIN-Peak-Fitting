@@ -259,7 +259,7 @@ class FitterViewModel(QObject):
         """
         try:
             # local import to avoid circular import problems at module import time
-            from models import get_model_spec
+            from models import get_model_spec, canonical_model_key
             # Helper to log safely
             def _log(msg):
                 try:
@@ -278,26 +278,9 @@ class FitterViewModel(QObject):
 
             _log(f"get_parameters: requested model_name raw='{model_name}'")
 
-            # Normalize common UI labels to canonical keys expected by get_model_spec
-            _map = {
-                "voigt": "voigt",
-                "voigtmodel": "voigt",
-                "gaussian": "gaussian",
-                "gauss": "gaussian",
-                "dho": "dho",
-                "dho+voigt": "dho+voigt",
-                "dho_voigt": "dho+voigt",
-            }
+            # Normalize the requested model name to the canonical registry key
             key = str(model_name).strip()
-            lower = key.lower()
-            # try direct map, then fall back to cleaned lowercase
-            if lower in _map:
-                canonical = _map[lower]
-            else:
-                # clean up common variants (remove spaces/underscores)
-                clean = lower.replace(" ", "").replace("_", "")
-                canonical = _map.get(clean, lower)
-
+            canonical = canonical_model_key(key)
             _log(f"get_parameters: normalized model key='{canonical}' (from '{model_name}')")
 
             # Obtain spec instance (using local get_model_spec)
@@ -363,6 +346,18 @@ class FitterViewModel(QObject):
             except Exception:
                 print(f"Failed to build parameter specs: {e}")
             return {}
+
+    def get_addable_model_names(self) -> list:
+        """Return a list of model display names that are addable (exclude constructed models).
+
+        This is a convenience wrapper for the view when presenting a list of elements
+        that can be added to composites.
+        """
+        try:
+            from models import get_available_model_names
+            return get_available_model_names(addable_only=True)
+        except Exception:
+            return []
 
     def _build_input_map(self, specs: dict) -> dict:
         """
