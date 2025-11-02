@@ -10,6 +10,10 @@ import matplotlib.pyplot as plt
 # Constants
 kB = 0.086173324  # meV/K
 
+# Interactive control scaling factors
+AREA_WHEEL_SCALE_FACTOR = 1.1  # 10% per scroll
+WIDTH_WHEEL_SCALE_FACTOR = 1.05  # 5% per scroll
+
 # This Gaussian is set to use a FWHM as the width instead of sigma and integrates to area
 def Gaussian(x, Area, Width, Center):
     return Area * np.sqrt(4 * np.log(2) / np.pi) / Width * np.exp(-4 * np.log(2) * (np.array(x) - Center) ** 2 / Width ** 2)
@@ -373,10 +377,10 @@ class GaussianModelSpec(BaseModelSpec):
         super().__init__()
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
                            hint="Integrated area of the Gaussian peak", decimals=6, step=0.1,
-                           input_hint={"wheel": {"action": "scale", "factor": 1.1}}))
+                           input_hint={"wheel": {"action": "scale", "factor": AREA_WHEEL_SCALE_FACTOR}}))
         self.add(Parameter("Width", value=1.0, ptype="float", minimum=1e-6,
                            hint="Gaussian FWHM", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
+                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": WIDTH_WHEEL_SCALE_FACTOR}}))
         self.add(Parameter("Center", value=0.0, ptype="float",
                            hint="Peak center (x-axis)",
                            input_hint={"drag": {"action": "set", "value_from": "x"}}))

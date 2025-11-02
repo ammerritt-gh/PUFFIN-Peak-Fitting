@@ -11,8 +11,14 @@ import sys
 import numpy as np
 from pathlib import Path
 
-# Add BigFit to path
-sys.path.insert(0, str(Path(__file__).parent / "BigFit"))
+# Add BigFit to path (handle both running from repo root and from BigFit dir)
+repo_root = Path(__file__).parent
+bigfit_dir = repo_root / "BigFit"
+if bigfit_dir.exists():
+    sys.path.insert(0, str(bigfit_dir))
+else:
+    # Assume we're already in BigFit directory
+    sys.path.insert(0, str(repo_root))
 
 def test_gaussian_defaults():
     """Test that GaussianModelSpec has correct default values."""
@@ -63,17 +69,17 @@ def test_input_hints():
             print("    (no input hint)")
     
     # Verify input hints
-    area_input = params["Area"].get("input")
+    area_input = params["Area"].get("input_hint") or params["Area"].get("input")
     assert area_input is not None, "Area should have input hint"
     assert "wheel" in area_input, "Area should have wheel control"
     assert area_input["wheel"]["action"] == "scale", "Area wheel should scale"
     
-    width_input = params["Width"].get("input")
+    width_input = params["Width"].get("input_hint") or params["Width"].get("input")
     assert width_input is not None, "Width should have input hint"
     assert "wheel" in width_input, "Width should have wheel control"
     assert "Ctrl" in width_input["wheel"]["modifiers"], "Width wheel should require Ctrl"
     
-    center_input = params["Center"].get("input")
+    center_input = params["Center"].get("input_hint") or params["Center"].get("input")
     assert center_input is not None, "Center should have input hint"
     assert "drag" in center_input, "Center should have drag control"
     assert center_input["drag"]["value_from"] == "x", "Center drag should use x coordinate"

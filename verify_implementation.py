@@ -6,8 +6,14 @@ This script doesn't require numpy or PySide6.
 import sys
 from pathlib import Path
 
-# Add BigFit to path
-sys.path.insert(0, str(Path(__file__).parent / "BigFit"))
+# Add BigFit to path (handle both running from repo root and from BigFit dir)
+repo_root = Path(__file__).parent
+bigfit_dir = repo_root / "BigFit"
+if bigfit_dir.exists():
+    sys.path.insert(0, str(bigfit_dir))
+else:
+    # Assume we're already in BigFit directory
+    sys.path.insert(0, str(repo_root))
 
 def verify_gaussian_spec():
     """Verify that GaussianModelSpec has the correct configuration."""
@@ -72,7 +78,7 @@ def verify_gaussian_spec():
         print("\nChecking input_hint configurations:")
         
         # Area should have wheel control (no modifier)
-        area_input = params["Area"].get("input") or params["Area"].get("input_hint")
+        area_input = params["Area"].get("input_hint") or params["Area"].get("input")
         if not area_input:
             print("  ✗ FAIL: Area has no input hint")
             return False
@@ -94,7 +100,7 @@ def verify_gaussian_spec():
         print("  ✓ Area: wheel control configured (scale by 1.1)")
         
         # Width should have wheel control with Ctrl modifier
-        width_input = params["Width"].get("input") or params["Width"].get("input_hint")
+        width_input = params["Width"].get("input_hint") or params["Width"].get("input")
         if not width_input:
             print("  ✗ FAIL: Width has no input hint")
             return False
@@ -118,7 +124,7 @@ def verify_gaussian_spec():
         print("  ✓ Width: Ctrl+wheel control configured (scale by 1.05)")
         
         # Center should have drag control
-        center_input = params["Center"].get("input") or params["Center"].get("input_hint")
+        center_input = params["Center"].get("input_hint") or params["Center"].get("input")
         if not center_input:
             print("  ✗ FAIL: Center has no input hint")
             return False
