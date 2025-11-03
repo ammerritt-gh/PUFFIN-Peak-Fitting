@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal, QTimer
 import pyqtgraph as pg
 import numpy as np
 from .input_handler import InputHandler
+from .custom_viewbox import InteractiveViewBox
 
 # -- color palette (change these) --
 PLOT_BG = "white"       # plot background
@@ -30,7 +31,6 @@ class MainWindow(QMainWindow):
         # debounce timers for auto-apply per-parameter
         self._debounce_timers = {}
         # debounce interval in milliseconds (tunable)
-        # debounce interval in milliseconds (tunable)
         # 0 -> immediate apply; keep debounce available for future tuning
         self.auto_apply_debounce_ms = 0
         # whether auto-apply is enabled (can add UI toggle later)
@@ -41,9 +41,20 @@ class MainWindow(QMainWindow):
         self._selected_curve = None
         # store original pen/visuals for curves so we can restore them
         self._curve_original_opts = {}
+        
+        # --- Custom ViewBox Interface Attributes ---
+        # These attributes are used by the InteractiveViewBox
+        self.exclude_mode = False  # Whether exclude mode is active
+        self.selected_kind = None  # Type of selected object ('fit', 'data', 'peak', etc.)
+        self.selected_obj = None   # Reference to the selected object
+        self.energy = None         # X data array (for compatibility with custom viewbox)
+        self.counts = None         # Y data array (for compatibility with custom viewbox)
+        self.excluded_mask = None  # Boolean array indicating excluded points
 
-        # --- Central Plot ---
-        self.plot_widget = pg.PlotWidget(title="Data and Fit")
+        # --- Central Plot with Custom ViewBox ---
+        # Create custom viewbox for interactive behavior
+        self.custom_viewbox = InteractiveViewBox(host=self)
+        self.plot_widget = pg.PlotWidget(title="Data and Fit", viewBox=self.custom_viewbox)
         self.setCentralWidget(self.plot_widget)
         self._init_plot()
         
@@ -241,6 +252,10 @@ class MainWindow(QMainWindow):
         # Ensure numeric numpy arrays are used (prevents list subtraction errors in ErrorBarItem)
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y_data, dtype=float)
+        
+        # Update energy/counts attributes for custom viewbox compatibility
+        self.energy = x_arr
+        self.counts = y_arr
 
         self.scatter.setData(x=x_arr, y=y_arr)
 
@@ -1148,3 +1163,177 @@ class MainWindow(QMainWindow):
                 self.viewmodel.handle_wheel_scroll(delta, modifiers)
         except Exception as e:
             self.append_log(f"Error handling wheel scroll: {e}")
+    
+    # --------------------------
+    # Custom ViewBox Interface Methods
+    # --------------------------
+    # The InteractiveViewBox expects these attributes and methods on the host:
+    
+    # Attributes that need to be present:
+    # - exclude_mode: bool indicating if exclude mode is active
+    # - selected_kind: str/None indicating type of selected object
+    # - selected_obj: object/None reference to selected object
+    # - energy: array of x data values
+    # - counts: array of y data values  
+    # - excluded_mask: boolean array indicating excluded points
+    
+    def _toggle_nearest_point_exclusion_xy(self, x, y, pixel_threshold=10):
+        """
+        Toggle exclusion of the nearest data point to (x, y).
+        
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space
+            pixel_threshold: Maximum distance in pixels to consider
+        """
+        try:
+            x_arr, y_arr, _ = self._last_plot_arrays
+            if x_arr is None or y_arr is None:
+                return
+            
+            # Find nearest point in data coordinates
+            diffs = np.abs(x_arr - x)
+            best_i = int(np.argmin(diffs))
+            
+            # Verify it's within pixel threshold
+            vb = self.plot_widget.getViewBox()
+            if vb is not None:
+                # Map point and click to device (pixel) coordinates
+                point_px = vb.mapViewToDevice(pg.Point(x_arr[best_i], y_arr[best_i]))
+                click_px = vb.mapViewToDevice(pg.Point(x, y))
+                pixel_dist = np.hypot(point_px.x() - click_px.x(), point_px.y() - click_px.y())
+                
+                if pixel_dist <= pixel_threshold:
+                    # Toggle exclusion for this point
+                    if not hasattr(self, 'excluded_mask') or self.excluded_mask is None:
+                        self.excluded_mask = np.zeros(len(x_arr), dtype=bool)
+                    elif len(self.excluded_mask) != len(x_arr):
+                        self.excluded_mask = np.zeros(len(x_arr), dtype=bool)
+                    
+                    self.excluded_mask[best_i] = not self.excluded_mask[best_i]
+                    
+                    # Update plot (implementation depends on plotting approach)
+                    self.append_log(f"Toggled exclusion for point at index {best_i}")
+                    
+                    # Request viewmodel to update if needed
+                    if self.viewmodel and hasattr(self.viewmodel, 'update_plot'):
+                        self.viewmodel.update_plot()
+        except Exception as e:
+            self.append_log(f"Error toggling point exclusion: {e}")
+    
+    def _nearest_target_xy(self, x, y, pixel_threshold=50):
+        """
+        Find the nearest selectable target (curve/marker) near (x, y).
+        
+        Args:
+            x: X coordinate in data space
+            y: Y coordinate in data space
+            pixel_threshold: Maximum distance in pixels to consider
+            
+        Returns:
+            tuple: (kind, obj) where kind is a string type and obj is the target,
+                   or (None, None) if no target found
+        """
+        try:
+            # Check if we clicked near the fit curve
+            x_arr, y_arr, yfit_arr = self._last_plot_arrays
+            
+            if yfit_arr is not None and x_arr is not None and len(x_arr) >= 2:
+                # Find nearest x index
+                idx = int(np.argmin(np.abs(x_arr - x)))
+                fit_y = float(yfit_arr[idx])
+                
+                # Check if y is close to fit curve
+                vb = self.plot_widget.getViewBox()
+                if vb is not None:
+                    curve_px = vb.mapViewToDevice(pg.Point(x_arr[idx], fit_y))
+                    click_px = vb.mapViewToDevice(pg.Point(x, y))
+                    dist = np.hypot(curve_px.x() - click_px.x(), curve_px.y() - click_px.y())
+                    
+                    if dist <= pixel_threshold:
+                        return ('fit', self.fit_curve)
+            
+            # Check if we clicked near a data point
+            if y_arr is not None and x_arr is not None and len(x_arr) >= 1:
+                idx = int(np.argmin(np.abs(x_arr - x)))
+                
+                vb = self.plot_widget.getViewBox()
+                if vb is not None:
+                    point_px = vb.mapViewToDevice(pg.Point(x_arr[idx], y_arr[idx]))
+                    click_px = vb.mapViewToDevice(pg.Point(x, y))
+                    dist = np.hypot(point_px.x() - click_px.x(), point_px.y() - click_px.y())
+                    
+                    if dist <= pixel_threshold:
+                        return ('data', self.scatter)
+            
+        except Exception as e:
+            self.append_log(f"Error finding nearest target: {e}")
+        
+        return (None, None)
+    
+    def set_selected(self, kind, obj):
+        """
+        Set the currently selected object.
+        
+        Args:
+            kind: Type of object ('fit', 'data', 'peak', etc.) or None
+            obj: The selected object or None
+        """
+        try:
+            self.selected_kind = kind
+            self.selected_obj = obj
+            
+            if kind is None:
+                self.append_log("Selection cleared")
+            else:
+                self.append_log(f"Selected: {kind}")
+            
+            # Update visual feedback
+            if kind == 'fit':
+                self._highlight_curve('fit', True)
+            elif kind == 'data':
+                self._highlight_curve('data', True)
+            else:
+                # Clear all highlights
+                for curve_name in ['fit', 'data']:
+                    try:
+                        self._highlight_curve(curve_name, False)
+                    except Exception:
+                        pass
+        except Exception as e:
+            self.append_log(f"Error setting selection: {e}")
+    
+    def _update_data_plot(self, do_range=True):
+        """
+        Update the data plot, optionally adjusting the view range.
+        
+        Args:
+            do_range: If True, auto-range the plot to fit data
+        """
+        try:
+            # This is a placeholder - actual implementation depends on plotting approach
+            # The custom viewbox calls this after exclude box selection
+            
+            # Request update from viewmodel
+            if self.viewmodel and hasattr(self.viewmodel, 'update_plot'):
+                self.viewmodel.update_plot()
+            
+            if do_range:
+                try:
+                    self.plot_widget.getViewBox().autoRange()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.append_log(f"Error updating data plot: {e}")
+    
+    def update_previews(self):
+        """
+        Update preview overlays (called by custom viewbox during drag).
+        """
+        try:
+            # Request update from viewmodel
+            if self.viewmodel and hasattr(self.viewmodel, 'update_plot'):
+                self.viewmodel.update_plot()
+        except Exception as e:
+            self.append_log(f"Error updating previews: {e}")
+
