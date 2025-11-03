@@ -9,6 +9,9 @@ from PySide6.QtCore import Qt
 import pyqtgraph as pg
 import numpy as np
 
+from view.view_box import CustomViewBox
+from view.input_handler import InputHandler
+
 # -- color palette (change these) --
 PLOT_BG = "white"       # plot background
 POINT_COLOR = "black"   # scatter points
@@ -44,9 +47,24 @@ class MainWindow(QMainWindow):
     # Plot setup
     # --------------------------
     def _init_plot(self):
-        # Replace line-plot for data with a scatter + error bars,
-        # keep a line plot for the fit.
-        # apply background and grid
+        # Use custom ViewBox for interactive behavior
+        self.viewbox = CustomViewBox()
+        self.plot_widget = pg.PlotWidget(viewBox=self.viewbox, title="Data and Fit")
+        self.setCentralWidget(self.plot_widget)
+
+        # optional InputHandler for global mouse/key binding
+        self.input_handler = InputHandler()
+        self.input_handler.set_viewmodel(self.viewmodel)
+        self.plot_widget.installEventFilter(self.input_handler)
+
+        # connect ViewBox interaction signals → ViewModel
+        if self.viewmodel:
+            self.viewbox.peakSelected.connect(self._on_peak_selected)
+            self.viewbox.peakMoved.connect(self._on_peak_moved)
+            self.viewbox.excludePointClicked.connect(self._on_exclude_point)
+            self.viewbox.excludeBoxDrawn.connect(self._on_exclude_box)
+
+        # --- visual setup ---
         self.plot_widget.setBackground(PLOT_BG)
         self.plot_widget.showGrid(x=True, y=True, alpha=GRID_ALPHA)
 
@@ -61,7 +79,7 @@ class MainWindow(QMainWindow):
         # fit line
         self.fit_curve = self.plot_widget.plot([], [], pen=pg.mkPen(FIT_COLOR, width=2), name="Fit")
 
-        # axis colors (safe: try each axis)
+        # axis colors
         for ax in ("left", "bottom", "right", "top"):
             try:
                 axis = self.plot_widget.getAxis(ax)
@@ -69,6 +87,30 @@ class MainWindow(QMainWindow):
                 axis.setTextPen(pg.mkPen(AXIS_COLOR))
             except Exception:
                 pass
+
+
+    # --------------------------
+    # Plot interaction callbacks
+    # --------------------------
+    def _on_peak_selected(self, x, y):
+        if self.viewmodel and hasattr(self.viewmodel, "on_peak_selected"):
+            self.viewmodel.on_peak_selected(x, y)
+        self.append_log(f"Selected peak near ({x:.3f}, {y:.3f})")
+
+    def _on_peak_moved(self, info):
+        if self.viewmodel and hasattr(self.viewmodel, "on_peak_moved"):
+            self.viewmodel.on_peak_moved(info)
+        self.append_log(f"Moved peak → center={info.get('center', 0):.3f}")
+
+    def _on_exclude_point(self, x, y):
+        if self.viewmodel and hasattr(self.viewmodel, "on_exclude_point"):
+            self.viewmodel.on_exclude_point(x, y)
+        self.append_log(f"Toggled exclusion at ({x:.3f}, {y:.3f})")
+
+    def _on_exclude_box(self, x0, y0, x1, y1):
+        if self.viewmodel and hasattr(self.viewmodel, "on_exclude_box"):
+            self.viewmodel.on_exclude_box(x0, y0, x1, y1)
+        self.append_log(f"Box exclusion from ({x0:.3f}, {y0:.3f}) → ({x1:.3f}, {y1:.3f})")
 
     # --------------------------
     # Docks
