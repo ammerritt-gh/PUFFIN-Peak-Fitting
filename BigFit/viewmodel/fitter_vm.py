@@ -282,9 +282,6 @@ class FitterViewModel(QObject):
                 "voigtmodel": "voigt",
                 "gaussian": "gaussian",
                 "gauss": "gaussian",
-                "dho": "dho",
-                "dho+voigt": "dho+voigt",
-                "dho_voigt": "dho+voigt",
             }
             key = str(model_name).strip()
             lower = key.lower()

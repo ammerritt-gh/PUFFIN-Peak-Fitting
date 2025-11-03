@@ -1,4 +1,4 @@
-# models/__init__.py
+﻿# models/__init__.py
 
 from .model_specs import (
     get_model_spec,
@@ -6,8 +6,6 @@ from .model_specs import (
     BaseModelSpec,
     GaussianModelSpec,
     VoigtModelSpec,
-    DHOModelSpec,
-    DHOVoigtModelSpec,
 )
 
 from .model_state import ModelState
@@ -18,7 +16,5 @@ __all__ = [
     "BaseModelSpec",
     "GaussianModelSpec",
     "VoigtModelSpec",
-    "DHOModelSpec",
-    "DHOVoigtModelSpec",
     "ModelState",
 ]
