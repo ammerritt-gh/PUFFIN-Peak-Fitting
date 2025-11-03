@@ -30,6 +30,7 @@
     <Compile Include="viewmodel\__init__.py" />
     <Compile Include="view\input_handler.py" />
     <Compile Include="view\main_window.py" />
+    <Compile Include="view\view_box.py" />
     <Compile Include="view\__init__.py" />
     <Compile Include="worker\fit_worker.py" />
     <Compile Include="worker\__init__.py" />
