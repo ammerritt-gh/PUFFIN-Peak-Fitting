@@ -1,4 +1,4 @@
-import numpy as np
+﻿import numpy as np
 from scipy.special import wofz, voigt_profile
 from scipy.fft import fft, ifft
 from scipy.interpolate import interp1d
@@ -395,109 +395,6 @@ class VoigtModelSpec(BaseModelSpec):
         except Exception:
             return super().evaluate(x, params)
 
-class DHOModelSpec(BaseModelSpec):
-    def __init__(self):
-        super().__init__()
-        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0,
-                           hint="Phonon energy (meV)", decimals=4, step=0.1))
-        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6,
-                           hint="DHO damping parameter", decimals=4, step=0.01))
-        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0,
-                           hint="Phonon amplitude (area-like)", decimals=6, step=0.01))
-        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0,
-                           hint="Elastic (zero-energy) amplitude", decimals=6, step=0.01))
-        self.add(Parameter("BG", value=0.0, ptype="float",
-                           hint="Flat background"))
-        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1,
-                           hint="Temperature (K)", decimals=2, step=0.1))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectral center"))
-
-    def initialize(self, data_x=None, data_y=None):
-        # as example, pick center near max if available
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
-        except Exception:
-            pass
-
-    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
-        """Simple visible DHO-like curve (no instrument convolution here)."""
-        try:
-            arr = np.asarray(x, dtype=float)
-            pvals = self.get_param_values(params)
-            center_spec = float(pvals.get("center", 0.0))
-            phonon_energy = float(pvals.get("phonon_energy", 5.0))
-            damping = float(pvals.get("damping", 0.5))
-            phonon_amp = float(pvals.get("phonon_amplitude", 0.1))
-            elastic_amp = float(pvals.get("elastic_amplitude", 0.0))
-            BG = float(pvals.get("BG", 0.0))
-            T = float(pvals.get("T", 10.0))
-
-            x_shifted = arr - center_spec
-            stokes = Stokes_DHO(x_shifted, amplitude=phonon_amp, damping=damping, center=phonon_energy)
-            try:
-                astokes_amp = phonon_amp / np.exp(phonon_energy / (kB * T))
-            except Exception:
-                astokes_amp = phonon_amp
-            astokes = antiStokes_DHO(x_shifted, amplitude=astokes_amp, damping=damping, center=phonon_energy)
-            elastic = narrow_gaussian_delta(arr, center_spec, amplitude=elastic_amp, fwhm=0.1)
-            return stokes + astokes + elastic + BG
-        except Exception:
-            return super().evaluate(x, params)
-
-class DHOVoigtModelSpec(BaseModelSpec):
-    """Composite DHO convolved with Voigt resolution + elastic Voigt."""
-    def __init__(self):
-        super().__init__()
-        # include DHO params
-        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0, hint="Phonon energy (meV)"))
-        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6, hint="DHO damping"))
-        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0, hint="Phonon amplitude"))
-        # Voigt resolution params
-        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0, hint="Gaussian FWHM of resolution"))
-        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0, hint="Lorentzian FWHM of resolution"))
-        # elastic and BG
-        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0, hint="Elastic Voigt area"))
-        self.add(Parameter("BG", value=0.0, ptype="float", hint="Flat background"))
-        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1, hint="Temperature (K)"))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectrum center"))
-
-    def initialize(self, data_x=None, data_y=None):
-        # example: set center from data if available
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
-        except Exception:
-            pass
-
-    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
-        """Use the convolute_voigt_dho helper to produce a visible, realistic line."""
-        try:
-            arr = np.asarray(x, dtype=float)
-            pvals = self.get_param_values(params)
-            phonon_energy = float(pvals.get("phonon_energy", 5.0))
-            damping = float(pvals.get("damping", 0.5))
-            phonon_amplitude = float(pvals.get("phonon_amplitude", 0.1))
-            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
-            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
-            elastic_amplitude = float(pvals.get("elastic_amplitude", 0.0))
-            BG = float(pvals.get("BG", 0.0))
-            T = float(pvals.get("T", 10.0))
-            center = float(pvals.get("center", 0.0))
-
-            return convolute_voigt_dho(arr, phonon_energy=phonon_energy, center=center,
-                                       gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm,
-                                       damping=damping, phonon_amplitude=phonon_amplitude,
-                                       elastic_amplitude=elastic_amplitude, BG=BG, T=T, peak='all')
-        except Exception:
-            return super().evaluate(x, params)
-
 # Factory / helper
 def get_model_spec(model_name: str) -> BaseModelSpec:
     name = (model_name or "").strip().lower()
@@ -505,9 +402,5 @@ def get_model_spec(model_name: str) -> BaseModelSpec:
         return GaussianModelSpec()
     if name in ("voigt", "voigtmodel"):
         return VoigtModelSpec()
-    if name in ("dho", "dhomodel", "dhoonly"):
-        return DHOModelSpec()
-    if name in ("dho+voigt", "dho_voigt", "dho+voigtmodel", "dho+voigtmodel"):
-        return DHOVoigtModelSpec()
     # default fallback
     return BaseModelSpec()
