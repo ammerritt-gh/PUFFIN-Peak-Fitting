@@ -1,4 +1,4 @@
-﻿# view/main_window.py
+# view/main_window.py
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QPushButton,
     QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
