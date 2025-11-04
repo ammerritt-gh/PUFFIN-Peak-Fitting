@@ -19,6 +19,8 @@ class CustomViewBox(pg.ViewBox):
     peakMoved = QtCore.Signal(dict)                      # {"center": x, "height": y, ...}
     excludePointClicked = QtCore.Signal(float, float)
     excludeBoxDrawn = QtCore.Signal(float, float, float, float)
+    # Emitted when exclude mode is changed (True=enabled, False=disabled)
+    excludeModeChanged = QtCore.Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -174,6 +176,11 @@ class CustomViewBox(pg.ViewBox):
 
     def set_exclude_mode(self, enabled: bool):
         self.exclude_mode = bool(enabled)
+        try:
+            # notify external UI (buttons, etc.) that mode changed
+            self.excludeModeChanged.emit(bool(self.exclude_mode))
+        except Exception:
+            pass
 
     def keyPressEvent(self, ev):
         if ev.key() == QtCore.Qt.Key_Space:
