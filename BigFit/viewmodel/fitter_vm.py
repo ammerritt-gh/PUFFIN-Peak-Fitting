@@ -531,8 +531,19 @@ class FitterViewModel(QObject):
 
         # Apply into model via the standard apply_parameters path so state and
         # model_spec are kept in sync and UI updates happen.
+        # Support both 'center' (lowercase) and 'Center' (capitalized) since
+        # some ModelSpecs (Gaussian) use "Center" while others use "center".
         try:
-            self.apply_parameters({"center": float(new_center)})
+            val = float(new_center)
+            # Try lowercase first (common), then capitalized for backward compatibility.
+            try:
+                self.apply_parameters({"center": val})
+            except Exception:
+                pass
+            try:
+                self.apply_parameters({"Center": val})
+            except Exception:
+                pass
             self.log_message.emit(f"Peak center updated -> {new_center}")
         except Exception:
             pass

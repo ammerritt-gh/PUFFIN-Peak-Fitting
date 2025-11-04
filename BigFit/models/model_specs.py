@@ -351,18 +351,27 @@ class BaseModelSpec:
 class GaussianModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
+        # Interactive controls added so the InputHandler / View can map
+        # wheel and mouse actions to these parameters.
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Gaussian peak", decimals=6, step=0.1))
-        self.add(Parameter("Width", value=0.1, ptype="float", minimum=1e-6,
-                           hint="Gaussian FWHM", decimals=6, step=0.01))
+                           hint="Integrated area of the Gaussian peak", decimals=6, step=0.1,
+                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.05}))
+        # Ctrl + wheel adjusts the width (FWHM)
+        self.add(Parameter("Width", value=2, ptype="float", minimum=1e-6,
+                           hint="Gaussian FWHM", decimals=6, step=0.01,
+                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.01}))
+        # Click-drag (mouse_move / peak drag) should update the center.
+        # Keep the parameter named "Center" (capital C) to match evaluate()'s
+        # argument names, but provide a control hint for the UI.
         self.add(Parameter("Center", value=0.0, ptype="float",
-                           hint="Peak center (x-axis)"))
+                           hint="Peak center (x-axis)",
+                           control={"action": "mouse_move", "modifiers": [], "sensitivity": 1.0}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
             pvals = self.get_param_values(params)
             Area = float(pvals.get("Area", 1.0))
-            Width = float(pvals.get("Width", 0.1))
+            Width = float(pvals.get("Width", 2.0))
             Center = float(pvals.get("Center", 0.0))
             return Gaussian(np.asarray(x, dtype=float), Area=Area, Width=Width, Center=Center)
         except Exception:
@@ -377,15 +386,15 @@ class VoigtModelSpec(BaseModelSpec):
                            hint="Integrated area of the Voigt peak", decimals=6, step=0.1,
                            control={"action": "wheel", "modifiers": [], "sensitivity": 0.05}))
         # Ctrl + wheel adjusts the gaussian contribution
-        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0,
+        self.add(Parameter("Gauss FWHM", value=1.14, ptype="float", minimum=0.0,
                            hint="Gaussian resolution FWHM", decimals=6, step=0.01,
                            control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.01}))
         # Shift + wheel adjusts the lorentzian contribution
-        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0,
+        self.add(Parameter("Lorentz FWHM", value=0.28, ptype="float", minimum=0.0,
                            hint="Lorentzian FWHM (HWHM*2)", decimals=6, step=0.01,
                            control={"action": "wheel", "modifiers": ["Shift"], "sensitivity": 0.01}))
         # Mouse movement (no modifiers) controls center by default
-        self.add(Parameter("center", value=0.0, ptype="float",
+        self.add(Parameter("Center", value=0.0, ptype="float",
                            hint="Peak center",
                            control={"action": "mouse_move", "modifiers": [], "sensitivity": 1.0}))
 
