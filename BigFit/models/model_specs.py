@@ -391,7 +391,7 @@ class VoigtModelSpec(BaseModelSpec):
                            control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.01}))
         # Shift + wheel adjusts the lorentzian contribution
         self.add(Parameter("Lorentz FWHM", value=0.28, ptype="float", minimum=0.0,
-                           hint="Lorentzian FWHM (HWHM*2)", decimals=6, step=0.01,
+                           hint="Lorentzian FWHM", decimals=6, step=0.01,
                            control={"action": "wheel", "modifiers": ["Shift"], "sensitivity": 0.01}))
         # Mouse movement (no modifiers) controls center by default
         self.add(Parameter("Center", value=0.0, ptype="float",
@@ -405,7 +405,7 @@ class VoigtModelSpec(BaseModelSpec):
                 arrx = np.asarray(data_x)
                 arry = np.asarray(data_y)
                 idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
+                self.params["Center"].value = float(arrx[idx])
         except Exception:
             pass
 
@@ -413,9 +413,9 @@ class VoigtModelSpec(BaseModelSpec):
         try:
             pvals = self.get_param_values(params)
             Area = float(pvals.get("Area", 1.0))
-            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
-            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
-            center = float(pvals.get("center", 0.0))
+            gauss_fwhm = float(pvals.get("Gauss FWHM", 1.14))
+            lorentz_fwhm = float(pvals.get("Lorentz FWHM", 0.28))
+            center = float(pvals.get("Center", 0.0))
             return Voigt(np.asarray(x, dtype=float), Area=Area, gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm, center=center)
         except Exception:
             return super().evaluate(x, params)
