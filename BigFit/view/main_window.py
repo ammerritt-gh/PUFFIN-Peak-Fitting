@@ -248,6 +248,13 @@ class MainWindow(QMainWindow):
 
         self.right_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.right_dock)
+        # Make the parameters dock wider by default so controls and hints are visible
+        try:
+            # A minimum width allows the user to resize smaller/larger while
+            # providing a comfortable default layout on startup.
+            self.right_dock.setMinimumWidth(360)
+        except Exception:
+            pass
 
         # Connect to ViewModel (if present)
         if self.viewmodel:
@@ -477,8 +484,10 @@ class MainWindow(QMainWindow):
                 widget = w
 
             # Keep the label text as the parameter name. If the spec provides an
-            # interactive control hint, expose it as a tooltip on the widget only
-            # so the UI isn't overwritten by hint text.
+            # interactive control hint, expose it both as a tooltip and as a
+            # small visible hint label next to the control so users can discover
+            # what mouse/keyboard actions affect the parameter.
+            hint = ""
             try:
                 if isinstance(spec, dict) and spec.get("control"):
                     ctrl = spec.get("control")
@@ -491,7 +500,24 @@ class MainWindow(QMainWindow):
                         pass
             except Exception:
                 pass
-            new_form.addRow(name + ":", widget)
+
+            # Container so we can show the widget and a right-hand hint label
+            container_h = QWidget()
+            hbox = QHBoxLayout(container_h)
+            hbox.setContentsMargins(0, 0, 0, 0)
+            hbox.addWidget(widget)
+            if hint:
+                hint_label = QLabel(f"({hint})")
+                # subtle visual style so it's unobtrusive but readable
+                hint_label.setStyleSheet("color: gray; font-size: 11px;")
+                hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                hint_label.setToolTip(f"Interactive control: {hint}")
+                hbox.addWidget(hint_label)
+            else:
+                # keep layout stable when no hint exists
+                hbox.addWidget(QLabel(""))
+
+            new_form.addRow(name + ":", container_h)
             new_param_widgets[name] = widget
 
         # Replace the widget shown in the scroll area (frees old widgets)
