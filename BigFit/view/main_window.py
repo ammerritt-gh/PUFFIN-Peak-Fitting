@@ -16,7 +16,7 @@ from view.input_handler import InputHandler
 PLOT_BG = "white"       # plot background
 POINT_COLOR = "black"   # scatter points
 ERROR_COLOR = "black"   # error bars (can match points)
-FIT_COLOR = "red"     # fit line
+FIT_COLOR = "purple"     # fit line
 AXIS_COLOR = "black"    # axis and tick labels
 GRID_ALPHA = 0.5
 
@@ -26,6 +26,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PUMA Peak Fitter")
         self.viewmodel = viewmodel
         self.param_widgets = {}   # name -> widget
+        self.curves = {}  # curve_id -> PlotDataItem
+        self.selected_curve_id = None
 
         # --- Central Plot ---
         self.plot_widget = pg.PlotWidget(title="Data and Fit")
@@ -60,9 +62,14 @@ class MainWindow(QMainWindow):
         # connect ViewBox interaction signals → ViewModel
         if self.viewmodel:
             self.viewbox.peakSelected.connect(self._on_peak_selected)
+            self.viewbox.peakDeselected.connect(lambda: self.viewmodel.set_selected_curve(None))
             self.viewbox.peakMoved.connect(self._on_peak_moved)
             self.viewbox.excludePointClicked.connect(self._on_exclude_point)
             self.viewbox.excludeBoxDrawn.connect(self._on_exclude_box)
+
+        # connect curve selection changes
+        self.viewmodel.curve_selection_changed.connect(self._on_curve_selected)
+
 
         # --- visual setup ---
         self.plot_widget.setBackground(PLOT_BG)
@@ -266,9 +273,20 @@ class MainWindow(QMainWindow):
         # Fit line (if present)
         if y_fit is not None:
             yfit_arr = np.asarray(y_fit, dtype=float)
-            self.fit_curve.setData(x_arr, yfit_arr)
+            if "fit" not in self.curves:
+                curve = self.plot_widget.plot(x_arr, yfit_arr, pen=pg.mkPen(FIT_COLOR, width=2))
+                self.curves["fit"] = curve
+                curve.curve_id = "fit"
+                # Enable clicking on curve
+                curve.scene().sigMouseClicked.connect(lambda ev, cid="fit": self._on_curve_clicked(ev, cid))
+            else:
+                self.curves["fit"].setData(x_arr, yfit_arr)
         else:
-            self.fit_curve.clear()
+            # remove fit curve if exists
+            if "fit" in self.curves:
+                self.plot_widget.removeItem(self.curves["fit"])
+                del self.curves["fit"]
+
 
     def _on_apply_clicked(self):
         if not self.viewmodel:
@@ -513,3 +531,26 @@ class MainWindow(QMainWindow):
                     self.append_log("Configuration save failed.")
             except Exception as e:
                 self.append_log(f"Error saving configuration: {e}")
+
+    def _on_curve_clicked(self, event, curve_id):
+        """Handle mouse click on a curve."""
+        if not self.viewmodel:
+            return
+        # Set this as the selected curve
+        self.viewmodel.set_selected_curve(curve_id)
+
+    def _on_curve_selected(self, curve_id):
+        """Highlight the selected curve visually."""
+        # Deselect previous
+        if self.selected_curve_id and self.selected_curve_id in self.curves:
+            curve = self.curves[self.selected_curve_id]
+            curve.setPen(pg.mkPen(FIT_COLOR, width=2))
+        self.selected_curve_id = curve_id
+
+        # Highlight new
+        if curve_id and curve_id in self.curves:
+            curve = self.curves[curve_id]
+            curve.setPen(pg.mkPen('red', width=4))
+        self.append_log(f"Curve selection changed → {curve_id or 'none'}")
+
+
