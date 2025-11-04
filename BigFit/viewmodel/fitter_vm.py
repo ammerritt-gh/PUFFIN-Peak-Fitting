@@ -469,6 +469,11 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+        # Notify views that parameters changed so UI can refresh widgets
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
 
     # --------------------------
     # Curve selection management
@@ -499,3 +504,35 @@ class FitterViewModel(QObject):
             self._selected_curve_id = None
             self.curve_selection_changed.emit(None)
             self.log_message.emit("Curve selection cleared.")
+
+    # --------------------------
+    # Peak interaction hooks (called from the view)
+    # --------------------------
+    def on_peak_selected(self, x, y):
+        """Optional hook called when the View announces a peak was selected.
+
+        Default: no-op. Implementations may choose to select a curve or
+        prepare for a drag.
+        """
+        # default: do nothing, but keep method present so the view can call it
+        return
+
+    def on_peak_moved(self, info: dict):
+        """Called when the View reports a peak was moved.
+
+        This will map a movement of the selected peak to the model's 'center'
+        parameter if present.
+        """
+        if not isinstance(info, dict):
+            return
+        new_center = info.get("center", None)
+        if new_center is None:
+            return
+
+        # Apply into model via the standard apply_parameters path so state and
+        # model_spec are kept in sync and UI updates happen.
+        try:
+            self.apply_parameters({"center": float(new_center)})
+            self.log_message.emit(f"Peak center updated -> {new_center}")
+        except Exception:
+            pass
