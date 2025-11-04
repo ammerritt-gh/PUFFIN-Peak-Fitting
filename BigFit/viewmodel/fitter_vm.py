@@ -45,10 +45,22 @@ class FitterViewModel(QObject):
         x = x[:common_len]
         y = y[:common_len]
         err = err[:common_len]
-        self.state.x_data = x
-        self.state.y_data = y
-        self.state.errors = err
-        self.state.file_info = info
+        # Use ModelState.set_data so it resets derived state (like exclusion mask)
+        try:
+            self.state.set_data(x, y)
+        except Exception:
+            # fallback to direct assignment if set_data unavailable
+            self.state.x_data = x
+            self.state.y_data = y
+        # Attach provided errors and file info
+        try:
+            self.state.errors = err
+        except Exception:
+            pass
+        try:
+            self.state.file_info = info
+        except Exception:
+            pass
         self.log_message.emit(f"Loaded data file: {info['name']}")
         self.update_plot()
 

@@ -344,6 +344,11 @@ class MainWindow(QMainWindow):
                 excl_mask = np.asarray(self.viewmodel.state.excluded, dtype=bool)
                 # ensure mask length matches
                 if len(excl_mask) != len(x_arr):
+                    # mismatch — ignore mask and log for debugging
+                    try:
+                        self.append_log(f"Exclusion mask length {len(excl_mask)} != x length {len(x_arr)} — ignoring exclusions")
+                    except Exception:
+                        pass
                     excl_mask = None
         except Exception:
             excl_mask = None
