@@ -120,13 +120,18 @@ class FitterViewModel(QObject):
             return
 
         # basic data checks
-        x = getattr(self.state, "x_data", None)
-        y = getattr(self.state, "y_data", None)
+        # Use masked (included) data for fitting so excluded points are ignored
+        try:
+            x_incl, y_incl, err_incl = self.state.get_masked_data()
+        except Exception:
+            x_incl, y_incl, err_incl = None, None, None
+        x = x_incl if x_incl is not None else getattr(self.state, "x_data", None)
+        y = y_incl if y_incl is not None else getattr(self.state, "y_data", None)
         if x is None or y is None:
             self.log_message.emit("No data available to fit.")
             return
 
-        err = getattr(self.state, "errors", None)
+        err = err_incl if err_incl is not None else getattr(self.state, "errors", None)
 
         # obtain model_spec (use existing or create one)
         model_spec = getattr(self.state, "model_spec", None)
@@ -221,7 +226,18 @@ class FitterViewModel(QObject):
                     except Exception:
                         pass
 
-                    self.plot_updated.emit(x, y, y_fit, err)
+                    # Build a full-domain fit curve for plotting (evaluate on full x_data)
+                    full_y_fit = None
+                    try:
+                        # build ordered param list
+                        vals = [result.get(k) for k in param_keys]
+                        full_y_fit = wrapped_func(getattr(self.state, "x_data", np.array([])), *vals)
+                    except Exception:
+                        full_y_fit = None
+
+                    # Emit full-domain plot update (original full data)
+                    full_errs = getattr(self.state, "errors", None)
+                    self.plot_updated.emit(getattr(self.state, "x_data", x), getattr(self.state, "y_data", y), full_y_fit, full_errs)
                     self.log_message.emit("Fit completed successfully.")
                 else:
                     self.log_message.emit("Fit failed.")
@@ -247,6 +263,39 @@ class FitterViewModel(QObject):
         errs = getattr(self.state, "errors", None)
         errs = None if errs is None else np.asarray(errs, dtype=float)
         self.plot_updated.emit(self.state.x_data, self.state.y_data, y_fit, errs)
+
+    # --------------------------
+    # Exclusion management (called from InputHandler/View)
+    # --------------------------
+    def toggle_point_exclusion(self, x, y, tol=0.05):
+        """Toggle exclusion for the nearest point to (x,y)."""
+        try:
+            if hasattr(self.state, "toggle_point_exclusion"):
+                idx = self.state.toggle_point_exclusion(x, y, tol=tol)
+                self.log_message.emit(f"Toggled exclusion for point index: {idx}")
+            else:
+                self.log_message.emit("State does not support point exclusion.")
+        except Exception as e:
+            self.log_message.emit(f"Failed to toggle point exclusion: {e}")
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
+    def toggle_box_exclusion(self, x0, y0, x1, y1):
+        """Toggle exclusion for points inside the given box."""
+        try:
+            if hasattr(self.state, "toggle_box_exclusion"):
+                inds = self.state.toggle_box_exclusion(x0, y0, x1, y1)
+                self.log_message.emit(f"Toggled exclusion for {len(inds)} points.")
+            else:
+                self.log_message.emit("State does not support box exclusion.")
+        except Exception as e:
+            self.log_message.emit(f"Failed to toggle box exclusion: {e}")
+        try:
+            self.update_plot()
+        except Exception:
+            pass
 
     def get_parameters(self) -> dict:
         """Return parameter specs for the current model.

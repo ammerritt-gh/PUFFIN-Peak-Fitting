@@ -301,6 +301,25 @@ class InputHandler(QObject):
                 self.viewbox.clear_selection()
             self.clear_selected_curve()
             return True
+        elif key == Qt.Key_D:
+            # Toggle exclude mode on the ViewBox
+            try:
+                if self.viewbox is not None and hasattr(self.viewbox, "set_exclude_mode"):
+                    current = getattr(self.viewbox, "exclude_mode", False)
+                    new = not bool(current)
+                    try:
+                        self.viewbox.set_exclude_mode(new)
+                    except Exception:
+                        pass
+                    # notify via ViewModel log if available
+                    try:
+                        if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+                            self.viewmodel.log_message.emit(f"Exclude mode {'enabled' if new else 'disabled'} (hotkey)")
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                pass
         return False
 
     # -----------------------
