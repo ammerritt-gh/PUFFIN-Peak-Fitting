@@ -58,6 +58,19 @@ class MainWindow(QMainWindow):
         self.input_handler = InputHandler()
         self.input_handler.set_viewmodel(self.viewmodel)
         self.plot_widget.installEventFilter(self.input_handler)
+        # Also install event filter on the ViewBox so we can intercept wheel events
+        # (ViewBox handles zoom by default). This allows the InputHandler to
+        # intercept wheel events when a curve is selected and use them for
+        # parameter updates instead of zooming.
+        try:
+            self.viewbox.installEventFilter(self.input_handler)
+            # keep a backref so the ViewBox can delegate wheel handling when needed
+            try:
+                setattr(self.viewbox, "_input_handler", self.input_handler)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # connect ViewBox interaction signals → ViewModel
         if self.viewmodel:
@@ -68,6 +81,11 @@ class MainWindow(QMainWindow):
             self.viewbox.excludeBoxDrawn.connect(self._on_exclude_box)
 
         # connect curve selection changes
+        # Let the InputHandler know when the selected curve changes (no notify back)
+        try:
+            self.viewmodel.curve_selection_changed.connect(lambda cid: self.input_handler.set_selected_curve(cid, notify_vm=False))
+        except Exception:
+            pass
         self.viewmodel.curve_selection_changed.connect(self._on_curve_selected)
 
 
@@ -100,11 +118,28 @@ class MainWindow(QMainWindow):
     # Plot interaction callbacks
     # --------------------------
     def _on_peak_selected(self, x, y):
+        # Only forward peak selection to the ViewModel when a curve is selected
+        try:
+            if hasattr(self, "input_handler") and getattr(self.input_handler, "selected_curve_id", None) is None:
+                # ignore peak selection unless a curve is selected
+                self.append_log("Peak clicked but no curve selected — ignored.")
+                return
+        except Exception:
+            pass
+
         if self.viewmodel and hasattr(self.viewmodel, "on_peak_selected"):
             self.viewmodel.on_peak_selected(x, y)
         self.append_log(f"Selected peak near ({x:.3f}, {y:.3f})")
 
     def _on_peak_moved(self, info):
+        # Only forward peak movement when a curve is selected
+        try:
+            if hasattr(self, "input_handler") and getattr(self.input_handler, "selected_curve_id", None) is None:
+                self.append_log("Peak moved but no curve selected — ignored.")
+                return
+        except Exception:
+            pass
+
         if self.viewmodel and hasattr(self.viewmodel, "on_peak_moved"):
             self.viewmodel.on_peak_moved(info)
         self.append_log(f"Moved peak → center={info.get('center', 0):.3f}")
@@ -441,6 +476,21 @@ class MainWindow(QMainWindow):
                     w.setText(str(val))
                 widget = w
 
+            # Keep the label text as the parameter name. If the spec provides an
+            # interactive control hint, expose it as a tooltip on the widget only
+            # so the UI isn't overwritten by hint text.
+            try:
+                if isinstance(spec, dict) and spec.get("control"):
+                    ctrl = spec.get("control")
+                    action = ctrl.get("action") or ""
+                    mods = "+".join(ctrl.get("modifiers", [])) if ctrl.get("modifiers") else ""
+                    hint = f"{action}" + (f"+{mods}" if mods else "")
+                    try:
+                        widget.setToolTip(f"Interactive: {hint}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             new_form.addRow(name + ":", widget)
             new_param_widgets[name] = widget
 
@@ -449,6 +499,30 @@ class MainWindow(QMainWindow):
         self.param_scroll.setWidget(new_widget)
         self.param_form_widget = new_widget
         self.param_form = new_form
+        # Build control map for InputHandler based on specs' optional 'control' entries.
+        control_map = {}
+        try:
+            for name, spec in specs.items():
+                try:
+                    if isinstance(spec, dict) and "control" in spec:
+                        ctrl = spec.get("control") or {}
+                        action = ctrl.get("action")
+                        mods = tuple(sorted(ctrl.get("modifiers", []))) if ctrl.get("modifiers") is not None else tuple()
+                        sensitivity = float(ctrl.get("sensitivity", 1.0))
+                        key = (action, mods)
+                        control_map.setdefault(key, []).append({"name": name, "sensitivity": sensitivity})
+                except Exception:
+                    continue
+        except Exception:
+            control_map = {}
+
+        # Provide control map to input handler if available
+        try:
+            if hasattr(self, "input_handler") and self.input_handler is not None:
+                self.input_handler.set_control_map(control_map)
+        except Exception:
+            pass
+
         self.param_widgets = new_param_widgets
 
         # No legacy fallbacks: the view exposes only the dynamic param_widgets mapping.

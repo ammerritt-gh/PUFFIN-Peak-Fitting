@@ -110,6 +110,25 @@ class CustomViewBox(pg.ViewBox):
         super().mouseDragEvent(ev, axis)
 
     def wheelEvent(self, ev, axis=None):
+        # If an InputHandler has been attached by the MainWindow and a curve
+        # is selected, give the InputHandler a chance to handle the wheel
+        # event for parameter updates (prevents zooming).
+        ih = getattr(self, "_input_handler", None)
+        try:
+            if ih is not None and getattr(ih, "selected_curve_id", None) is not None:
+                try:
+                    handled = ih.on_wheel(self, ev)
+                    if handled:
+                        try:
+                            ev.accept()
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if self.exclude_mode or self._dragging:
             ev.accept()
             return
