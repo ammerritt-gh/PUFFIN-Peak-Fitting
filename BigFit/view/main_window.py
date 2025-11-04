@@ -185,6 +185,20 @@ class MainWindow(QMainWindow):
         exclude_btn = QPushButton("Exclude")
         exclude_btn.setCheckable(True)
         layout.addWidget(exclude_btn)
+        # keep a reference for external updates (e.g. hotkey toggles)
+        self.exclude_btn = exclude_btn
+        # wire the button to the viewbox so clicking updates exclude mode
+        try:
+            if hasattr(self, "viewbox") and self.viewbox is not None:
+                exclude_btn.toggled.connect(self.viewbox.set_exclude_mode)
+                # Keep the button state synced when the viewbox mode is changed
+                if hasattr(self.viewbox, "excludeModeChanged"):
+                    try:
+                        self.viewbox.excludeModeChanged.connect(exclude_btn.setChecked)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         layout.addStretch(1)
 
         self.left_dock.setWidget(left_widget)
