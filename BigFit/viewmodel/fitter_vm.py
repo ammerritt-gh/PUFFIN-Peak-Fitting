@@ -14,9 +14,11 @@ class FitterViewModel(QObject):
     Central logic layer: handles loading/saving, fitting, and updates to the plot.
     """
 
-    plot_updated = Signal(object, object, object, object)  # x, y_data, y_fit, y_err
+    plot_updated = Signal(object, object, object, object)   # x, y_data, y_fit, y_err
+    curve_selection_changed = Signal(object)                # emits curve_id or None
     log_message = Signal(str)
     parameters_updated = Signal()
+
 
     def __init__(self, model_state=None):
         super().__init__()
@@ -467,3 +469,33 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+
+    # --------------------------
+    # Curve selection management
+    # --------------------------
+    def __init__(self, model_state=None):
+        super().__init__()
+        self.state = model_state or ModelState()
+        self._fit_worker = None
+        self._selected_curve_id = None  # currently selected curve ID (str or None)
+
+    def set_selected_curve(self, curve_id: _typing.Optional[str]):
+        """Set the active curve selection. Emits a signal if changed."""
+        old = self._selected_curve_id
+        if old != curve_id:
+            self._selected_curve_id = curve_id
+            self.curve_selection_changed.emit(curve_id)
+            self.log_message.emit(
+                f"Curve selection changed: {curve_id if curve_id else 'None'}"
+            )
+
+    def get_selected_curve(self) -> _typing.Optional[str]:
+        """Return the currently selected curve ID (or None if nothing selected)."""
+        return self._selected_curve_id
+
+    def clear_selected_curve(self):
+        """Deselect any active curve."""
+        if self._selected_curve_id is not None:
+            self._selected_curve_id = None
+            self.curve_selection_changed.emit(None)
+            self.log_message.emit("Curve selection cleared.")
