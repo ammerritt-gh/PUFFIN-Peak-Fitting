@@ -14,7 +14,13 @@ class ModelState:
     def __init__(self, model_name: str = "Voigt"):
         # Experimental data
         self.x_data = np.linspace(-20, 20, 801)
+        # create y with a small gaussian peak + noise (same as before)
         self.y_data = np.exp(-0.5 * (self.x_data / 3) ** 2) + np.random.normal(0, 0.02, len(self.x_data))
+
+        # Per-point uncertainties / errors (used for plotting error bars and fits)
+        # Default to the known noise level used when generating y_data above so
+        # error bars are visible on the initial plot.
+        self.errors = np.full_like(self.x_data, 0.02, dtype=float)
 
         # Current model and fit result
         self.model_name = model_name
@@ -27,10 +33,29 @@ class ModelState:
     # ------------------------------------------------------------------
     # Data accessors
     # ------------------------------------------------------------------
-    def set_data(self, x: np.ndarray, y: np.ndarray):
+    def set_data(self, x: np.ndarray, y: np.ndarray, errors: Optional[np.ndarray] = None):
+        """Set dataset; optionally provide per-point errors.
+
+        If errors is None, a sensible default will be used based on y (Poisson-like
+        sqrt(|y|)) or a small floor value to avoid zeros.
+        """
         self.x_data = np.asarray(x)
         self.y_data = np.asarray(y)
-        self.model_spec.initialize(x, y)
+
+        if errors is None:
+            # use sqrt(|y|) as a reasonable default for counting data, but
+            # clamp to a small non-zero floor so plotting doesn't break
+            try:
+                default_err = np.sqrt(np.clip(np.abs(self.y_data), 1e-12, np.inf))
+                # ensure a minimum error corresponding to the typical noise
+                floor = 1e-3
+                self.errors = np.maximum(default_err, floor)
+            except Exception:
+                self.errors = np.full_like(self.x_data, 1e-2, dtype=float)
+        else:
+            self.errors = np.asarray(errors, dtype=float)
+
+        self.model_spec.initialize(self.x_data, self.y_data)
 
     def get_data(self):
         return self.x_data, self.y_data
@@ -173,6 +198,7 @@ class ModelState:
             "model_name": self.model_name,
             "x": self.x_data.tolist(),
             "y": self.y_data.tolist(),
+            "errors": None if getattr(self, "errors", None) is None else np.asarray(self.errors).tolist(),
             "parameters": {k: v.value for k, v in self.model_spec.params.items()},
         }
 
@@ -181,6 +207,14 @@ class ModelState:
         self.model_name = snap.get("model_name", self.model_name)
         self.x_data = np.array(snap["x"])
         self.y_data = np.array(snap["y"])
+
+        # restore errors if present
+        if "errors" in snap and snap.get("errors") is not None:
+            try:
+                self.errors = np.asarray(snap.get("errors"), dtype=float)
+            except Exception:
+                # fallback to sensible default
+                self.errors = np.full_like(self.x_data, 1e-2, dtype=float)
 
         # rebuild the model spec
         self.model_spec = get_model_spec(self.model_name)
