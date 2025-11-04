@@ -14,12 +14,7 @@ class ModelState:
     def __init__(self, model_name: str = "Voigt"):
         # Experimental data
         self.x_data = np.linspace(-20, 20, 801)
-        # create y with a small gaussian peak + noise (same as before)
         self.y_data = np.exp(-0.5 * (self.x_data / 3) ** 2) + np.random.normal(0, 0.02, len(self.x_data))
-
-        # Per-point uncertainties / errors (used for plotting error bars and fits)
-        # Default to the known noise level used when generating y_data above so
-        # error bars are visible on the initial plot.
         self.errors = np.full_like(self.x_data, 0.02, dtype=float)
 
         # Current model and fit result
@@ -29,36 +24,109 @@ class ModelState:
 
         # Initialize parameters based on current data
         self.model_spec.initialize(self.x_data, self.y_data)
+        # Exclusion mask (False = included, True = excluded)
+        try:
+            self.excluded = np.zeros_like(self.x_data, dtype=bool)
+        except Exception:
+            self.excluded = np.array([], dtype=bool)
 
     # ------------------------------------------------------------------
     # Data accessors
     # ------------------------------------------------------------------
-    def set_data(self, x: np.ndarray, y: np.ndarray, errors: Optional[np.ndarray] = None):
-        """Set dataset; optionally provide per-point errors.
-
-        If errors is None, a sensible default will be used based on y (Poisson-like
-        sqrt(|y|)) or a small floor value to avoid zeros.
-        """
+    def set_data(self, x: np.ndarray, y: np.ndarray):
         self.x_data = np.asarray(x)
         self.y_data = np.asarray(y)
-
-        if errors is None:
-            # use sqrt(|y|) as a reasonable default for counting data, but
-            # clamp to a small non-zero floor so plotting doesn't break
-            try:
-                default_err = np.sqrt(np.clip(np.abs(self.y_data), 1e-12, np.inf))
-                # ensure a minimum error corresponding to the typical noise
-                floor = 1e-3
-                self.errors = np.maximum(default_err, floor)
-            except Exception:
-                self.errors = np.full_like(self.x_data, 1e-2, dtype=float)
-        else:
-            self.errors = np.asarray(errors, dtype=float)
-
-        self.model_spec.initialize(self.x_data, self.y_data)
+        self.errors = np.full_like(self.x_data, 0.02, dtype=float)
+        self.model_spec.initialize(x, y)
+        # reset exclusion mask to match new data length
+        try:
+            self.excluded = np.zeros_like(self.x_data, dtype=bool)
+        except Exception:
+            self.excluded = np.array([], dtype=bool)
 
     def get_data(self):
         return self.x_data, self.y_data
+
+    # ------------------------------------------------------------------
+    # Exclusion helpers
+    # ------------------------------------------------------------------
+    def get_included_mask(self):
+        """Return boolean mask where True means included (not excluded)."""
+        try:
+            return ~np.asarray(self.excluded, dtype=bool)
+        except Exception:
+            try:
+                return np.ones_like(self.x_data, dtype=bool)
+            except Exception:
+                return np.array([], dtype=bool)
+
+    def get_masked_data(self):
+        """Return (x_included, y_included, err_included or None) for fitting.
+
+        err array is optional and returned if available on state as `errors`.
+        """
+        mask = self.get_included_mask()
+        try:
+            x = np.asarray(self.x_data)[mask]
+            y = np.asarray(self.y_data)[mask]
+        except Exception:
+            return np.array([]), np.array([]), None
+        err = getattr(self, "errors", None)
+        if err is None:
+            return x, y, None
+        try:
+            err = np.asarray(err)[mask]
+        except Exception:
+            err = None
+        return x, y, err
+
+    def toggle_point_exclusion(self, x, y, tol=0.05):
+        """Toggle exclusion state of the nearest point to (x,y) within tol.
+        Returns index toggled or None if none found.
+        """
+        try:
+            xd = np.asarray(self.x_data)
+            yd = np.asarray(self.y_data)
+            if len(xd) == 0:
+                return None
+            dists = np.hypot(xd - float(x), yd - float(y))
+            idx = int(np.argmin(dists))
+            if dists[idx] <= float(tol):
+                try:
+                    self.excluded[idx] = not bool(self.excluded[idx])
+                except Exception:
+                    pass
+                return idx
+        except Exception:
+            pass
+        return None
+
+    def toggle_box_exclusion(self, x0, y0, x1, y1):
+        """Toggle exclusion for points inside the axis-aligned box.
+
+        If all points inside are currently excluded, they will be set to included.
+        Otherwise all points within the box will be set to excluded.
+        Returns array of indices affected (may be empty).
+        """
+        try:
+            xd = np.asarray(self.x_data)
+            yd = np.asarray(self.y_data)
+            if len(xd) == 0:
+                return np.array([], dtype=int)
+            lx, hx = (min(x0, x1), max(x0, x1))
+            ly, hy = (min(y0, y1), max(y0, y1))
+            inside = (xd >= lx) & (xd <= hx) & (yd >= ly) & (yd <= hy)
+            inds = np.nonzero(inside)[0]
+            if inds.size == 0:
+                return inds
+            # if all inside are excluded, un-exclude them, else exclude them
+            if np.all(self.excluded[inds]):
+                self.excluded[inds] = False
+            else:
+                self.excluded[inds] = True
+            return inds
+        except Exception:
+            return np.array([], dtype=int)
 
     # ------------------------------------------------------------------
     # Model parameter handling
@@ -198,8 +266,8 @@ class ModelState:
             "model_name": self.model_name,
             "x": self.x_data.tolist(),
             "y": self.y_data.tolist(),
-            "errors": None if getattr(self, "errors", None) is None else np.asarray(self.errors).tolist(),
             "parameters": {k: v.value for k, v in self.model_spec.params.items()},
+            "excluded": np.asarray(self.excluded).astype(bool).tolist(),
         }
 
     def load_from_snapshot(self, snap: Dict[str, Any]):
@@ -208,13 +276,25 @@ class ModelState:
         self.x_data = np.array(snap["x"])
         self.y_data = np.array(snap["y"])
 
-        # restore errors if present
-        if "errors" in snap and snap.get("errors") is not None:
+        # restore exclusion mask if present, otherwise reset
+        exc = snap.get("excluded", None)
+        try:
+            if exc is None:
+                self.excluded = np.zeros_like(self.x_data, dtype=bool)
+            else:
+                arr = np.asarray(exc, dtype=bool)
+                # if length mismatches, attempt to pad/truncate
+                if len(arr) != len(self.x_data):
+                    a = np.zeros_like(self.x_data, dtype=bool)
+                    a[: min(len(a), len(arr))] = arr[: len(a)]
+                    self.excluded = a
+                else:
+                    self.excluded = arr
+        except Exception:
             try:
-                self.errors = np.asarray(snap.get("errors"), dtype=float)
+                self.excluded = np.zeros_like(self.x_data, dtype=bool)
             except Exception:
-                # fallback to sensible default
-                self.errors = np.full_like(self.x_data, 1e-2, dtype=float)
+                self.excluded = np.array([], dtype=bool)
 
         # rebuild the model spec
         self.model_spec = get_model_spec(self.model_name)

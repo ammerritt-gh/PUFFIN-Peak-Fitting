@@ -54,9 +54,8 @@ class MainWindow(QMainWindow):
         self.plot_widget = pg.PlotWidget(viewBox=self.viewbox, title="Data and Fit")
         self.setCentralWidget(self.plot_widget)
 
-        # optional InputHandler for global mouse/key binding
-        self.input_handler = InputHandler()
-        self.input_handler.set_viewmodel(self.viewmodel)
+        # optional InputHandler for global mouse/key binding (pass viewbox so it can connect signals)
+        self.input_handler = InputHandler(self.viewbox, self.viewmodel)
         self.plot_widget.installEventFilter(self.input_handler)
         # Also install event filter on the ViewBox so we can intercept wheel events
         # (ViewBox handles zoom by default). This allows the InputHandler to
@@ -96,6 +95,12 @@ class MainWindow(QMainWindow):
         # scatter (data points)
         self.scatter = pg.ScatterPlotItem(size=6, pen=None, brush=pg.mkBrush(POINT_COLOR))
         self.plot_widget.addItem(self.scatter)
+        # excluded points overlay (small grey 'x' markers)
+        try:
+            self.excluded_scatter = pg.ScatterPlotItem(size=8, pen=pg.mkPen('gray'), brush=None, symbol='x')
+            self.plot_widget.addItem(self.excluded_scatter)
+        except Exception:
+            self.excluded_scatter = None
 
         # error bars
         self.err_item = pg.ErrorBarItem(pen=pg.mkPen(ERROR_COLOR))
@@ -176,6 +181,10 @@ class MainWindow(QMainWindow):
         layout.addWidget(reload_cfg_btn)
         layout.addWidget(config_btn)
         layout.addWidget(update_btn)
+        # Exclude toggle (click to enable box/point exclusion)
+        exclude_btn = QPushButton("Exclude")
+        exclude_btn.setCheckable(True)
+        layout.addWidget(exclude_btn)
         layout.addStretch(1)
 
         self.left_dock.setWidget(left_widget)
@@ -189,6 +198,23 @@ class MainWindow(QMainWindow):
             update_btn.clicked.connect(self.viewmodel.update_plot)
             reload_cfg_btn.clicked.connect(getattr(self.viewmodel, "reload_config", lambda: None))
             config_btn.clicked.connect(self._on_edit_config_clicked)
+            # Exclude mode button toggles the CustomViewBox exclude_mode
+            def _on_exclude_toggled(checked):
+                try:
+                    self.viewbox.set_exclude_mode(bool(checked))
+                    # ensure input handler knows selection state
+                    try:
+                        self.input_handler.selected_curve_id = self.input_handler.selected_curve_id
+                    except Exception:
+                        pass
+                    if checked:
+                        self.append_log("Exclude mode enabled.")
+                    else:
+                        self.append_log("Exclude mode disabled.")
+                except Exception as e:
+                    self.append_log(f"Failed to toggle exclude mode: {e}")
+
+            exclude_btn.toggled.connect(_on_exclude_toggled)
 
     def _init_right_dock(self):
         # Replaced static parameter controls with a dynamic, scrollable form.
@@ -297,20 +323,87 @@ class MainWindow(QMainWindow):
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y_data, dtype=float)
 
-        self.scatter.setData(x=x_arr, y=y_arr)
-
-        # Draw vertical error bars when provided
-        if y_err is not None and len(y_err) == len(y_arr):
-            top = np.abs(np.asarray(y_err, dtype=float))
-            bottom = top
-            self.err_item.setData(x=x_arr, y=y_arr, top=top, bottom=bottom)
-        else:
-            # clear error bars using numpy arrays (avoid passing Python lists)
-            empty = np.array([], dtype=float)
+        # If the ViewModel exposes an exclusion mask, split included/excluded points
+        excl_mask = None
+        try:
+            if self.viewmodel is not None and hasattr(self.viewmodel, "state") and hasattr(self.viewmodel.state, "excluded"):
+                excl_mask = np.asarray(self.viewmodel.state.excluded, dtype=bool)
+                # ensure mask length matches
+                if len(excl_mask) != len(x_arr):
+                    excl_mask = None
+        except Exception:
+            excl_mask = None
+        # normalize incoming error array as numpy array when present
+        y_err_arr = None
+        if y_err is not None:
             try:
-                self.err_item.setData(x=empty, y=empty, top=empty, bottom=empty)
+                y_err_arr = np.asarray(y_err, dtype=float)
             except Exception:
-                pass
+                y_err_arr = None
+
+        if excl_mask is None:
+            # no exclusions — show all points in primary scatter
+            self.scatter.setData(x=x_arr, y=y_arr)
+            # clear excluded overlay
+            if self.excluded_scatter is not None:
+                try:
+                    self.excluded_scatter.setData(x=np.array([], dtype=float), y=np.array([], dtype=float))
+                except Exception:
+                    pass
+            # Draw vertical error bars when provided (all points)
+            if y_err_arr is not None and len(y_err_arr) == len(y_arr):
+                top = np.abs(y_err_arr)
+                bottom = top
+                self.err_item.setData(x=x_arr, y=y_arr, top=top, bottom=bottom)
+            else:
+                # clear error bars using numpy arrays (avoid passing Python lists)
+                empty = np.array([], dtype=float)
+                try:
+                    self.err_item.setData(x=empty, y=empty, top=empty, bottom=empty)
+                except Exception:
+                    pass
+        else:
+            incl = ~excl_mask
+            try:
+                x_in = x_arr[incl]
+                y_in = y_arr[incl]
+            except Exception:
+                x_in = np.array([], dtype=float)
+                y_in = np.array([], dtype=float)
+            try:
+                x_ex = x_arr[excl_mask]
+                y_ex = y_arr[excl_mask]
+            except Exception:
+                x_ex = np.array([], dtype=float)
+                y_ex = np.array([], dtype=float)
+
+            self.scatter.setData(x=x_in, y=y_in)
+            if self.excluded_scatter is not None:
+                try:
+                    self.excluded_scatter.setData(x=x_ex, y=y_ex)
+                except Exception:
+                    pass
+
+            # Error bars only for included points
+            if y_err_arr is not None:
+                try:
+                    # if full-length, index it by included mask; if it already matches included length, use directly
+                    if len(y_err_arr) == len(y_arr):
+                        top = np.abs(y_err_arr[incl])
+                        bottom = top
+                        self.err_item.setData(x=x_in, y=y_in, top=top, bottom=bottom)
+                    elif len(y_err_arr) == len(x_in):
+                        top = np.abs(y_err_arr)
+                        bottom = top
+                        self.err_item.setData(x=x_in, y=y_in, top=top, bottom=bottom)
+                    else:
+                        empty = np.array([], dtype=float)
+                        try:
+                            self.err_item.setData(x=empty, y=empty, top=empty, bottom=empty)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
         # Fit line (if present)
         if y_fit is not None:
