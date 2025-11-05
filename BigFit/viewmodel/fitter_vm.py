@@ -1,6 +1,7 @@
 ﻿# viewmodel/fitter_vm.py
 from PySide6.QtCore import QObject, Signal
 import numpy as np
+import os
 from types import SimpleNamespace
 
 from models import ModelState
@@ -61,6 +62,19 @@ class FitterViewModel(QObject):
             self.state.file_info = info
         except Exception:
             pass
+        # Persist last-loaded file and folder to config (if available)
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            if info and isinstance(info, dict) and info.get("path"):
+                cfg.last_loaded_file = info.get("path")
+                cfg.default_load_folder = os.path.dirname(info.get("path")) or cfg.default_load_folder
+                try:
+                    cfg.save()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self.log_message.emit(f"Loaded data file: {info['name']}")
         self.update_plot()
 
@@ -69,6 +83,48 @@ class FitterViewModel(QObject):
         y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
         save_dataset(self.state.x_data, self.state.y_data, y_fit=y_fit)
         self.log_message.emit("Data saved successfully.")
+
+    def clear_plot(self):
+        """Reset to initial synthetic dataset and clear stored last-loaded file in config."""
+        try:
+            # reset state to fresh ModelState instance
+            self.state = ModelState()
+            # clear any running worker reference
+            try:
+                self._fit_worker = None
+            except Exception:
+                pass
+
+            # clear saved last-loaded file in config if available
+            try:
+                from dataio import get_config
+                cfg = get_config()
+                cfg.last_loaded_file = None
+                try:
+                    cfg.save()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # notify UI
+            try:
+                self.log_message.emit("Cleared last dataset and restored initial synthetic data.")
+            except Exception:
+                pass
+            try:
+                self.update_plot()
+            except Exception:
+                pass
+            try:
+                self.parameters_updated.emit()
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.log_message.emit(f"Failed to clear plot: {e}")
+            except Exception:
+                pass
 
     # --------------------------
     # Configuration accessors (ViewModel handles logic/persistence)
