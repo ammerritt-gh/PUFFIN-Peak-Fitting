@@ -242,8 +242,28 @@ class MainWindow(QMainWindow):
 
         # Model selector placed at the top of the parameters panel
         self.model_selector = QComboBox()
-        # Provide common model names; viewmodel.get_parameters / get_model_spec will accept these.
-        self.model_selector.addItems(["Voigt", "Gaussian"])
+        # Populate model selector dynamically from discovered model specs where possible.
+        try:
+            # lazy import to avoid circular imports at module import time
+            from models import get_available_model_names
+            import re
+
+            def _pretty(name: str) -> str:
+                # remove trailing 'ModelSpec' and split CamelCase into words
+                s = re.sub(r"ModelSpec$", "", name)
+                s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
+                return s.strip()
+
+            spec_class_names = get_available_model_names()
+            display_names = [_pretty(n) for n in spec_class_names]
+            # ensure we have at least the historical defaults as fallback
+            if display_names:
+                self.model_selector.addItems(display_names)
+            else:
+                self.model_selector.addItems(["Voigt", "Gaussian"])
+        except Exception:
+            # Fall back to the original static list if discovery fails
+            self.model_selector.addItems(["Voigt", "Gaussian"])
         vlayout.addWidget(QLabel("Model:"))
         vlayout.addWidget(self.model_selector)
 

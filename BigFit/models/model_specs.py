@@ -420,6 +420,33 @@ class VoigtModelSpec(BaseModelSpec):
         except Exception:
             return super().evaluate(x, params)
 
+
+class LinearBackgroundModelSpec(BaseModelSpec):
+    """Simple linear background y = m*x + b
+
+    Parameters exposed to the view are:
+      - "Slope" (m)
+      - "Intercept" (b)
+    """
+    def __init__(self):
+        super().__init__()
+        # slope (m)
+        self.add(Parameter("Slope", value=0.0, ptype="float", hint="Linear slope (m)", decimals=6, step=0.01,
+                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.01}))
+        # intercept (b)
+        self.add(Parameter("Intercept", value=0.0, ptype="float", hint="Vertical offset / intercept (b)", decimals=6, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.1}))
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        try:
+            pvals = self.get_param_values(params)
+            m = float(pvals.get("Slope", 0.0))
+            b = float(pvals.get("Intercept", 0.0))
+            xarr = np.asarray(x, dtype=float)
+            return m * xarr + b
+        except Exception:
+            return super().evaluate(x, params)
+
 # Factory / helper
 def get_model_spec(model_name: str) -> BaseModelSpec:
     name = (model_name or "").strip().lower()
@@ -427,5 +454,7 @@ def get_model_spec(model_name: str) -> BaseModelSpec:
         return GaussianModelSpec()
     if name in ("voigt", "voigtmodel"):
         return VoigtModelSpec()
+    if name in ("linear", "linear background", "linearbackground", "linearbackgroundmodel", "linearbg", "background", "linear model"):
+        return LinearBackgroundModelSpec()
     # default fallback
     return BaseModelSpec()
