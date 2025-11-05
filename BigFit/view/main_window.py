@@ -171,16 +171,16 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("Save Data")
         fit_btn = QPushButton("Run Fit")
         update_btn = QPushButton("Update Plot")
-        reload_cfg_btn = QPushButton("Reload Config")
+        clear_btn = QPushButton("Clear Plot")
         config_btn = QPushButton("Edit Config")
 
         layout.addWidget(QLabel("Data Controls"))
         layout.addWidget(load_btn)
         layout.addWidget(save_btn)
         layout.addWidget(fit_btn)
-        layout.addWidget(reload_cfg_btn)
         layout.addWidget(config_btn)
         layout.addWidget(update_btn)
+        layout.addWidget(clear_btn)
         # Exclude toggle (click to enable box/point exclusion)
         exclude_btn = QPushButton("Exclude")
         exclude_btn.setCheckable(True)
@@ -210,7 +210,11 @@ class MainWindow(QMainWindow):
             save_btn.clicked.connect(self.viewmodel.save_data)
             fit_btn.clicked.connect(self.viewmodel.run_fit)
             update_btn.clicked.connect(self.viewmodel.update_plot)
-            reload_cfg_btn.clicked.connect(getattr(self.viewmodel, "reload_config", lambda: None))
+            # Clear plot button resets to synthetic initial data and clears saved last file
+            try:
+                clear_btn.clicked.connect(getattr(self.viewmodel, "clear_plot", lambda: None))
+            except Exception:
+                pass
             config_btn.clicked.connect(self._on_edit_config_clicked)
             # Exclude mode button toggles the CustomViewBox exclude_mode
             def _on_exclude_toggled(checked):
@@ -695,11 +699,14 @@ class MainWindow(QMainWindow):
             form.addRow("Default Save Folder:", save_h)
             browse_save.clicked.connect(self._browse_save)
 
-            # buttons
+            # buttons: Save, Cancel, and Reload (reload reads config from disk)
             buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            reload_btn = QPushButton("Reload")
+            buttons.addButton(reload_btn, QDialogButtonBox.ActionRole)
             form.addRow(buttons)
             buttons.accepted.connect(self.accept)
             buttons.rejected.connect(self.reject)
+            reload_btn.clicked.connect(self._on_reload_clicked)
 
         def _browse_load(self):
             d = QFileDialog.getExistingDirectory(self, "Select Default Load Folder", self.load_edit.text() or "")
@@ -710,6 +717,29 @@ class MainWindow(QMainWindow):
             d = QFileDialog.getExistingDirectory(self, "Select Default Save Folder", self.save_edit.text() or "")
             if d:
                 self.save_edit.setText(d)
+
+        def _on_reload_clicked(self):
+            """Reload configuration from disk via the parent ViewModel and refresh fields."""
+            try:
+                parent = self.parent()
+                if parent and hasattr(parent, "viewmodel") and parent.viewmodel:
+                    try:
+                        parent.viewmodel.reload_config()
+                    except Exception:
+                        pass
+                    try:
+                        cfg = parent.viewmodel.get_config()
+                        self.load_edit.setText(str(cfg.get("default_load_folder", "")))
+                        self.save_edit.setText(str(cfg.get("default_save_folder", "")))
+                        # also inform user in the main log
+                        try:
+                            parent.append_log("Configuration reloaded into dialog.")
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     def _on_edit_config_clicked(self):
         """Open the configuration editor dialog (view-only)."""

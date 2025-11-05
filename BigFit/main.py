@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QSpinBox, QCheckBox,
 from models import ModelState
 from view.main_window import MainWindow
 from viewmodel.fitter_vm import FitterViewModel
+import os
 
 
 def main():
@@ -80,6 +81,47 @@ def main():
     try:
         on_param_changed()
     except Exception:
+        pass
+
+    # Attempt to restore the last-loaded dataset from the config (if present).
+    # This keeps the app state persistent between runs.
+    try:
+        from dataio import get_config, load_data_from_file
+        cfg = get_config()
+        last = getattr(cfg, "last_loaded_file", None)
+        if last and os.path.isfile(last):
+            try:
+                x, y, err, info = load_data_from_file(last)
+                # Use ModelState.set_data if available so it resets derived state
+                try:
+                    model_state.set_data(x, y)
+                except Exception:
+                    model_state.x_data = x
+                    model_state.y_data = y
+                try:
+                    model_state.errors = err
+                except Exception:
+                    pass
+                try:
+                    model_state.file_info = info
+                except Exception:
+                    pass
+                # notify via viewmodel and update plot
+                try:
+                    viewmodel.log_message.emit(f"Restored last dataset: {info.get('name')}")
+                except Exception:
+                    pass
+                try:
+                    viewmodel.update_plot()
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    viewmodel.log_message.emit(f"Failed to restore last dataset: {e}")
+                except Exception:
+                    pass
+    except Exception:
+        # ignore config/load failures — app should continue normally
         pass
 
     window.show()

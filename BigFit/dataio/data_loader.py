@@ -189,6 +189,24 @@ def select_and_load_files(parent=None):
     if not filepaths:
         return []
 
+    # Persist the folder and last-loaded file to configuration so future dialogs
+    # open in the same directory and UI can remember what was last loaded.
+    try:
+        # import via package wrapper to avoid circular imports at module import time
+        from dataio import get_config
+        cfg = get_config()
+        # store first selected file and its directory
+        try:
+            cfg.last_loaded_file = filepaths[0]
+            cfg.default_load_folder = os.path.dirname(filepaths[0]) or cfg.default_load_folder
+            cfg.save()
+        except Exception:
+            # be tolerant — don't block loading if config write fails
+            pass
+    except Exception:
+        # ignore if config subsystem not available
+        pass
+
     data_list = []
     for fp in filepaths:
         try:
