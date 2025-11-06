@@ -611,6 +611,24 @@ class FitterViewModel(QObject):
         except Exception:
             pass
 
+    def clear_exclusions(self):
+        """Include all points (clear any exclusion mask) without touching model parameters."""
+        try:
+            if hasattr(self.state, "excluded"):
+                try:
+                    self.state.excluded = np.zeros_like(getattr(self.state, "x_data", np.array([])), dtype=bool)
+                except Exception:
+                    self.state.excluded = np.array([], dtype=bool)
+                self.log_message.emit("Cleared all exclusions (included all points).")
+            else:
+                self.log_message.emit("No exclusion mask present on state.")
+        except Exception as e:
+            self.log_message.emit(f"Failed to clear exclusions: {e}")
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
     def get_parameters(self) -> dict:
         """Return parameter specs for the current model.
 
