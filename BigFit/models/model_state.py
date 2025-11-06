@@ -13,9 +13,25 @@ class ModelState:
 
     def __init__(self, model_name: str = "Voigt"):
         # Experimental data
-        self.x_data = np.linspace(-20, 20, 801)
-        self.y_data = np.exp(-0.5 * (self.x_data / 3) ** 2) + np.random.normal(0, 0.02, len(self.x_data))
-        self.errors = np.full_like(self.x_data, 0.02, dtype=float)
+        # x values centered on zero
+        self.x_data = np.linspace(-20, 20, 161)
+        # Create a Gaussian-shaped expectation (center 0, sigma=3) and sample
+        # Poisson-distributed counts from it to emulate counting data. Use a
+        # reasonable peak count so the Poisson noise is visible but not
+        # overwhelming.
+        peak_counts = 50.0
+        expectation = peak_counts * np.exp(-0.5 * (self.x_data / 3) ** 2) + 1
+        # Poisson sample — returns integers; cast to float for downstream code
+        try:
+            self.y_data = np.random.poisson(expectation).astype(float)
+        except Exception:
+            # fallback to Gaussian + small noise if Poisson sampling fails
+            self.y_data = expectation + np.random.normal(0, 0.02, len(self.x_data))
+        # Poisson errors: sqrt(counts). Avoid zero uncertainties by flooring to 1.0
+        try:
+            self.errors = np.sqrt(np.maximum(self.y_data, 1.0)).astype(float)
+        except Exception:
+            self.errors = np.full_like(self.x_data, 1.0, dtype=float)
 
         # Current model and fit result
         self.model_name = model_name
@@ -36,7 +52,18 @@ class ModelState:
     def set_data(self, x: np.ndarray, y: np.ndarray):
         self.x_data = np.asarray(x)
         self.y_data = np.asarray(y)
-        self.errors = np.full_like(self.x_data, 0.02, dtype=float)
+        # Default error handling for user-provided data: if data look like
+        # counting data (non-negative integers), use sqrt(counts); otherwise
+        # fall back to a small constant uncertainty.
+        try:
+            y_arr = np.asarray(y, dtype=float)
+            if np.all(y_arr >= 0) and np.all(np.isfinite(y_arr)):
+                # treat as counts (or non-negative measurements)
+                self.errors = np.sqrt(np.maximum(y_arr, 1.0)).astype(float)
+            else:
+                self.errors = np.full_like(self.x_data, 0.02, dtype=float)
+        except Exception:
+            self.errors = np.full_like(self.x_data, 0.02, dtype=float)
         self.model_spec.initialize(x, y)
         # reset exclusion mask to match new data length
         try:

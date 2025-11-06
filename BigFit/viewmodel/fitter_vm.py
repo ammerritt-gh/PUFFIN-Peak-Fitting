@@ -332,6 +332,24 @@ class FitterViewModel(QObject):
         errs = None if errs is None else np.asarray(errs, dtype=float)
         self.plot_updated.emit(self.state.x_data, self.state.y_data, y_fit, errs)
 
+    def compute_statistics(self, y_fit=None, n_params: int = 0) -> dict:
+        """Compute common fit statistics (reduced chi-squared, Cash) for current state.
+
+        Returns a dict with keys: 'reduced_chi2', 'cash', 'reduced_cash'. Values may be None on failure.
+        This method performs a lazy import of models.metrics to avoid module-time coupling.
+        """
+        try:
+            # import locally to avoid circular imports at module import time
+            from models.metrics import compute_statistics_from_state
+            stats = compute_statistics_from_state(self.state, y_fit, n_params)
+            return stats
+        except Exception as e:
+            try:
+                self.log_message.emit(f"Failed to compute statistics: {e}")
+            except Exception:
+                pass
+            return {"reduced_chi2": None, "cash": None, "reduced_cash": None}
+
     # --------------------------
     # Exclusion management (called from InputHandler/View)
     # --------------------------

@@ -267,6 +267,16 @@ class MainWindow(QMainWindow):
         vlayout.addWidget(QLabel("Model:"))
         vlayout.addWidget(self.model_selector)
 
+        # Chi-squared display (placed above the parameter list)
+        self.chi_label = QLabel("Chi-squared: N/A")
+        try:
+            f = self.chi_label.font()
+            f.setPointSize(max(8, f.pointSize() - 1))
+            self.chi_label.setFont(f)
+        except Exception:
+            pass
+        vlayout.addWidget(self.chi_label)
+
         # set initial selection from viewmodel/state if available
         try:
             if self.viewmodel:
@@ -449,6 +459,70 @@ class MainWindow(QMainWindow):
                     pass
 
         # Fit line (if present)
+        # Compute and display reduced chi-squared (2 decimals) and Cash statistic (delegated to ViewModel)
+        try:
+            # determine included arrays (preserve original inclusion logic)
+            if excl_mask is None:
+                xin = x_arr
+                yin = y_arr
+                if y_err_arr is not None and len(y_err_arr) == len(y_arr):
+                    errin = y_err_arr
+                else:
+                    errin = None
+                yfit_for_chi = None if y_fit is None else np.asarray(y_fit, dtype=float)
+            else:
+                xin = x_in if 'x_in' in locals() else np.array([], dtype=float)
+                yin = y_in if 'y_in' in locals() else np.array([], dtype=float)
+                if y_err_arr is None:
+                    errin = None
+                else:
+                    if len(y_err_arr) == len(y_arr):
+                        errin = y_err_arr[~excl_mask]
+                    elif len(y_err_arr) == len(xin):
+                        errin = y_err_arr
+                    else:
+                        errin = None
+                if y_fit is None:
+                    yfit_for_chi = None
+                else:
+                    yfit_full = np.asarray(y_fit, dtype=float)
+                    if len(yfit_full) == len(x_arr):
+                        yfit_for_chi = yfit_full[~excl_mask]
+                    elif len(yfit_full) == len(xin):
+                        yfit_for_chi = yfit_full
+                    else:
+                        yfit_for_chi = None
+
+            reduced_str = "N/A"
+            red_cash_str = "N/A"
+
+            if self.viewmodel is not None and yfit_for_chi is not None and xin.size > 0:
+                try:
+                    n_params = max(0, len(self.param_widgets))
+                    stats = self.viewmodel.compute_statistics(y_fit=yfit_for_chi, n_params=n_params)
+                    red = stats.get("reduced_chi2")
+                    red_cash = stats.get("reduced_cash")
+                    if red is not None:
+                        reduced_str = f"{red:.2f}"
+                    if red_cash is not None:
+                        red_cash_str = f"{red_cash:.2f}"
+                except Exception:
+                    reduced_str = "N/A"
+                    red_cash_str = "N/A"
+
+            label_text = f"reduced χ²={reduced_str}; reduced Cash={red_cash_str}"
+            try:
+                if hasattr(self, 'chi_label') and self.chi_label is not None:
+                    self.chi_label.setText(label_text)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                if hasattr(self, 'chi_label') and self.chi_label is not None:
+                    self.chi_label.setText("reduced χ²=N/A; Cash=N/A")
+            except Exception:
+                pass
+
         if y_fit is not None:
             yfit_arr = np.asarray(y_fit, dtype=float)
             if "fit" not in self.curves:
