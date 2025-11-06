@@ -10,8 +10,10 @@ from .model_specs import (
     DHOVoigtModelSpec,
     LorentzModelSpec,
     LinearBackgroundModelSpec,
+    CompositeModelSpec,
     get_available_model_names,
     canonical_model_key,
+    MODEL_REGISTRY,
 )
 
 from .model_state import ModelState
@@ -26,7 +28,9 @@ __all__ = [
     "DHOVoigtModelSpec",
     "LorentzModelSpec",
     "LinearBackgroundModelSpec",
+    "CompositeModelSpec",
     "get_available_model_names",
     "canonical_model_key",
+    "MODEL_REGISTRY",
     "ModelState",
 ]
