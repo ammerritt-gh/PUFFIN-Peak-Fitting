@@ -209,6 +209,7 @@ def convolute_gaussian_dho(x_target, phonon_energy, center, gauss_fwhm, lorentz_
     return y
 
 from typing import Any, Dict, Optional, List
+import copy
 
 # Allowed input action keys that model parameter specs may provide.
 # Models should use these keys (case-sensitive): "drag", "wheel", "hotkey".
@@ -644,8 +645,35 @@ def canonical_model_key(name: str) -> str:
 def get_model_spec(model_name: str) -> BaseModelSpec:
     """Create and return a ModelSpec instance for the requested model name.
 
-    The lookup accepts canonical keys, display names, or common aliases.
+    The lookup accepts:
+    - Canonical keys and display names from MODEL_REGISTRY
+    - Custom models with "Custom: <name>" or "custom:<name>" format
     """
+    # Check if this is a custom model request
+    name_lower = str(model_name).lower().strip()
+    
+    # Handle "Custom: Name" or "custom:Name" format
+    if name_lower.startswith("custom:") or name_lower.startswith("custom "):
+        # Extract the actual custom model name
+        if ":" in model_name:
+            custom_name = model_name.split(":", 1)[1].strip()
+        else:
+            # "Custom Name" format
+            custom_name = model_name.split(None, 1)[1].strip() if " " in model_name else ""
+        
+        try:
+            from models.custom_model_registry import get_custom_model_registry
+            registry = get_custom_model_registry()
+            model_data = registry.get_model(custom_name)
+            
+            if model_data:
+                components = model_data.get("components", [])
+                return CompositeModelSpec(components)
+        except Exception as e:
+            print(f"Failed to load custom model '{custom_name}': {e}")
+            return BaseModelSpec()
+    
+    # Standard built-in model lookup
     ent = _find_registry_entry(model_name)
     if ent is None:
         return BaseModelSpec()
@@ -665,4 +693,170 @@ def get_available_model_names(addable_only: bool = False) -> list:
         if addable_only and e.get("is_constructed"):
             continue
         names.append(e.get("display", e.get("key")))
+    
+    # Add custom models from the registry
+    try:
+        from models.custom_model_registry import get_custom_model_registry
+        registry = get_custom_model_registry()
+        custom_names = registry.get_custom_model_names()
+        for name in custom_names:
+            names.append(f"Custom: {name}")
+    except Exception:
+        pass
+    
     return names
+
+
+class CompositeModelSpec(BaseModelSpec):
+    """A composite model that sums the outputs of multiple component models.
+    
+    Each component is defined by:
+      - base_spec: the canonical key of the base model (e.g., "gaussian")
+      - label: a user-friendly label (e.g., "Gaussian 1")
+      - params: a dict of parameter values specific to this component
+    
+    Parameters are organized into groups, one per component.
+    """
+    
+    def __init__(self, components: Optional[List[Dict[str, Any]]] = None):
+        """Initialize a composite model.
+        
+        Args:
+            components: List of component dicts, each with:
+                - base_spec: str (canonical model key)
+                - label: str (display label)
+                - params: dict (parameter values)
+        """
+        super().__init__()
+        self.is_constructed = True  # Composites are constructed, not addable to other composites
+        self.components = components or []
+        
+        # Build parameter map: create independent copies of parameters for each component
+        self._rebuild_params()
+    
+    def _rebuild_params(self):
+        """Rebuild the params dict from components."""
+        self.params.clear()
+        
+        for idx, comp in enumerate(self.components):
+            try:
+                base_spec_key = comp.get("base_spec", "")
+                label = comp.get("label", f"Component {idx+1}")
+                comp_params = comp.get("params", {})
+                
+                # Get the base model spec
+                base_spec = get_model_spec(base_spec_key)
+                
+                # Create prefixed parameters for this component
+                # Format: "label::param_name"
+                for param_name, param_obj in base_spec.params.items():
+                    # Make a copy of the Parameter object
+                    param_copy = copy.deepcopy(param_obj)
+                    
+                    # Override value if provided in component params
+                    if param_name in comp_params:
+                        param_copy.value = comp_params[param_name]
+                    
+                    # Store with prefixed name
+                    prefixed_name = f"{label}::{param_name}"
+                    self.params[prefixed_name] = param_copy
+            
+            except Exception as e:
+                print(f"Failed to add component {idx} to composite: {e}")
+    
+    def get_parameters(self) -> Dict[str, Any]:
+        """Return grouped parameter specs for UI display.
+        
+        Returns a dict with a special "groups" key containing grouped parameters:
+        {
+            "groups": [
+                {
+                    "label": "Gaussian 1",
+                    "params": {
+                        "Area": {"value": 1.0, "type": "float", ...},
+                        ...
+                    }
+                },
+                ...
+            ]
+        }
+        
+        For backwards compatibility, also includes flattened params with prefixed names.
+        """
+        # Build grouped structure
+        groups = []
+        
+        for idx, comp in enumerate(self.components):
+            label = comp.get("label", f"Component {idx+1}")
+            base_spec_key = comp.get("base_spec", "")
+            
+            # Get base spec to know which params belong to this component
+            try:
+                base_spec = get_model_spec(base_spec_key)
+                base_param_names = list(base_spec.params.keys())
+            except Exception:
+                base_param_names = []
+            
+            # Collect parameters for this group
+            group_params = {}
+            for param_name in base_param_names:
+                prefixed_name = f"{label}::{param_name}"
+                if prefixed_name in self.params:
+                    param_obj = self.params[prefixed_name]
+                    group_params[param_name] = param_obj.to_spec()
+            
+            if group_params:
+                groups.append({
+                    "label": label,
+                    "base_spec": base_spec_key,
+                    "params": group_params,
+                    "component_index": idx
+                })
+        
+        # Return both grouped and flat representations
+        result = {
+            "groups": groups
+        }
+        
+        # Also add flattened params for backwards compatibility
+        for name, p in self.params.items():
+            result[name] = p.to_spec()
+        
+        return result
+    
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        """Evaluate the composite model by summing all component outputs."""
+        try:
+            x_arr = np.asarray(x, dtype=float)
+            result = np.zeros_like(x_arr)
+            
+            # Get current parameter values
+            param_values = self.get_param_values(params)
+            
+            # Evaluate each component and sum
+            for idx, comp in enumerate(self.components):
+                try:
+                    base_spec_key = comp.get("base_spec", "")
+                    label = comp.get("label", f"Component {idx+1}")
+                    
+                    # Get base spec
+                    base_spec = get_model_spec(base_spec_key)
+                    
+                    # Extract parameters for this component (remove prefix)
+                    comp_params = {}
+                    for param_name in base_spec.params.keys():
+                        prefixed_name = f"{label}::{param_name}"
+                        if prefixed_name in param_values:
+                            comp_params[param_name] = param_values[prefixed_name]
+                    
+                    # Evaluate component
+                    component_output = base_spec.evaluate(x_arr, comp_params)
+                    result += component_output
+                
+                except Exception as e:
+                    print(f"Failed to evaluate component {idx} in composite: {e}")
+            
+            return result
+        
+        except Exception:
+            return super().evaluate(x, params)

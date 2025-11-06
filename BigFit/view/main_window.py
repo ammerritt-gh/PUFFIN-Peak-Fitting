@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QPushButton,
     QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
     QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog,
-    QScrollArea, QSpinBox, QCheckBox
+    QScrollArea, QSpinBox, QCheckBox, QGroupBox, QMessageBox, QInputDialog
 )
 from PySide6.QtCore import Qt, Signal, QTimer
 import pyqtgraph as pg
@@ -148,6 +148,12 @@ class MainWindow(QMainWindow):
         self.model_selector.addItems(names)
         vlayout.addWidget(QLabel("Model:"))
         vlayout.addWidget(self.model_selector)
+        
+        # Add "New Model" button for creating custom models
+        new_model_btn = QPushButton("New Model...")
+        new_model_btn.setToolTip("Create a new custom composite model")
+        new_model_btn.clicked.connect(self._on_new_model_clicked)
+        vlayout.addWidget(new_model_btn)
 
         # set initial selection from viewmodel/state if available
         try:
@@ -203,6 +209,8 @@ class MainWindow(QMainWindow):
             try:
                 if hasattr(self.viewmodel, "parameters_updated"):
                     self.viewmodel.parameters_updated.connect(self._refresh_parameters)
+                    # Also refresh model selector when parameters update (custom models may be added)
+                    self.viewmodel.parameters_updated.connect(self._refresh_model_selector)
             except Exception:
                 pass
             # initial populate
@@ -411,6 +419,62 @@ class MainWindow(QMainWindow):
             self.append_log("Parameter panel refreshed.")
         except Exception as e:
             self.append_log(f"Failed to refresh parameters: {e}")
+    
+    def _refresh_model_selector(self):
+        """Refresh the model selector dropdown with current models."""
+        try:
+            # Save current selection
+            current_text = self.model_selector.currentText()
+            
+            # Clear and repopulate
+            self.model_selector.clear()
+            
+            from models import get_available_model_names
+            names = get_available_model_names() or []
+            if not names:
+                names = ["Voigt", "DHO+Voigt", "Gaussian", "DHO"]
+            
+            self.model_selector.addItems(names)
+            
+            # Restore selection if still available
+            if current_text:
+                idx = self.model_selector.findText(current_text, Qt.MatchFixedString)
+                if idx >= 0:
+                    self.model_selector.setCurrentIndex(idx)
+        except Exception as e:
+            self.append_log(f"Failed to refresh model selector: {e}")
+    
+    def _on_new_model_clicked(self):
+        """Handle New Model button click."""
+        if not self.viewmodel:
+            return
+        
+        # Prompt for model name
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, "New Custom Model", "Enter model name:")
+        
+        if ok and name:
+            name = name.strip()
+            if not name:
+                self.append_log("Model name cannot be empty")
+                return
+            
+            # Create the model
+            success = self.viewmodel.create_custom_model(name)
+            if success:
+                # Refresh model selector and switch to new model
+                self._refresh_model_selector()
+                
+                # Select the new model
+                custom_name = f"Custom: {name}"
+                idx = self.model_selector.findText(custom_name, Qt.MatchFixedString)
+                if idx >= 0:
+                    self.model_selector.setCurrentIndex(idx)
+                
+                self.append_log(f"Created custom model: {name}")
+            else:
+                self.append_log(f"Failed to create model (may already exist): {name}")
 
     def _populate_parameters(self, specs: dict):
         """Populate the parameter form from a specs dict.
@@ -419,184 +483,407 @@ class MainWindow(QMainWindow):
           name: value                      # infer type from value
           name: { 'value': v, 'type': 'float'|'int'|'str'|'bool'|'choice',
                   'min': ..., 'max': ..., 'choices': [...], 'decimals': ..., 'step': ..., 'input': ..., 'hint': ... }
+        
+        Special key 'groups': List of grouped parameters for composite models
+          [{"label": "Group 1", "params": {...}, "component_index": 0, "base_spec": "gaussian"}, ...]
+        
         Note: 'decimals' controls the number of decimal places shown by the
         QDoubleSpinBox (display precision). 'step' controls the single-step
         increment used when the user clicks the up/down arrows.
         """
         # Build a fresh form widget and replace the scroll area's widget
         new_widget = QWidget()
-        new_form = QFormLayout(new_widget)
+        new_form = QVBoxLayout(new_widget)  # Changed to VBoxLayout for groupboxes
         new_param_widgets = {}
+        
+        # Check if this is a grouped parameter spec (for composite models)
+        if "groups" in specs and isinstance(specs["groups"], list):
+            groups = specs["groups"]
+            
+            # Add buttons for custom model management if applicable
+            if self.viewmodel and self.viewmodel.is_custom_model_active():
+                control_widget = self._create_custom_model_controls()
+                if control_widget:
+                    new_form.addWidget(control_widget)
+            
+            # Create a group box for each component
+            for group_info in groups:
+                label = group_info.get("label", "Component")
+                group_params = group_info.get("params", {})
+                component_index = group_info.get("component_index", -1)
+                base_spec = group_info.get("base_spec", "")
+                
+                # Create group box
+                from PySide6.QtWidgets import QGroupBox
+                group_box = QGroupBox(label)
+                group_layout = QFormLayout(group_box)
+                
+                # Add remove/move buttons for this component
+                if self.viewmodel and self.viewmodel.is_custom_model_active() and component_index >= 0:
+                    btn_layout = QHBoxLayout()
+                    
+                    move_up_btn = QPushButton("↑")
+                    move_up_btn.setMaximumWidth(30)
+                    move_up_btn.setToolTip("Move component up")
+                    
+                    move_down_btn = QPushButton("↓")
+                    move_down_btn.setMaximumWidth(30)
+                    move_down_btn.setToolTip("Move component down")
+                    
+                    remove_btn = QPushButton("Remove")
+                    remove_btn.setToolTip("Remove this component")
+                    
+                    # Connect buttons
+                    model_name = self._get_active_custom_model_name()
+                    if model_name:
+                        move_up_btn.clicked.connect(
+                            lambda checked, idx=component_index, name=model_name: 
+                            self._move_component_up(name, idx))
+                        move_down_btn.clicked.connect(
+                            lambda checked, idx=component_index, name=model_name: 
+                            self._move_component_down(name, idx))
+                        remove_btn.clicked.connect(
+                            lambda checked, idx=component_index, name=model_name: 
+                            self._remove_component(name, idx))
+                    
+                    btn_layout.addWidget(move_up_btn)
+                    btn_layout.addWidget(move_down_btn)
+                    btn_layout.addWidget(remove_btn)
+                    btn_layout.addStretch()
+                    
+                    group_layout.addRow(btn_layout)
+                
+                # Add parameters for this group
+                for param_name, param_spec in group_params.items():
+                    # Prefix the parameter name with the group label for widget storage
+                    prefixed_name = f"{label}::{param_name}"
+                    widget = self._create_parameter_widget(param_name, param_spec, prefixed_name)
+                    if widget:
+                        group_layout.addRow(param_name + ":", widget)
+                        new_param_widgets[prefixed_name] = widget
+                
+                new_form.addWidget(group_box)
+        
+        else:
+            # Standard non-grouped parameters - use form layout
+            form_widget = QWidget()
+            form_layout = QFormLayout(form_widget)
+            
+            for name, spec in specs.items():
+                # Skip the special "groups" key if present
+                if name == "groups":
+                    continue
+                
+                widget = self._create_parameter_widget(name, spec, name)
+                if widget:
+                    # Attach hints/tooltip and input hint display
+                    input_hint = None
+                    if isinstance(spec, dict):
+                        input_hint = spec.get("input") or spec.get("input_hint")
+                        help_hint = spec.get("hint")
+                    else:
+                        help_hint = None
 
-        for name, spec in specs.items():
-            # Normalize spec into dict with at least 'value' and 'type'
-            if isinstance(spec, dict):
-                val = spec.get("value")
-                ptype = spec.get("type", None)
-            else:
-                val = spec
-                ptype = None
-
-            # Infer type if not provided
-            if ptype is None:
-                if isinstance(val, bool):
-                    ptype = "bool"
-                elif isinstance(val, int) and not isinstance(val, bool):
-                    ptype = "int"
-                elif isinstance(val, float):
-                    ptype = "float"
-                elif isinstance(val, (list, tuple)):
-                    ptype = "choice"
-                else:
-                    ptype = "str"
-
-            widget = None
-            try:
-                if ptype == "float":
-                    w = QDoubleSpinBox()
-                    # Apply provided min/max if available, otherwise use safe large bounds
-                    w.setRange(spec.get("min", -1e9), spec.get("max", 1e9) if isinstance(spec, dict) else 1e9)
-                    # 'decimals' controls how many decimal places the spinbox displays.
-                    w.setDecimals(spec.get("decimals", 6) if isinstance(spec, dict) else 6)
-                    # 'step' controls the increment when the user clicks arrows or presses keys
-                    w.setSingleStep(spec.get("step", 0.1) if isinstance(spec, dict) else 0.1)
-                    if val is not None:
-                        w.setValue(float(val))
-                    widget = w
-
-                elif ptype == "int":
-                    w = QSpinBox()
-                    w.setRange(int(spec.get("min", -2147483648)), int(spec.get("max", 2147483647)))
-                    w.setSingleStep(int(spec.get("step", 1)))
-                    if val is not None:
-                        w.setValue(int(val))
-                    widget = w
-
-                elif ptype == "bool":
-                    w = QCheckBox()
-                    w.setChecked(bool(val))
-                    widget = w
-
-                elif ptype == "choice":
-                    w = QComboBox()
-                    choices = []
-                    if isinstance(spec, dict) and "choices" in spec:
-                        choices = spec.get("choices") or []
-                    elif isinstance(val, (list, tuple)):
-                        choices = list(val)
-                    for c in choices:
-                        w.addItem(str(c))
-                    # set current
-                    cur = spec.get("value") if isinstance(spec, dict) else (val[0] if val else "")
-                    if cur is not None:
-                        idx = w.findText(str(cur))
-                        if idx >= 0:
-                            w.setCurrentIndex(idx)
-                    widget = w
-
-                else:  # str and fallback
-                    w = QLineEdit()
-                    if val is not None:
-                        w.setText(str(val))
-                    widget = w
-
-                # Attach hints/tooltip
-                input_hint = None
-                if isinstance(spec, dict):
-                    input_hint = spec.get("input") or spec.get("input_hint")
-                    help_hint = spec.get("hint")
-                else:
-                    help_hint = None
-
-                # set tooltip from help hint and input hint (string or structured)
-                try:
-                    tt = help_hint or ""
-                    display_hint = ""
-                    if input_hint:
-                        # if structured dict, produce a concise human-readable summary
-                        if isinstance(input_hint, dict):
-                            parts = []
-                            for k, v in input_hint.items():
-                                if k == "wheel":
-                                    mods = ",".join(v.get("modifiers", [])) if isinstance(v, dict) else ""
-                                    parts.append(f"Wheel{(' + ' + mods) if mods else ''}: {v.get('action')}")
-                                elif k == "drag":
-                                    parts.append(f"Drag: {v.get('action')}")
-                                elif k == "hotkey":
-                                    parts.append(f"Hotkey: {v.get('key') if isinstance(v, dict) else str(v)}")
-                                else:
-                                    parts.append(f"{k}: {str(v)}")
-                            display_hint = "; ".join(parts)
-                        else:
-                            display_hint = str(input_hint)
-                        if display_hint:
-                            tt = (tt + "\n" + display_hint).strip()
-                    if tt and widget is not None:
-                        widget.setToolTip(tt)
-                except Exception:
-                    pass
-
-                # If there's an input hint, show a small label beside the control
-                if input_hint:
-                    container = QWidget()
-                    h = QHBoxLayout(container)
-                    h.setContentsMargins(0, 0, 0, 0)
-                    h.addWidget(widget)
-                    # show the display_hint (from above) or a short textual fallback
-                    hint_text = display_hint if 'display_hint' in locals() and display_hint else (str(input_hint) if not isinstance(input_hint, dict) else "interactive")
-                    hint_label = QLabel(hint_text)
-                    hint_label.setToolTip(widget.toolTip() or hint_text)
+                    # set tooltip from help hint and input hint (string or structured)
                     try:
-                        hint_label.setStyleSheet("color: gray; font-size: 11px;")
+                        tt = help_hint or ""
+                        display_hint = ""
+                        if input_hint:
+                            # if structured dict, produce a concise human-readable summary
+                            if isinstance(input_hint, dict):
+                                parts = []
+                                for k, v in input_hint.items():
+                                    if k == "wheel":
+                                        mods = ",".join(v.get("modifiers", [])) if isinstance(v, dict) else ""
+                                        parts.append(f"Wheel{(' + ' + mods) if mods else ''}: {v.get('action')}")
+                                    elif k == "drag":
+                                        parts.append(f"Drag: {v.get('action')}")
+                                    elif k == "hotkey":
+                                        parts.append(f"Hotkey: {v.get('key') if isinstance(v, dict) else str(v)}")
+                                    else:
+                                        parts.append(f"{k}: {str(v)}")
+                                display_hint = "; ".join(parts)
+                            else:
+                                display_hint = str(input_hint)
+                            if display_hint:
+                                tt = (tt + "\n" + display_hint).strip()
+                        if tt and widget is not None:
+                            widget.setToolTip(tt)
                     except Exception:
                         pass
-                    h.addWidget(hint_label)
-                    new_form.addRow(name + ":", container)
-                else:
-                    new_form.addRow(name + ":", widget)
 
-                new_param_widgets[name] = widget
-                # Connect widget change signals to auto-apply (connect after initial value set)
-                try:
-                    # connect to a scheduler that debounces rapid changes
-                    if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
-                        widget.valueChanged.connect(lambda v, n=name, w=widget: self._schedule_auto_apply(n, w))
-                    elif isinstance(widget, QCheckBox):
-                        widget.stateChanged.connect(lambda s, n=name, w=widget: self._schedule_auto_apply(n, w))
-                    elif isinstance(widget, QComboBox):
-                        widget.currentIndexChanged.connect(lambda i, n=name, w=widget: self._schedule_auto_apply(n, w))
-                    elif isinstance(widget, QLineEdit):
-                        widget.textChanged.connect(lambda t, n=name, w=widget: self._schedule_auto_apply(n, w))
-                except Exception:
-                    pass
+                    # If there's an input hint, show a small label beside the control
+                    if input_hint:
+                        container = QWidget()
+                        h = QHBoxLayout(container)
+                        h.setContentsMargins(0, 0, 0, 0)
+                        h.addWidget(widget)
+                        # show the display_hint (from above) or a short textual fallback
+                        hint_text = display_hint if 'display_hint' in locals() and display_hint else (str(input_hint) if not isinstance(input_hint, dict) else "interactive")
+                        hint_label = QLabel(hint_text)
+                        hint_label.setToolTip(widget.toolTip() or hint_text)
+                        try:
+                            hint_label.setStyleSheet("color: gray; font-size: 11px;")
+                        except Exception:
+                            pass
+                        h.addWidget(hint_label)
+                        form_layout.addRow(name + ":", container)
+                    else:
+                        form_layout.addRow(name + ":", widget)
 
-            except Exception:
-                # on any error, fallback to a simple line edit
-                w = QLineEdit()
-                if val is not None:
-                    w.setText(str(val))
-                # set tooltip if available
-                try:
-                    if isinstance(spec, dict):
-                        t = spec.get("hint") or spec.get("input") or ""
-                        if t:
-                            w.setToolTip(t)
-                except Exception:
-                    pass
-                new_form.addRow(name + ":", w)
-                new_param_widgets[name] = w
-                # Connect fallback widget signals
-                try:
-                    w.textChanged.connect(lambda t, n=name, w=w: self._schedule_auto_apply(n, w))
-                except Exception:
-                    pass
+                    new_param_widgets[name] = widget
+
+            new_form.addWidget(form_widget)
+            new_form.addStretch()
 
         # Replace the widget shown in the scroll area (frees old widgets)
         self.param_scroll.takeWidget()
         self.param_scroll.setWidget(new_widget)
         self.param_form_widget = new_widget
-        self.param_form = new_form
         self.param_widgets = new_param_widgets
+    
+    def _create_parameter_widget(self, name: str, spec, storage_name: str):
+        """Create a widget for a parameter. Returns the widget or None on error.
+        
+        Args:
+            name: Display name of the parameter
+            spec: Parameter specification dict or value
+            storage_name: Name to use for storing the widget (may be prefixed for groups)
+        """
+        # Normalize spec into dict with at least 'value' and 'type'
+        if isinstance(spec, dict):
+            val = spec.get("value")
+            ptype = spec.get("type", None)
+        else:
+            val = spec
+            ptype = None
+
+        # Infer type if not provided
+        if ptype is None:
+            if isinstance(val, bool):
+                ptype = "bool"
+            elif isinstance(val, int) and not isinstance(val, bool):
+                ptype = "int"
+            elif isinstance(val, float):
+                ptype = "float"
+            elif isinstance(val, (list, tuple)):
+                ptype = "choice"
+            else:
+                ptype = "str"
+
+        widget = None
+        try:
+            if ptype == "float":
+                w = QDoubleSpinBox()
+                # Apply provided min/max if available, otherwise use safe large bounds
+                w.setRange(spec.get("min", -1e9) if isinstance(spec, dict) else -1e9, 
+                          spec.get("max", 1e9) if isinstance(spec, dict) else 1e9)
+                # 'decimals' controls how many decimal places the spinbox displays.
+                w.setDecimals(spec.get("decimals", 6) if isinstance(spec, dict) else 6)
+                # 'step' controls the increment when the user clicks arrows or presses keys
+                w.setSingleStep(spec.get("step", 0.1) if isinstance(spec, dict) else 0.1)
+                if val is not None:
+                    w.setValue(float(val))
+                widget = w
+
+            elif ptype == "int":
+                w = QSpinBox()
+                w.setRange(int(spec.get("min", -2147483648) if isinstance(spec, dict) else -2147483648), 
+                          int(spec.get("max", 2147483647) if isinstance(spec, dict) else 2147483647))
+                w.setSingleStep(int(spec.get("step", 1) if isinstance(spec, dict) else 1))
+                if val is not None:
+                    w.setValue(int(val))
+                widget = w
+
+            elif ptype == "bool":
+                w = QCheckBox()
+                w.setChecked(bool(val))
+                widget = w
+
+            elif ptype == "choice":
+                w = QComboBox()
+                choices = []
+                if isinstance(spec, dict) and "choices" in spec:
+                    choices = spec.get("choices") or []
+                elif isinstance(val, (list, tuple)):
+                    choices = list(val)
+                for c in choices:
+                    w.addItem(str(c))
+                # set current
+                cur = spec.get("value") if isinstance(spec, dict) else (val[0] if val else "")
+                if cur is not None:
+                    idx = w.findText(str(cur))
+                    if idx >= 0:
+                        w.setCurrentIndex(idx)
+                widget = w
+
+            else:  # str and fallback
+                w = QLineEdit()
+                if val is not None:
+                    w.setText(str(val))
+                widget = w
+
+            # Connect widget change signals to auto-apply (connect after initial value set)
+            if widget:
+                try:
+                    # connect to a scheduler that debounces rapid changes
+                    if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
+                        widget.valueChanged.connect(lambda v, n=storage_name, w=widget: self._schedule_auto_apply(n, w))
+                    elif isinstance(widget, QCheckBox):
+                        widget.stateChanged.connect(lambda s, n=storage_name, w=widget: self._schedule_auto_apply(n, w))
+                    elif isinstance(widget, QComboBox):
+                        widget.currentIndexChanged.connect(lambda i, n=storage_name, w=widget: self._schedule_auto_apply(n, w))
+                    elif isinstance(widget, QLineEdit):
+                        widget.textChanged.connect(lambda t, n=storage_name, w=widget: self._schedule_auto_apply(n, w))
+                except Exception:
+                    pass
+
+        except Exception:
+            # on any error, fallback to a simple line edit
+            w = QLineEdit()
+            if val is not None:
+                w.setText(str(val))
+            # set tooltip if available
+            try:
+                if isinstance(spec, dict):
+                    t = spec.get("hint") or spec.get("input") or ""
+                    if t:
+                        w.setToolTip(t)
+            except Exception:
+                pass
+            widget = w
+            # Connect fallback widget signals
+            try:
+                widget.textChanged.connect(lambda t, n=storage_name, w=widget: self._schedule_auto_apply(n, w))
+            except Exception:
+                pass
+
+        return widget
+    
+    # --------------------------
+    # Custom Model Management Helpers
+    # --------------------------
+    
+    def _create_custom_model_controls(self):
+        """Create control buttons for custom model management."""
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        add_btn = QPushButton("Add Element")
+        add_btn.clicked.connect(self._on_add_element_clicked)
+        layout.addWidget(add_btn)
+        
+        layout.addStretch()
+        
+        return widget
+    
+    def _get_active_custom_model_name(self):
+        """Extract the custom model name from the active model."""
+        if not self.viewmodel:
+            return None
+        
+        model_name = getattr(self.viewmodel.state, "model_name", "")
+        name_lower = model_name.lower().strip()
+        
+        if name_lower.startswith("custom:") or name_lower.startswith("custom "):
+            if ":" in model_name:
+                return model_name.split(":", 1)[1].strip()
+            elif " " in model_name:
+                return model_name.split(None, 1)[1].strip()
+        
+        return None
+    
+    def _on_add_element_clicked(self):
+        """Handle Add Element button click."""
+        if not self.viewmodel:
+            return
+        
+        model_name = self._get_active_custom_model_name()
+        if not model_name:
+            self.append_log("No custom model is currently active")
+            return
+        
+        # Get list of addable models
+        try:
+            from models import get_available_model_names
+            addable_models = get_available_model_names(addable_only=True)
+        except Exception as e:
+            self.append_log(f"Failed to get model list: {e}")
+            return
+        
+        if not addable_models:
+            self.append_log("No addable models available")
+            return
+        
+        # Show dialog to select model
+        from PySide6.QtWidgets import QInputDialog
+        model_type, ok = QInputDialog.getItem(
+            self, "Add Element", "Select model type to add:", 
+            addable_models, 0, False)
+        
+        if ok and model_type:
+            # Get the canonical key for the selected model
+            try:
+                from models import MODEL_REGISTRY
+                base_spec = None
+                for entry in MODEL_REGISTRY:
+                    if entry.get("display") == model_type or entry.get("key") == model_type:
+                        base_spec = entry["key"]
+                        break
+                
+                if base_spec:
+                    success = self.viewmodel.add_component_to_custom_model(model_name, base_spec)
+                    if success:
+                        self.append_log(f"Added {model_type} to {model_name}")
+                else:
+                    self.append_log(f"Could not find model spec for {model_type}")
+            except Exception as e:
+                self.append_log(f"Error adding element: {e}")
+    
+    def _remove_component(self, model_name: str, index: int):
+        """Remove a component from the custom model."""
+        if not self.viewmodel:
+            return
+        
+        # Confirm removal
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(
+            self, "Confirm Removal",
+            f"Remove component {index + 1}?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            success = self.viewmodel.remove_component_from_custom_model(model_name, index)
+            if success:
+                self.append_log(f"Removed component {index + 1}")
+    
+    def _move_component_up(self, model_name: str, index: int):
+        """Move a component up in the list."""
+        if not self.viewmodel or index <= 0:
+            return
+        
+        success = self.viewmodel.move_component_in_custom_model(model_name, index, index - 1)
+        if success:
+            self.append_log(f"Moved component {index + 1} up")
+    
+    def _move_component_down(self, model_name: str, index: int):
+        """Move a component down in the list."""
+        if not self.viewmodel:
+            return
+        
+        # Get the number of components
+        try:
+            components = self.viewmodel.get_custom_model_components(model_name)
+            if index >= len(components) - 1:
+                return
+        except Exception:
+            return
+        
+        success = self.viewmodel.move_component_in_custom_model(model_name, index, index + 1)
+        if success:
+            self.append_log(f"Moved component {index + 1} down")
 
     # --------------------------
     # Config dialog (view-only)

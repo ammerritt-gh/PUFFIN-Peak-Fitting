@@ -889,3 +889,153 @@ class FitterViewModel(QObject):
 
         except Exception as e:
             self.log_message.emit(f"Error in handle_wheel_scroll: {e}")
+    
+    # --------------------------
+    # Custom Model Management
+    # --------------------------
+    
+    def create_custom_model(self, name: str) -> bool:
+        """Create a new empty custom model. Returns True on success."""
+        try:
+            from models.custom_model_registry import get_custom_model_registry
+            registry = get_custom_model_registry()
+            
+            success = registry.create_model(name)
+            if success:
+                self.log_message.emit(f"Created custom model: {name}")
+                # Notify that parameters should be updated (model list changed)
+                self.parameters_updated.emit()
+            else:
+                self.log_message.emit(f"Failed to create custom model: {name} (may already exist)")
+            
+            return success
+        except Exception as e:
+            self.log_message.emit(f"Error creating custom model: {e}")
+            return False
+    
+    def delete_custom_model(self, name: str) -> bool:
+        """Delete a custom model. Returns True on success."""
+        try:
+            from models.custom_model_registry import get_custom_model_registry
+            registry = get_custom_model_registry()
+            
+            success = registry.delete_model(name)
+            if success:
+                self.log_message.emit(f"Deleted custom model: {name}")
+                self.parameters_updated.emit()
+            else:
+                self.log_message.emit(f"Failed to delete custom model: {name}")
+            
+            return success
+        except Exception as e:
+            self.log_message.emit(f"Error deleting custom model: {e}")
+            return False
+    
+    def add_component_to_custom_model(self, model_name: str, base_spec: str, label: str = None) -> bool:
+        """Add a component to a custom model. Returns True on success."""
+        try:
+            from models.custom_model_registry import get_custom_model_registry
+            from models import get_model_spec
+            
+            registry = get_custom_model_registry()
+            
+            # Get the base spec to extract default parameters
+            spec = get_model_spec(base_spec)
+            default_params = {}
+            for param_name, param_obj in spec.params.items():
+                default_params[param_name] = param_obj.value
+            
+            # Generate label if not provided
+            if not label:
+                model_data = registry.get_model(model_name)
+                if model_data:
+                    components = model_data.get("components", [])
+                    # Count how many components of this base_spec already exist
+                    count = sum(1 for c in components if c.get("base_spec") == base_spec)
+                    # Find display name for base_spec
+                    from models import MODEL_REGISTRY
+                    display_name = base_spec
+                    for entry in MODEL_REGISTRY:
+                        if entry["key"] == base_spec:
+                            display_name = entry.get("display", base_spec)
+                            break
+                    label = f"{display_name} {count + 1}"
+            
+            success = registry.add_component(model_name, base_spec, label, default_params)
+            
+            if success:
+                self.log_message.emit(f"Added {label} to {model_name}")
+                # If this is the currently active model, refresh it
+                if getattr(self.state, "model_name", "").endswith(model_name):
+                    self.set_model(f"Custom: {model_name}")
+                self.parameters_updated.emit()
+            else:
+                self.log_message.emit(f"Failed to add component to {model_name}")
+            
+            return success
+        except Exception as e:
+            self.log_message.emit(f"Error adding component: {e}")
+            return False
+    
+    def remove_component_from_custom_model(self, model_name: str, index: int) -> bool:
+        """Remove a component from a custom model. Returns True on success."""
+        try:
+            from models.custom_model_registry import get_custom_model_registry
+            registry = get_custom_model_registry()
+            
+            success = registry.remove_component(model_name, index)
+            
+            if success:
+                self.log_message.emit(f"Removed component {index} from {model_name}")
+                # If this is the currently active model, refresh it
+                if getattr(self.state, "model_name", "").endswith(model_name):
+                    self.set_model(f"Custom: {model_name}")
+                self.parameters_updated.emit()
+            else:
+                self.log_message.emit(f"Failed to remove component from {model_name}")
+            
+            return success
+        except Exception as e:
+            self.log_message.emit(f"Error removing component: {e}")
+            return False
+    
+    def move_component_in_custom_model(self, model_name: str, old_index: int, new_index: int) -> bool:
+        """Move a component within a custom model. Returns True on success."""
+        try:
+            from models.custom_model_registry import get_custom_model_registry
+            registry = get_custom_model_registry()
+            
+            success = registry.move_component(model_name, old_index, new_index)
+            
+            if success:
+                self.log_message.emit(f"Moved component in {model_name}")
+                # If this is the currently active model, refresh it
+                if getattr(self.state, "model_name", "").endswith(model_name):
+                    self.set_model(f"Custom: {model_name}")
+                self.parameters_updated.emit()
+            else:
+                self.log_message.emit(f"Failed to move component in {model_name}")
+            
+            return success
+        except Exception as e:
+            self.log_message.emit(f"Error moving component: {e}")
+            return False
+    
+    def get_custom_model_components(self, model_name: str) -> List[Dict[str, Any]]:
+        """Get the list of components for a custom model."""
+        try:
+            from models.custom_model_registry import get_custom_model_registry
+            registry = get_custom_model_registry()
+            
+            model_data = registry.get_model(model_name)
+            if model_data:
+                return model_data.get("components", [])
+        except Exception as e:
+            self.log_message.emit(f"Error getting components: {e}")
+        
+        return []
+    
+    def is_custom_model_active(self) -> bool:
+        """Return True if the currently active model is a custom model."""
+        model_name = getattr(self.state, "model_name", "")
+        return model_name.lower().startswith("custom")
