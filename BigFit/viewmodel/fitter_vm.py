@@ -66,6 +66,22 @@ class FitterViewModel(QObject):
         self.log_message.emit(f"Queued {added} {plural} for viewing.")
         self._emit_file_queue()
 
+        # If nothing is currently active, auto-activate the first queued dataset
+        try:
+            if self._active_dataset_index is None and len(self._datasets) > 0:
+                # activate_file will apply to state, emit updated queue, and update plot
+                try:
+                    self.activate_file(0)
+                except Exception:
+                    # fallback: set active index and emit queue
+                    self._active_dataset_index = 0
+                    try:
+                        self._emit_file_queue()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def _prepare_dataset(self, x, y, err):
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
@@ -124,9 +140,75 @@ class FitterViewModel(QObject):
             self.files_updated.emit(files)
         except Exception:
             pass
+        # persist queue to config so it survives restarts
+        try:
+            self._save_queue_to_config()
+        except Exception:
+            pass
 
     def notify_file_queue(self):
         self._emit_file_queue()
+
+    def _save_queue_to_config(self):
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            # Save as simple list of file paths and optional metadata
+            queued = []
+            for ds in self._datasets:
+                info = ds.get("info") if isinstance(ds, dict) else {}
+                path = None
+                if isinstance(info, dict):
+                    path = info.get("path")
+                if not path:
+                    path = ds.get("info", {}).get("path") if isinstance(ds.get("info"), dict) else None
+                queued.append({"path": path, "name": (info.get("name") if isinstance(info, dict) else None)})
+            cfg.queued_files = queued
+            # store active index if present
+            cfg.queued_active = self._active_dataset_index
+            try:
+                cfg.save()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _load_queue_from_config(self):
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            q = getattr(cfg, "queued_files", None)
+            active = getattr(cfg, "queued_active", None)
+            if not q:
+                return
+            # Attempt to load each path into the queue
+            from dataio.data_loader import load_data_from_file
+            added = 0
+            for entry in q:
+                try:
+                    path = entry.get("path") if isinstance(entry, dict) else None
+                    if not path or not os.path.isfile(path):
+                        continue
+                    x, y, err, info = load_data_from_file(path)
+                    x_arr, y_arr, err_arr = self._prepare_dataset(x, y, err)
+                    dataset = {"x": x_arr, "y": y_arr, "err": err_arr, "info": info}
+                    self._datasets.append(dataset)
+                    added += 1
+                except Exception:
+                    continue
+            # restore active index if valid
+            if isinstance(active, int) and 0 <= active < len(self._datasets):
+                self._active_dataset_index = int(active)
+            else:
+                self._active_dataset_index = None
+            if added:
+                # notify UI
+                try:
+                    self._emit_file_queue()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _apply_dataset_to_state(self, dataset: dict):
         x = dataset.get("x")
@@ -766,6 +848,11 @@ class FitterViewModel(QObject):
         self._selected_curve_id = None  # currently selected curve ID (str or None)
         self._datasets = []  # queued datasets [(dict)]
         self._active_dataset_index = None
+        # Attempt to restore previously queued files from configuration
+        try:
+            self._load_queue_from_config()
+        except Exception:
+            pass
 
     def set_selected_curve(self, curve_id: _typing.Optional[str]):
         """Set the active curve selection. Emits a signal if changed."""
