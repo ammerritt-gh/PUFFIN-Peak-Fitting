@@ -3,7 +3,8 @@ from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QPushButton,
     QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
     QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog,
-    QScrollArea, QSpinBox, QCheckBox
+    QScrollArea, QSpinBox, QCheckBox, QListWidget, QListWidgetItem,
+    QAbstractItemView
 )
 from PySide6.QtCore import Qt
 import pyqtgraph as pg
@@ -171,7 +172,7 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("Save Data")
         fit_btn = QPushButton("Run Fit")
         update_btn = QPushButton("Update Plot")
-        clear_btn = QPushButton("Clear Plot")
+        clear_btn = QPushButton("Clear Queue")
         config_btn = QPushButton("Edit Config")
 
         layout.addWidget(QLabel("Data Controls"))
@@ -199,6 +200,21 @@ class MainWindow(QMainWindow):
                         pass
         except Exception:
             pass
+        layout.addWidget(QLabel("Loaded Files"))
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.file_list)
+
+        file_btn_row = QHBoxLayout()
+        remove_btn = QPushButton("Remove Selected")
+        clear_list_btn = QPushButton("Clear List")
+        file_btn_row.addWidget(remove_btn)
+        file_btn_row.addWidget(clear_list_btn)
+        layout.addLayout(file_btn_row)
+
+        self.file_remove_btn = remove_btn
+        self.file_clear_btn = clear_list_btn
+
         layout.addStretch(1)
 
         self.left_dock.setWidget(left_widget)
@@ -233,6 +249,103 @@ class MainWindow(QMainWindow):
                     self.append_log(f"Failed to toggle exclude mode: {e}")
 
             exclude_btn.toggled.connect(_on_exclude_toggled)
+
+            try:
+                self.viewmodel.files_updated.connect(self._on_files_updated)
+            except Exception:
+                pass
+            self.file_list.currentRowChanged.connect(self._on_file_selected)
+            remove_btn.clicked.connect(self._on_remove_file_clicked)
+            clear_list_btn.clicked.connect(self._on_clear_files_clicked)
+            try:
+                self.viewmodel.notify_file_queue()
+            except Exception:
+                pass
+        else:
+            self._update_file_action_state()
+
+        self._update_file_action_state()
+
+    def _on_files_updated(self, files):
+        if not hasattr(self, "file_list"):
+            return
+
+        entries = files or []
+        active_row = -1
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+
+        for entry in entries:
+            entry_dict = entry if isinstance(entry, dict) else {}
+            name = entry_dict.get("name")
+            if not name:
+                idx = entry_dict.get("index")
+                name = f"Dataset {idx + 1}" if idx is not None else "Dataset"
+
+            item = QListWidgetItem(name)
+            info_obj = entry_dict.get("info")
+            info = info_obj if isinstance(info_obj, dict) else {}
+            path = entry_dict.get("path")
+            if not path and info:
+                path = info.get("path")
+            if path:
+                item.setToolTip(str(path))
+            if entry_dict.get("active"):
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+            item.setData(Qt.UserRole, entry)
+            self.file_list.addItem(item)
+            if entry_dict.get("active"):
+                active_row = self.file_list.count() - 1
+
+        if active_row >= 0:
+            self.file_list.setCurrentRow(active_row)
+
+        self.file_list.blockSignals(False)
+        self._update_file_action_state()
+
+    def _on_file_selected(self, row):
+        self._update_file_action_state()
+        if not self.viewmodel or row is None or row < 0:
+            return
+        try:
+            self.viewmodel.activate_file(row)
+        except Exception as e:
+            self.append_log(f"Failed to load dataset: {e}")
+
+    def _on_remove_file_clicked(self):
+        if not self.viewmodel:
+            return
+        row = self.file_list.currentRow() if hasattr(self, "file_list") else -1
+        if row < 0:
+            return
+        try:
+            self.viewmodel.remove_file_at(row)
+        except Exception as e:
+            self.append_log(f"Failed to remove dataset: {e}")
+
+    def _on_clear_files_clicked(self):
+        if not self.viewmodel:
+            return
+        try:
+            if hasattr(self.viewmodel, "clear_plot"):
+                self.viewmodel.clear_plot()
+            else:
+                getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
+        except Exception as e:
+            self.append_log(f"Failed to clear datasets: {e}")
+
+    def _update_file_action_state(self):
+        if not hasattr(self, "file_list"):
+            return
+        has_files = self.file_list.count() > 0
+        has_selection = self.file_list.currentRow() >= 0
+        if hasattr(self, "file_remove_btn"):
+            self.file_remove_btn.setEnabled(has_selection)
+        if hasattr(self, "file_clear_btn"):
+            self.file_clear_btn.setEnabled(has_files)
 
     def _init_right_dock(self):
         # Replaced static parameter controls with a dynamic, scrollable form.

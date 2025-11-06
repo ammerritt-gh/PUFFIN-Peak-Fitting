@@ -19,6 +19,7 @@ class FitterViewModel(QObject):
     curve_selection_changed = Signal(object)                # emits curve_id or None
     log_message = Signal(str)
     parameters_updated = Signal()
+    files_updated = Signal(object)                          # list of queued file metadata
 
 
     def __init__(self, model_state=None):
@@ -29,54 +30,217 @@ class FitterViewModel(QObject):
     # Data I/O
     # --------------------------
     def load_data(self):
-        """Open file dialog and load a dataset."""
+        """Open file dialog and append one or more datasets to the queue."""
         loaded = select_and_load_files(None)
         if not loaded:
             return
-        x, y, err, info = loaded[0]
-        # Ensure numeric numpy arrays and a well-formed error array
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
+
+        added = 0
+        last_info = None
+        for x, y, err, info in loaded:
+            try:
+                x_arr, y_arr, err_arr = self._prepare_dataset(x, y, err)
+            except Exception as exc:
+                name = (info or {}).get("name") if isinstance(info, dict) else None
+                label = name or "dataset"
+                self.log_message.emit(f"Skipped {label}: {exc}")
+                continue
+
+            dataset = {
+                "x": x_arr,
+                "y": y_arr,
+                "err": err_arr,
+                "info": info or {},
+            }
+            self._datasets.append(dataset)
+            added += 1
+            last_info = info or last_info
+
+        if added == 0:
+            return
+
+        if isinstance(last_info, dict):
+            self._persist_last_loaded(last_info)
+
+        plural = "file" if added == 1 else "files"
+        self.log_message.emit(f"Queued {added} {plural} for viewing.")
+        self._emit_file_queue()
+
+    def _prepare_dataset(self, x, y, err):
+        x_arr = np.asarray(x, dtype=float)
+        y_arr = np.asarray(y, dtype=float)
         if err is None:
-            err = np.sqrt(np.clip(np.abs(y), 1e-12, np.inf))
+            err_arr = np.sqrt(np.clip(np.abs(y_arr), 1e-12, np.inf))
         else:
-            err = np.asarray(err, dtype=float)
-        # Trim to the shortest common length to avoid mismatched arrays
-        common_len = min(len(x), len(y), len(err))
-        x = x[:common_len]
-        y = y[:common_len]
-        err = err[:common_len]
-        # Use ModelState.set_data so it resets derived state (like exclusion mask)
+            err_arr = np.asarray(err, dtype=float)
+
+        if len(x_arr) == 0 or len(y_arr) == 0 or len(err_arr) == 0:
+            raise ValueError("Dataset is empty.")
+
+        common_len = min(len(x_arr), len(y_arr), len(err_arr))
+        if common_len == 0:
+            raise ValueError("Dataset has no overlapping values.")
+
+        return (
+            np.array(x_arr[:common_len], dtype=float, copy=True),
+            np.array(y_arr[:common_len], dtype=float, copy=True),
+            np.array(err_arr[:common_len], dtype=float, copy=True),
+        )
+
+    def _persist_last_loaded(self, info: dict):
         try:
-            self.state.set_data(x, y)
-        except Exception:
-            # fallback to direct assignment if set_data unavailable
-            self.state.x_data = x
-            self.state.y_data = y
-        # Attach provided errors and file info
-        try:
-            self.state.errors = err
-        except Exception:
-            pass
-        try:
-            self.state.file_info = info
-        except Exception:
-            pass
-        # Persist last-loaded file and folder to config (if available)
-        try:
+            path = info.get("path")
+            if not path:
+                return
             from dataio import get_config
+
             cfg = get_config()
-            if info and isinstance(info, dict) and info.get("path"):
-                cfg.last_loaded_file = info.get("path")
-                cfg.default_load_folder = os.path.dirname(info.get("path")) or cfg.default_load_folder
-                try:
-                    cfg.save()
-                except Exception:
-                    pass
+            cfg.last_loaded_file = path
+            folder = os.path.dirname(path)
+            if folder:
+                cfg.default_load_folder = folder
+            try:
+                cfg.save()
+            except Exception:
+                pass
         except Exception:
             pass
-        self.log_message.emit(f"Loaded data file: {info['name']}")
-        self.update_plot()
+
+    def _emit_file_queue(self):
+        files = []
+        for idx, dataset in enumerate(self._datasets):
+            info = dataset.get("info") if isinstance(dataset, dict) else {}
+            info = info if isinstance(info, dict) else {}
+            entry = {
+                "index": idx,
+                "name": info.get("name") or f"Dataset {idx + 1}",
+                "path": info.get("path"),
+                "size": info.get("size"),
+                "active": idx == self._active_dataset_index,
+                "info": info,
+            }
+            files.append(entry)
+        try:
+            self.files_updated.emit(files)
+        except Exception:
+            pass
+
+    def notify_file_queue(self):
+        self._emit_file_queue()
+
+    def _apply_dataset_to_state(self, dataset: dict):
+        x = dataset.get("x")
+        y = dataset.get("y")
+        err = dataset.get("err")
+        info = dataset.get("info") if isinstance(dataset.get("info"), dict) else {}
+
+        x_arr = np.asarray(x, dtype=float)
+        y_arr = np.asarray(y, dtype=float)
+
+        try:
+            self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
+        except Exception:
+            self.state.x_data = np.array(x_arr, copy=True)
+            self.state.y_data = np.array(y_arr, copy=True)
+            try:
+                self.state.model_spec.initialize(self.state.x_data, self.state.y_data)
+            except Exception:
+                pass
+            try:
+                self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
+            except Exception:
+                self.state.excluded = np.array([], dtype=bool)
+
+        try:
+            self.state.errors = np.array(err, dtype=float, copy=True)
+        except Exception:
+            self.state.errors = np.sqrt(np.clip(np.abs(self.state.y_data), 1e-12, np.inf))
+
+        if info:
+            try:
+                self.state.file_info = info
+            except Exception:
+                pass
+
+    def activate_file(self, index: int):
+        try:
+            idx = int(index)
+        except Exception:
+            return
+
+        if idx < 0 or idx >= len(self._datasets):
+            return
+
+        dataset = self._datasets[idx]
+        self._apply_dataset_to_state(dataset)
+        self._active_dataset_index = idx
+
+        info = dataset.get("info") if isinstance(dataset, dict) else {}
+        if not isinstance(info, dict):
+            info = {}
+        name = info.get("name")
+        label = name or f"Dataset {idx + 1}"
+        self.log_message.emit(f"Loaded dataset: {label}")
+
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+
+        self._emit_file_queue()
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
+    def remove_file_at(self, index: int):
+        try:
+            idx = int(index)
+        except Exception:
+            return
+
+        if idx < 0 or idx >= len(self._datasets):
+            return
+
+        dataset = self._datasets.pop(idx)
+        info_obj = dataset.get("info") if isinstance(dataset, dict) else {}
+        info = info_obj if isinstance(info_obj, dict) else {}
+        name = info.get("name") or f"Dataset {idx + 1}"
+        self.log_message.emit(f"Removed dataset: {name}")
+
+        if self._active_dataset_index == idx:
+            self._active_dataset_index = None
+            if self._datasets:
+                next_idx = idx if idx < len(self._datasets) else len(self._datasets) - 1
+                self.activate_file(next_idx)
+            else:
+                self.clear_loaded_files(emit_log=False)
+                self.log_message.emit("Dataset queue is now empty; reverted to default data.")
+        else:
+            if self._active_dataset_index is not None and idx < self._active_dataset_index:
+                self._active_dataset_index -= 1
+            self._emit_file_queue()
+
+    def clear_loaded_files(self, emit_log=True):
+        self._datasets.clear()
+        self._active_dataset_index = None
+        model_name = getattr(self.state, "model_name", "Voigt") if hasattr(self, "state") else "Voigt"
+        try:
+            self.state = ModelState(model_name=model_name)
+        except Exception:
+            self.state = ModelState()
+        self._fit_worker = None
+        self._emit_file_queue()
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+        if emit_log:
+            self.log_message.emit("Cleared queued datasets and restored initial synthetic data.")
 
     def save_data(self):
         """Save current data and fit to file."""
@@ -87,13 +251,7 @@ class FitterViewModel(QObject):
     def clear_plot(self):
         """Reset to initial synthetic dataset and clear stored last-loaded file in config."""
         try:
-            # reset state to fresh ModelState instance
-            self.state = ModelState()
-            # clear any running worker reference
-            try:
-                self._fit_worker = None
-            except Exception:
-                pass
+            self.clear_loaded_files(emit_log=False)
 
             # clear saved last-loaded file in config if available
             try:
@@ -107,19 +265,7 @@ class FitterViewModel(QObject):
             except Exception:
                 pass
 
-            # notify UI
-            try:
-                self.log_message.emit("Cleared last dataset and restored initial synthetic data.")
-            except Exception:
-                pass
-            try:
-                self.update_plot()
-            except Exception:
-                pass
-            try:
-                self.parameters_updated.emit()
-            except Exception:
-                pass
+            self.log_message.emit("Cleared queued datasets and restored initial synthetic data.")
         except Exception as e:
             try:
                 self.log_message.emit(f"Failed to clear plot: {e}")
@@ -618,6 +764,8 @@ class FitterViewModel(QObject):
         self.state = model_state or ModelState()
         self._fit_worker = None
         self._selected_curve_id = None  # currently selected curve ID (str or None)
+        self._datasets = []  # queued datasets [(dict)]
+        self._active_dataset_index = None
 
     def set_selected_curve(self, curve_id: _typing.Optional[str]):
         """Set the active curve selection. Emits a signal if changed."""
