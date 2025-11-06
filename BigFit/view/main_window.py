@@ -172,7 +172,6 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("Save Data")
         fit_btn = QPushButton("Run Fit")
         update_btn = QPushButton("Update Plot")
-        clear_btn = QPushButton("Clear Queue")
         config_btn = QPushButton("Edit Config")
 
         layout.addWidget(QLabel("Data Controls"))
@@ -181,7 +180,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(fit_btn)
         layout.addWidget(config_btn)
         layout.addWidget(update_btn)
-        layout.addWidget(clear_btn)
         # Exclude toggle (click to enable box/point exclusion)
         exclude_btn = QPushButton("Exclude")
         exclude_btn.setCheckable(True)
@@ -200,6 +198,11 @@ class MainWindow(QMainWindow):
                         pass
         except Exception:
             pass
+
+        # Include All button placed directly under the Exclude toggle for convenience
+        include_all_btn = QPushButton("Include All")
+        layout.addWidget(include_all_btn)
+
         layout.addWidget(QLabel("Loaded Files"))
         self.file_list = QListWidget()
         self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -214,6 +217,8 @@ class MainWindow(QMainWindow):
 
         self.file_remove_btn = remove_btn
         self.file_clear_btn = clear_list_btn
+        # keep a backref to the include-all button placed above
+        self.include_all_btn = include_all_btn
 
         layout.addStretch(1)
 
@@ -226,14 +231,23 @@ class MainWindow(QMainWindow):
             save_btn.clicked.connect(self.viewmodel.save_data)
             fit_btn.clicked.connect(self.viewmodel.run_fit)
             update_btn.clicked.connect(self.viewmodel.update_plot)
-            # Clear plot button resets to synthetic initial data and clears saved last file
-            try:
-                clear_btn.clicked.connect(getattr(self.viewmodel, "clear_plot", lambda: None))
-            except Exception:
-                pass
+            # The file-list Clear button handles clearing queued datasets (see below)
             config_btn.clicked.connect(self._on_edit_config_clicked)
             # Exclude mode button toggles the CustomViewBox exclude_mode
             def _on_exclude_toggled(checked):
+                # Snapshot current parameters so toggling exclude mode doesn't reset UI values
+                snap = {}
+                try:
+                    if self.viewmodel and hasattr(self.viewmodel, "get_parameters"):
+                        specs = self.viewmodel.get_parameters() or {}
+                        for k, v in specs.items():
+                            if isinstance(v, dict):
+                                snap[k] = v.get("value")
+                            else:
+                                snap[k] = v
+                except Exception:
+                    snap = {}
+
                 try:
                     self.viewbox.set_exclude_mode(bool(checked))
                     # ensure input handler knows selection state
@@ -248,7 +262,15 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     self.append_log(f"Failed to toggle exclude mode: {e}")
 
+                # Reapply snapped parameter values so any accidental resets are undone
+                try:
+                    if snap and self.viewmodel and hasattr(self.viewmodel, "apply_parameters"):
+                        self.viewmodel.apply_parameters(snap)
+                except Exception:
+                    pass
+
             exclude_btn.toggled.connect(_on_exclude_toggled)
+            include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
 
             try:
                 self.viewmodel.files_updated.connect(self._on_files_updated)
@@ -345,7 +367,10 @@ class MainWindow(QMainWindow):
         if hasattr(self, "file_remove_btn"):
             self.file_remove_btn.setEnabled(has_selection)
         if hasattr(self, "file_clear_btn"):
-            self.file_clear_btn.setEnabled(has_files)
+            # Allow Clear List to be used even when the visible list is empty.
+            # This helps when a file is loaded but for some reason doesn't appear
+            # in the list — the user can still force-clear queued/loaded state.
+            self.file_clear_btn.setEnabled(True)
 
     def _init_right_dock(self):
         # Replaced static parameter controls with a dynamic, scrollable form.
