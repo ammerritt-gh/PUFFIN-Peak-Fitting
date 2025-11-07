@@ -6,13 +6,14 @@ from PySide6.QtWidgets import (
     QScrollArea, QSpinBox, QCheckBox, QListWidget, QListWidgetItem,
     QAbstractItemView
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import QColor, QBrush
 import pyqtgraph as pg
 import numpy as np
 
 from view.view_box import CustomViewBox
 from view.input_handler import InputHandler
+from view.constants import CURVE_SELECT_TOL_PIXELS
 
 # -- color palette (change these) --
 PLOT_BG = "white"       # plot background
@@ -30,6 +31,8 @@ class MainWindow(QMainWindow):
         self.param_widgets = {}   # name -> widget
         self.curves = {}  # curve_id -> PlotDataItem
         self.selected_curve_id = None
+        # internal: ensure we connect scene click handler only once
+        self._scene_click_connected = False
 
         # --- Central Plot ---
         # Initialize the plot widget inside _init_plot() to avoid duplicate
@@ -1035,8 +1038,15 @@ class MainWindow(QMainWindow):
                 curve = self.plot_widget.plot(x_arr, yfit_arr, pen=pg.mkPen(FIT_COLOR, width=2))
                 self.curves["fit"] = curve
                 curve.curve_id = "fit"
-                # Enable clicking on curve
-                curve.scene().sigMouseClicked.connect(lambda ev, cid="fit": self._on_curve_clicked(ev, cid))
+                # Connect a single scene click handler (if not already) which
+                # inspects the items under the click and only selects the
+                # curve when the curve's graphics item was actually clicked.
+                if not getattr(self, '_scene_click_connected', False):
+                    try:
+                        self.plot_widget.scene().sigMouseClicked.connect(self._on_scene_clicked)
+                        self._scene_click_connected = True
+                    except Exception:
+                        pass
             else:
                 self.curves["fit"].setData(x_arr, yfit_arr)
         else:
@@ -1394,5 +1404,60 @@ class MainWindow(QMainWindow):
             curve = self.curves[curve_id]
             curve.setPen(pg.mkPen('red', width=4))
         self.append_log(f"Curve selection changed → {curve_id or 'none'}")
+
+    def _on_scene_clicked(self, ev):
+        """Central handler for scene clicks. Map the click to data coords and
+        test proximity to each plotted curve's data. Select the first curve
+        whose visible line is within tol pixels of the click.
+        """
+        try:
+            vb = self.plot_widget.getViewBox()
+            sp = ev.scenePos()
+            pv = vb.mapSceneToView(sp)
+            x_click, y_click = float(pv.x()), float(pv.y())
+            tol_pixels = float(CURVE_SELECT_TOL_PIXELS)
+            t2 = tol_pixels * tol_pixels
+            from PySide6.QtCore import QPointF
+            import numpy as _np
+
+            # Iterate curves and test a small neighborhood around the nearest
+            # x-value to avoid mapping every point for large datasets.
+            for cid, curve in list(self.curves.items()):
+                try:
+                    data = curve.getData()
+                    if not data:
+                        continue
+                    cx, cy = data
+                    if cx is None or len(cx) == 0:
+                        continue
+                    cx_arr = _np.asarray(cx)
+                    cy_arr = _np.asarray(cy)
+                    # find index nearest to clicked x in data-space
+                    idx = int(_np.argmin(_np.abs(cx_arr - x_click)))
+                    lo = max(0, idx - 5)
+                    hi = min(len(cx_arr), idx + 6)
+                    for xi, yi in zip(cx_arr[lo:hi], cy_arr[lo:hi]):
+                        pt = vb.mapViewToScene(QPointF(float(xi), float(yi)))
+                        dx = float(pt.x()) - float(sp.x())
+                        dy = float(pt.y()) - float(sp.y())
+                        if (dx * dx + dy * dy) <= t2:
+                            # Found a hit — notify ViewModel (if present) or
+                            # fall back to local selection handling.
+                            try:
+                                if self.viewmodel and hasattr(self.viewmodel, 'set_selected_curve'):
+                                    self.viewmodel.set_selected_curve(cid)
+                                else:
+                                    self._on_curve_selected(cid)
+                            except Exception:
+                                try:
+                                    self._on_curve_selected(cid)
+                                except Exception:
+                                    pass
+                            ev.accept()
+                            return
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
 
