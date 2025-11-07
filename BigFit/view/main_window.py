@@ -119,18 +119,10 @@ class MainWindow(QMainWindow):
 
         # scatter (data points)
         self.scatter = pg.ScatterPlotItem(size=6, pen=None, brush=pg.mkBrush(POINT_COLOR))
-        try:
-            self.scatter.setOpts(name="Data")
-        except Exception:
-            pass
         self.plot_widget.addItem(self.scatter)
         # excluded points overlay (small grey 'x' markers)
         try:
             self.excluded_scatter = pg.ScatterPlotItem(size=8, pen=pg.mkPen('gray'), brush=None, symbol='x')
-            try:
-                self.excluded_scatter.setOpts(name="Excluded Data")
-            except Exception:
-                pass
             self.plot_widget.addItem(self.excluded_scatter)
         except Exception:
             self.excluded_scatter = None
@@ -1147,7 +1139,6 @@ class MainWindow(QMainWindow):
                     x_use,
                     y_use,
                     pen=pg.mkPen(color or FIT_COLOR, width=2),
-                    name=label or curve_id,
                 )
             except Exception:
                 return
@@ -1157,10 +1148,6 @@ class MainWindow(QMainWindow):
         else:
             try:
                 curve.setData(x_use, y_use)
-            except Exception:
-                pass
-            try:
-                curve.setOpts(name=label or curve_id)
             except Exception:
                 pass
 
@@ -1180,7 +1167,7 @@ class MainWindow(QMainWindow):
         desired_entries = []
         if getattr(self, "scatter", None) is not None:
             desired_entries.append(("Data", self.scatter))
-        if getattr(self, "excluded_scatter", None) is not None:
+        if self._excluded_has_points and getattr(self, "excluded_scatter", None) is not None:
             desired_entries.append(("Excluded Data", self.excluded_scatter))
 
         fit_curve = self.curves.get("fit") if hasattr(self, "curves") else None
