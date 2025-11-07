@@ -2075,8 +2075,8 @@ class MainWindow(QMainWindow):
             try:
                 if self.viewmodel:
                     self.viewmodel.clear_selected_curve()
-            except Exception:
-                pass
+            except Exception as e:
+                self.append_log(f"Error clearing selected curve: {e}")
             curve_id = None
 
         # reset previous curve pen
