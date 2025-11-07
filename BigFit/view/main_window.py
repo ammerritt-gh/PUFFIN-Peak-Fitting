@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush
 import pyqtgraph as pg
 import numpy as np
 
@@ -31,8 +32,8 @@ class MainWindow(QMainWindow):
         self.selected_curve_id = None
 
         # --- Central Plot ---
-        self.plot_widget = pg.PlotWidget(title="Data and Fit")
-        self.setCentralWidget(self.plot_widget)
+        # Initialize the plot widget inside _init_plot() to avoid duplicate
+        # creation and ensure a single central widget is used.
         self._init_plot()
 
         # --- Docks ---
@@ -40,6 +41,11 @@ class MainWindow(QMainWindow):
         # create the bottom (log) dock before the right dock so logging is available
         self._init_bottom_dock()
         self._init_right_dock()
+        # Elements dock (separate dock placed under Parameters)
+        try:
+            self._init_elements_dock()
+        except Exception:
+            pass
 
         for dock in [self.left_dock, self.right_dock, self.bottom_dock]:
             dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -86,7 +92,12 @@ class MainWindow(QMainWindow):
             self.viewmodel.curve_selection_changed.connect(lambda cid: self.input_handler.set_selected_curve(cid, notify_vm=False))
         except Exception:
             pass
-        self.viewmodel.curve_selection_changed.connect(self._on_curve_selected)
+        # Guard the secondary connect so the absence of a ViewModel or signal
+        # won't raise during initialization.
+        try:
+            self.viewmodel.curve_selection_changed.connect(self._on_curve_selected)
+        except Exception:
+            pass
 
 
         # --- visual setup ---
@@ -107,8 +118,9 @@ class MainWindow(QMainWindow):
         self.err_item = pg.ErrorBarItem(pen=pg.mkPen(ERROR_COLOR))
         self.plot_widget.addItem(self.err_item)
 
-        # fit line
-        self.fit_curve = self.plot_widget.plot([], [], pen=pg.mkPen(FIT_COLOR, width=2), name="Fit")
+    # Note: fit overlay is managed by update_plot_data via self.curves['fit']
+    # so we avoid creating a separate persistent `self.fit_curve` here to
+    # prevent duplicate plot items.
 
         # axis colors
         for ax in ("left", "bottom", "right", "top"):
@@ -269,12 +281,38 @@ class MainWindow(QMainWindow):
             self.file_list.currentRowChanged.connect(self._on_file_selected)
             remove_btn.clicked.connect(self._on_remove_file_clicked)
             clear_list_btn.clicked.connect(self._on_clear_files_clicked)
+            # Element list wiring (connect if element widgets exist in a separate dock)
+            if hasattr(self, 'element_list'):
+                try:
+                    self.element_list.currentRowChanged.connect(self._on_element_selected)
+                except Exception:
+                    pass
+            if hasattr(self, 'element_add_btn'):
+                try:
+                    self.element_add_btn.clicked.connect(self._on_element_added_clicked)
+                except Exception:
+                    pass
+            if hasattr(self, 'element_remove_btn'):
+                try:
+                    self.element_remove_btn.clicked.connect(self._on_element_remove_clicked)
+                except Exception:
+                    pass
             try:
                 self.viewmodel.notify_file_queue()
             except Exception:
                 pass
+            try:
+                self._refresh_element_list()
+            except Exception:
+                pass
         else:
             self._update_file_action_state()
+
+        # ensure element list is populated even when no ViewModel present
+        try:
+            self._refresh_element_list()
+        except Exception:
+            pass
 
         self._update_file_action_state()
 
@@ -348,6 +386,266 @@ class MainWindow(QMainWindow):
                 getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
         except Exception as e:
             self.append_log(f"Failed to clear datasets: {e}")
+
+    # --------------------------
+    # Element list handlers
+    # --------------------------
+    def _on_element_selected(self, row):
+        """Called when user selects an element in the Elements list.
+        Tries to select the corresponding curve via the ViewModel if available
+        otherwise falls back to local highlighting.
+        """
+        try:
+            if not hasattr(self, 'element_list'):
+                return
+            if row is None or row < 0:
+                return
+            item = self.element_list.item(row)
+            if item is None:
+                return
+            data = item.data(Qt.UserRole)
+            elem_id = None
+            if isinstance(data, dict):
+                elem_id = data.get('id') or data.get('name') or item.text()
+            else:
+                elem_id = item.text()
+
+            # prefer ViewModel selection API when available
+            if self.viewmodel and hasattr(self.viewmodel, 'set_selected_curve'):
+                try:
+                    self.viewmodel.set_selected_curve(elem_id)
+                except Exception:
+                    pass
+            else:
+                try:
+                    # fallback to view-level highlighting
+                    self._on_curve_selected(elem_id)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self.append_log(f"Element select failed: {e}")
+            except Exception:
+                pass
+
+    def _on_element_added_clicked(self):
+        """Add a new element. Calls ViewModel.add_component_to_model() if present;
+        otherwise adds a local placeholder item so the UI remains usable.
+        """
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, 'add_component_to_model'):
+                try:
+                    self.viewmodel.add_component_to_model()
+                except Exception as e:
+                    self.append_log(f"ViewModel failed to add component: {e}")
+                # allow ViewModel to emit updates; refresh local list
+                try:
+                    self._refresh_element_list()
+                except Exception:
+                    pass
+                return
+
+            # local placeholder behavior
+            name = f"element{self.element_list.count() + 1}"
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, {'id': name, 'name': name})
+            self.element_list.addItem(item)
+            self.element_list.setCurrentRow(self.element_list.count() - 1)
+            self.append_log(f"Added placeholder element: {name}")
+        except Exception as e:
+            try:
+                self.append_log(f"Failed to add element: {e}")
+            except Exception:
+                pass
+
+    def _on_element_remove_clicked(self):
+        """Remove the currently selected element. Attempts to call ViewModel
+        removal APIs if present, otherwise removes from the local list.
+        """
+        try:
+            if not hasattr(self, 'element_list'):
+                return
+            row = self.element_list.currentRow()
+            if row is None or row < 0:
+                return
+
+            # Prevent removing the special 'model' entry or the last remaining element
+            total = self.element_list.count() if hasattr(self, 'element_list') else 0
+            # if only one item remains, disallow removal
+            if total <= 1:
+                try:
+                    self.append_log("Cannot remove the last element.")
+                except Exception:
+                    pass
+                return
+
+            # inspect selected item data to prevent removing the model placeholder
+            try:
+                it = self.element_list.item(row)
+                itdata = it.data(Qt.UserRole) if it is not None else None
+                if isinstance(itdata, dict) and itdata.get('id') == 'model':
+                    try:
+                        self.append_log("Cannot remove the active model entry.")
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+
+            # prefer ViewModel removal APIs
+            if self.viewmodel and hasattr(self.viewmodel, 'remove_component_at'):
+                try:
+                    self.viewmodel.remove_component_at(row)
+                    self._refresh_element_list()
+                    return
+                except Exception:
+                    pass
+            if self.viewmodel and hasattr(self.viewmodel, 'remove_last_component'):
+                try:
+                    self.viewmodel.remove_last_component()
+                    self._refresh_element_list()
+                    return
+                except Exception:
+                    pass
+
+            # fallback: remove from UI only
+            item = self.element_list.item(row)
+            # protect model item
+            if item is not None:
+                try:
+                    dat = item.data(Qt.UserRole)
+                    if isinstance(dat, dict) and dat.get('id') == 'model':
+                        try:
+                            self.append_log("Cannot remove the active model entry.")
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
+            taken = self.element_list.takeItem(row)
+            if taken:
+                self.append_log(f"Removed element: {taken.text()}")
+            # clear selection in ViewModel if present
+            try:
+                if self.viewmodel and hasattr(self.viewmodel, 'set_selected_curve'):
+                    self.viewmodel.set_selected_curve(None)
+                else:
+                    self._on_curve_selected(None)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.append_log(f"Failed to remove element: {e}")
+            except Exception:
+                pass
+
+    def _refresh_element_list(self):
+        """Populate the element list from the ViewModel/state when possible.
+        This is tolerant of non-composite specs and will try to infer prefixes
+        from parameter names as a fallback.
+        """
+        try:
+            if not hasattr(self, 'element_list'):
+                return
+            self.element_list.blockSignals(True)
+            self.element_list.clear()
+            if self.viewmodel and hasattr(self.viewmodel, 'state') and hasattr(self.viewmodel.state, 'model_spec'):
+                spec = self.viewmodel.state.model_spec
+                comps = getattr(spec, '_components', None)
+                if isinstance(comps, list) and len(comps) > 0:
+                    for prefix, sub in comps:
+                        name = prefix.rstrip('_')
+                        item = QListWidgetItem(name)
+                        item.setData(Qt.UserRole, {'id': prefix, 'name': name})
+                        self.element_list.addItem(item)
+                else:
+                    # infer prefixes from param names (prefix_name pattern)
+                    params = getattr(spec, 'params', {}) or {}
+                    prefixes = {}
+                    for k in params.keys():
+                        if '_' in k:
+                            p = k.split('_', 1)[0] + '_'
+                            prefixes[p] = prefixes.get(p, 0) + 1
+                    for p in sorted(prefixes.keys()):
+                        name = p.rstrip('_')
+                        item = QListWidgetItem(name)
+                        item.setData(Qt.UserRole, {'id': p, 'name': name})
+                        self.element_list.addItem(item)
+            # Prepend an entry representing the active/current model so it's always visible
+            try:
+                model_label = None
+                if self.viewmodel and hasattr(self.viewmodel, 'state'):
+                    model_label = getattr(self.viewmodel.state, 'model_name', None)
+                if not model_label:
+                    model_label = 'Model'
+                # Avoid duplicate if a component uses the same id
+                first = self.element_list.item(0)
+                # Safely determine whether the first item is the injected 'model'
+                first_has_model_id = False
+                if first is not None:
+                    try:
+                        fd = first.data(Qt.UserRole)
+                        if isinstance(fd, dict) and fd.get('id') == 'model':
+                            first_has_model_id = True
+                    except Exception:
+                        first_has_model_id = False
+                if first is None or not first_has_model_id:
+                    model_item = QListWidgetItem(str(model_label))
+                    model_item.setData(Qt.UserRole, {'id': 'model', 'name': model_label})
+                    # make it visually distinct (bold + subtle background)
+                    try:
+                        f = model_item.font()
+                        f.setBold(True)
+                        model_item.setFont(f)
+                    except Exception:
+                        pass
+                    try:
+                        model_item.setBackground(QBrush(QColor("#f2f2f7")))
+                        model_item.setToolTip("Active model (non-removable)")
+                    except Exception:
+                        pass
+                    self.element_list.insertItem(0, model_item)
+            except Exception:
+                pass
+            # If nothing detected (no composite components or inferred prefixes),
+            # ensure we include the active/current model as a single element so
+            # the UI always shows at least one selectable entry.
+            if self.element_list.count() == 0:
+                try:
+                    name = None
+                    if self.viewmodel and hasattr(self.viewmodel, 'state'):
+                        name = getattr(self.viewmodel.state, 'model_name', None)
+                    if not name:
+                        name = "Model"
+                    # attempt to annotate with a center value if available
+                    tooltip = None
+                    try:
+                        mdl = getattr(self.viewmodel.state, 'model', None) if self.viewmodel and hasattr(self.viewmodel, 'state') else None
+                        if mdl is not None:
+                            center_val = None
+                            if hasattr(mdl, 'center'):
+                                center_val = getattr(mdl, 'center')
+                            elif hasattr(mdl, 'Center'):
+                                center_val = getattr(mdl, 'Center')
+                            if center_val is not None:
+                                tooltip = f"center={center_val}"
+                    except Exception:
+                        tooltip = None
+
+                    item = QListWidgetItem(str(name))
+                    item.setData(Qt.UserRole, {'id': 'model', 'name': name})
+                    if tooltip:
+                        item.setToolTip(tooltip)
+                    self.element_list.addItem(item)
+                except Exception:
+                    pass
+
+            self.element_list.blockSignals(False)
+        except Exception:
+            try:
+                self.element_list.blockSignals(False)
+            except Exception:
+                pass
 
     def _update_file_action_state(self):
         if not hasattr(self, "file_list"):
@@ -424,6 +722,11 @@ class MainWindow(QMainWindow):
                     self.viewmodel.set_model(name)
                 # refresh UI parameters for the selected model
                 self._refresh_parameters()
+                # ensure elements list reflects the newly selected model
+                try:
+                    self._refresh_element_list()
+                except Exception:
+                    pass
             except Exception as e:
                 self.append_log(f"Failed to switch model: {e}")
 
@@ -464,6 +767,81 @@ class MainWindow(QMainWindow):
             refresh_btn.clicked.connect(self._refresh_parameters)
             # initial populate
             self._refresh_parameters()
+            # Update elements list whenever parameters (and model selection) change
+            try:
+                self.viewmodel.parameters_updated.connect(self._refresh_element_list)
+            except Exception:
+                pass
+
+    def _init_elements_dock(self):
+        """Create a separate dock on the right to host model elements (peaks).
+        This sits beneath the Parameters dock and holds the element list and
+        add/remove buttons.
+        """
+        self.elements_dock = QDockWidget("Elements", self)
+        container = QWidget()
+        vlayout = QVBoxLayout(container)
+
+        # light-weight element list
+        self.element_list = QListWidget()
+        self.element_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        vlayout.addWidget(self.element_list)
+
+        # add / remove row
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Add Element")
+        remove_btn = QPushButton("Remove Element")
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(remove_btn)
+        vlayout.addLayout(btn_row)
+
+        # keep references for other methods
+        self.element_add_btn = add_btn
+        self.element_remove_btn = remove_btn
+
+        self.elements_dock.setWidget(container)
+        # Prefer placing the Elements dock to the right of the Log (bottom)
+        # dock so it appears at the lower-right corner of the UI. If the
+        # bottom dock is not present, fall back to placing it in the right
+        # column under Parameters (previous behavior).
+        try:
+            # attempt to add into the bottom area first
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.elements_dock)
+            if hasattr(self, 'bottom_dock'):
+                # split horizontally so the elements dock sits to the right of the Log
+                self.splitDockWidget(self.bottom_dock, self.elements_dock, Qt.Horizontal)
+        except Exception:
+            try:
+                # fallback: add to the right column and stack under Parameters
+                self.addDockWidget(Qt.RightDockWidgetArea, self.elements_dock)
+                if hasattr(self, 'right_dock'):
+                    self.splitDockWidget(self.right_dock, self.elements_dock, Qt.Vertical)
+            except Exception:
+                pass
+        try:
+            self.elements_dock.setMinimumWidth(260)
+        except Exception:
+            pass
+
+        # Wire UI handlers
+        try:
+            self.element_list.currentRowChanged.connect(self._on_element_selected)
+        except Exception:
+            pass
+        try:
+            add_btn.clicked.connect(self._on_element_added_clicked)
+        except Exception:
+            pass
+        try:
+            remove_btn.clicked.connect(self._on_element_remove_clicked)
+        except Exception:
+            pass
+
+        # Populate initial contents
+        try:
+            self._refresh_element_list()
+        except Exception:
+            pass
 
     def _init_bottom_dock(self):
         self.bottom_dock = QDockWidget("Log", self)
