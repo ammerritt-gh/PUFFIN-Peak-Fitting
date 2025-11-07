@@ -33,8 +33,9 @@ class FitterViewModel(QObject):
         # Attempt to restore previously queued files from configuration
         try:
             self._load_queue_from_config()
-        except Exception:
-            pass
+        except Exception as exc:
+            # Failed to restore previous file queue; continue with empty queue.
+            self.log_message.emit(f"Could not restore previous file queue: {exc}")
 
     # --------------------------
     # Data I/O
