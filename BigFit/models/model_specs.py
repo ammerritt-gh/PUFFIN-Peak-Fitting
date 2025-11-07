@@ -4,6 +4,8 @@ from scipy.fft import fft, ifft
 from scipy.interpolate import interp1d
 from scipy.signal import fftconvolve
 from scipy.interpolate import interp1d
+from dataclasses import dataclass
+from itertools import cycle
 
 import matplotlib.pyplot as plt
 
@@ -208,7 +210,50 @@ def convolute_gaussian_dho(x_target, phonon_energy, center, gauss_fwhm, lorentz_
 
     return y
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Iterable
+
+# Pre-defined colors cycled for composite components.
+_COMPONENT_COLORS = [
+    "#1f77b4",  # blue
+    "#ff7f0e",  # orange
+    "#2ca02c",  # green
+    "#d62728",  # red
+    "#9467bd",  # purple
+    "#8c564b",  # brown
+    "#e377c2",  # pink
+    "#7f7f7f",  # gray
+    "#bcbd22",  # olive
+    "#17becf",  # teal
+]
+
+
+def _clone_parameter(param: "Parameter", new_name: str, value: Any) -> "Parameter":
+    """Return a shallow copy of `param` with a new name/value."""
+    return Parameter(
+        name=new_name,
+        value=value,
+        ptype=getattr(param, "ptype", None),
+        minimum=getattr(param, "min", None),
+        maximum=getattr(param, "max", None),
+        choices=getattr(param, "choices", None),
+        hint=getattr(param, "hint", ""),
+        decimals=getattr(param, "decimals", None),
+        step=getattr(param, "step", None),
+        control=getattr(param, "control", None),
+    )
+
+
+@dataclass
+class CompositeComponent:
+    prefix: str
+    spec: "BaseModelSpec"
+    color: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.prefix.rstrip('_')}"
+
+
 
 class Parameter:
     """Represents a single parameter with metadata usable by the view.
@@ -351,6 +396,190 @@ class BaseModelSpec:
         except Exception:
             return np.array([])
 
+
+class CompositeModelSpec(BaseModelSpec):
+    """Model spec composed of multiple atomic specs summed together."""
+
+    is_composite = True
+
+    def __init__(self):
+        super().__init__()
+        self._components: List[CompositeComponent] = []
+        self._color_iter = cycle(_COMPONENT_COLORS)
+        self._prefix_counter = 1
+        self._param_links: Dict[str, Any] = {}
+
+    # ----- component management -------------------------------------------------
+    def _next_color(self) -> str:
+        try:
+            return next(self._color_iter)
+        except Exception:
+            return "#1f77b4"
+
+    def _generate_prefix(self) -> str:
+        attempt = self._prefix_counter
+        existing = {comp.prefix for comp in self._components}
+        while True:
+            candidate = f"elem{attempt}_"
+            if candidate not in existing:
+                self._prefix_counter = attempt + 1
+                return candidate
+            attempt += 1
+
+    def add_component(
+        self,
+        spec_name: str,
+        initial_params: Optional[Dict[str, Any]] = None,
+        prefix: Optional[str] = None,
+        data_x=None,
+        data_y=None,
+    ) -> CompositeComponent:
+        from models import get_model_spec
+
+        spec_name = (spec_name or "").strip()
+        if not spec_name:
+            raise ValueError("spec_name required")
+        spec = get_model_spec(spec_name)
+        if isinstance(spec, CompositeModelSpec):
+            raise ValueError("Nested composite models are not supported")
+
+        try:
+            spec.initialize(data_x, data_y)
+        except Exception:
+            try:
+                spec.initialize()
+            except Exception:
+                pass
+
+        prefix = prefix or self._generate_prefix()
+        color = self._next_color()
+        component = CompositeComponent(prefix=prefix, spec=spec, color=color)
+        self._components.append(component)
+
+        if initial_params:
+            for name, value in initial_params.items():
+                if name in spec.params:
+                    spec.params[name].value = value
+
+        self._rebuild_flat_params()
+        return component
+
+    def remove_component_at(self, index: int) -> Optional[CompositeComponent]:
+        if index < 0 or index >= len(self._components):
+            return None
+        removed = self._components.pop(index)
+        self._rebuild_flat_params()
+        return removed
+
+    def reorder_component(self, old_index: int, new_index: int) -> bool:
+        if old_index < 0 or new_index < 0:
+            return False
+        if old_index >= len(self._components) or new_index >= len(self._components):
+            return False
+        if old_index == new_index:
+            return True
+        comp = self._components.pop(old_index)
+        self._components.insert(new_index, comp)
+        self._rebuild_flat_params()
+        return True
+
+    def reorder_by_prefix(self, prefix_order: Iterable[str]) -> bool:
+        prefix_order = [p for p in prefix_order]
+        if not prefix_order:
+            return False
+        current = {comp.prefix: comp for comp in self._components}
+        new_order: List[CompositeComponent] = []
+        for prefix in prefix_order:
+            comp = current.get(prefix)
+            if comp is not None:
+                new_order.append(comp)
+        if len(new_order) != len(self._components):
+            return False
+        if all(a.prefix == b.prefix for a, b in zip(new_order, self._components)):
+            return True
+        self._components = new_order
+        self._rebuild_flat_params()
+        return True
+
+    def clear_components(self):
+        self._components.clear()
+        self._rebuild_flat_params()
+
+    # ----- aggregation helpers --------------------------------------------------
+    def _rebuild_flat_params(self):
+        self.params = {}
+        self._param_links = {}
+        for component in self._components:
+            for name, param in component.spec.params.items():
+                flat_name = f"{component.prefix}{name}"
+                value = getattr(param, "value", None)
+                self.params[flat_name] = _clone_parameter(param, flat_name, value)
+                self._param_links[flat_name] = (component, name)
+
+    def get_parameters(self) -> Dict[str, Any]:
+        self._rebuild_flat_params()
+        return super().get_parameters()
+
+    def get_param_values(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._rebuild_flat_params()
+        return super().get_param_values(overrides=overrides)
+
+    def list_components(self) -> List[CompositeComponent]:
+        return list(self._components)
+
+    def set_param_value(self, flat_name: str, value: Any):
+        link = self._param_links.get(flat_name)
+        if link:
+            component, name = link
+            try:
+                component.spec.params[name].value = value
+            except Exception:
+                pass
+        if flat_name in self.params:
+            try:
+                self.params[flat_name].value = value
+            except Exception:
+                pass
+
+    def get_link(self, flat_name: str):
+        return self._param_links.get(flat_name)
+
+    # ----- BaseModelSpec overrides ---------------------------------------------
+    def initialize(self, data_x=None, data_y=None):
+        for component in self._components:
+            try:
+                component.spec.initialize(data_x, data_y)
+            except Exception:
+                continue
+        self._rebuild_flat_params()
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        x_arr = np.asarray(x, dtype=float)
+        if x_arr.size == 0:
+            return x_arr
+
+        param_values = self.get_param_values(overrides=params or {})
+        total = np.zeros_like(x_arr, dtype=float)
+
+        for component in self._components:
+            sub_params: Dict[str, Any] = {}
+            for name in component.spec.params.keys():
+                key = f"{component.prefix}{name}"
+                if key in param_values:
+                    sub_params[name] = param_values[key]
+                else:
+                    sub_params[name] = component.spec.params[name].value
+            try:
+                contribution = component.spec.evaluate(x_arr, sub_params)
+            except Exception:
+                contribution = np.zeros_like(x_arr, dtype=float)
+            try:
+                total += np.asarray(contribution, dtype=float)
+            except Exception:
+                pass
+
+        return total
+
 # Concrete model specs
 class GaussianModelSpec(BaseModelSpec):
     def __init__(self):
@@ -456,6 +685,8 @@ class LinearBackgroundModelSpec(BaseModelSpec):
 # Factory / helper
 def get_model_spec(model_name: str) -> BaseModelSpec:
     name = (model_name or "").strip().lower()
+    if name in ("composite", "custom", "custom model", "custommodel"):
+        return CompositeModelSpec()
     if name in ("gauss", "gaussian", "gaussmodel", "gaussianmodel"):
         return GaussianModelSpec()
     if name in ("voigt", "voigtmodel"):
@@ -464,3 +695,12 @@ def get_model_spec(model_name: str) -> BaseModelSpec:
         return LinearBackgroundModelSpec()
     # default fallback
     return BaseModelSpec()
+
+
+def get_atomic_component_names() -> List[str]:
+    """Return display names for atomic components usable in composite models."""
+    return [
+        "Gaussian",
+        "Voigt",
+        "Linear Background",
+    ]

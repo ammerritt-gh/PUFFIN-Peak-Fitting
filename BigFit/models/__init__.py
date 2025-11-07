@@ -27,6 +27,8 @@ from .model_state import ModelState
 get_model_spec = _model_specs.get_model_spec
 Parameter = _model_specs.Parameter
 BaseModelSpec = _model_specs.BaseModelSpec
+CompositeModelSpec = _model_specs.CompositeModelSpec
+get_atomic_component_names = _model_specs.get_atomic_component_names
 
 # Discover all ModelSpec subclasses in model_specs module
 _available_model_specs: Dict[str, type] = {}
@@ -54,9 +56,11 @@ __all__ = [
     "get_model_spec",
     "Parameter",
     "BaseModelSpec",
+    "CompositeModelSpec",
     "ModelState",
     "get_available_model_spec_classes",
     "get_available_model_names",
+    "get_atomic_component_names",
 ]
 # Append discovered class names
 __all__.extend(list(_available_model_specs.keys()))
