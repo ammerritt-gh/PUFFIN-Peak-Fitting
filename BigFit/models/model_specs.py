@@ -513,12 +513,27 @@ class CompositeModelSpec(BaseModelSpec):
             for name, param in component.spec.params.items():
                 flat_name = f"{component.prefix}{name}"
                 value = getattr(param, "value", None)
-                self.params[flat_name] = _clone_parameter(param, flat_name, value)
+                cloned = _clone_parameter(param, flat_name, value)
+                try:
+                    setattr(cloned, "component_prefix", component.prefix)
+                    setattr(cloned, "component_label", component.label)
+                    setattr(cloned, "component_color", component.color)
+                except Exception:
+                    pass
+                self.params[flat_name] = cloned
                 self._param_links[flat_name] = (component, name)
 
     def get_parameters(self) -> Dict[str, Any]:
         self._rebuild_flat_params()
-        return super().get_parameters()
+        specs = super().get_parameters()
+        for name, spec in specs.items():
+            link = self._param_links.get(name)
+            if link:
+                component, _ = link
+                spec.setdefault("component", component.prefix)
+                spec.setdefault("component_label", component.label)
+                spec.setdefault("color", component.color)
+        return specs
 
     def get_param_values(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self._rebuild_flat_params()
@@ -553,13 +568,13 @@ class CompositeModelSpec(BaseModelSpec):
                 continue
         self._rebuild_flat_params()
 
-    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+    def evaluate_components(self, x, params: Optional[Dict[str, Any]] = None):
         x_arr = np.asarray(x, dtype=float)
         if x_arr.size == 0:
-            return x_arr
+            return []
 
         param_values = self.get_param_values(overrides=params or {})
-        total = np.zeros_like(x_arr, dtype=float)
+        outputs = []
 
         for component in self._components:
             sub_params: Dict[str, Any] = {}
@@ -574,7 +589,21 @@ class CompositeModelSpec(BaseModelSpec):
             except Exception:
                 contribution = np.zeros_like(x_arr, dtype=float)
             try:
-                total += np.asarray(contribution, dtype=float)
+                outputs.append((component, np.asarray(contribution, dtype=float)))
+            except Exception:
+                outputs.append((component, np.zeros_like(x_arr, dtype=float)))
+
+        return outputs
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        component_outputs = self.evaluate_components(x, params=params)
+        if not component_outputs:
+            return np.zeros_like(np.asarray(x, dtype=float), dtype=float)
+
+        total = np.zeros_like(np.asarray(x, dtype=float), dtype=float)
+        for _, values in component_outputs:
+            try:
+                total += values
             except Exception:
                 pass
 

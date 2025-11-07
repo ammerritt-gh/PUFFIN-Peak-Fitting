@@ -2,6 +2,7 @@
 from PySide6.QtCore import QObject, Qt, QPointF, QEvent
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 import numpy as np
+from models import CompositeModelSpec
 
 
 class InputHandler(QObject):
@@ -23,6 +24,7 @@ class InputHandler(QObject):
 
         # curve selection state (stores the curve ID or None)
         self.selected_curve_id = None
+        self.selected_component_prefix = None
 
         # control mapping for interactive parameter binding
         # keys: (action:str, modifiers: tuple(sorted modifier names)) -> list of {name, step}
@@ -227,6 +229,11 @@ class InputHandler(QObject):
 
             for entry in self.control_map.get(key, []):
                 try:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_component = entry.get("component")
+                    if entry_component and entry_component != self.selected_component_prefix:
+                        continue
                     name = entry.get("name")
                     step_val = float(entry.get("step", 1.0))
                     cur = None
@@ -290,6 +297,10 @@ class InputHandler(QObject):
         else:
             print(f"KeyPress: key={key} ({key_name}), text='{key_text}'")
 
+        if Qt.Key_0 <= key <= Qt.Key_9:
+            if self._handle_numeric_hotkey(key):
+                return True
+
         if key == Qt.Key_Plus:
             self.viewmodel.log_message.emit("Increase parameter (placeholder)")
             return True
@@ -331,18 +342,28 @@ class InputHandler(QObject):
         When called from the ViewModel (e.g. external selection change), pass notify_vm=False
         to avoid cycles.
         """
-        if self.selected_curve_id != curve_id:
-            self.selected_curve_id = curve_id
+        normalized_id = curve_id
+        if curve_id == "fit" and self._composite_has_components():
+            normalized_id = None
+
+        prefix = None
+        if normalized_id and str(normalized_id).startswith("component:"):
+            prefix = str(normalized_id).split(":", 1)[1]
+        self.selected_component_prefix = prefix
+
+        if self.selected_curve_id != normalized_id:
+            self.selected_curve_id = normalized_id
             if notify_vm and hasattr(self.viewmodel, "set_selected_curve"):
                 try:
-                    self.viewmodel.set_selected_curve(curve_id)
+                    self.viewmodel.set_selected_curve(normalized_id)
                 except Exception:
                     pass
-            if curve_id is not None and self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
-                try:
-                    self.viewmodel.log_message.emit(f"Curve '{curve_id}' selected.")
-                except Exception:
-                    pass
+
+        if normalized_id is not None and self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+            try:
+                self.viewmodel.log_message.emit(f"Curve '{normalized_id}' selected.")
+            except Exception:
+                pass
 
     def clear_selected_curve(self):
         """Clear selection and notify ViewModel."""
@@ -350,6 +371,7 @@ class InputHandler(QObject):
         # This ensures deselect works even if selection was set directly on the ViewModel
         # (e.g. via MainWindow._on_curve_clicked) and InputHandler.selected_curve_id is stale.
         self.selected_curve_id = None
+        self.selected_component_prefix = None
         if self.viewmodel is not None and hasattr(self.viewmodel, "clear_selected_curve"):
             try:
                 self.viewmodel.clear_selected_curve()
@@ -398,6 +420,8 @@ class InputHandler(QObject):
         if self.viewmodel is None or not hasattr(self.viewmodel, "curves"):
             return None
 
+        composite_has_components = self._composite_has_components()
+
         try:
             vb = plot_widget.getViewBox()
         except Exception:
@@ -419,6 +443,8 @@ class InputHandler(QObject):
         # everything. This happens rarely but keeps behavior safe.
         if click_scene is None:
             for cid, (cx, cy) in self.viewmodel.curves.items():
+                if composite_has_components and cid == "fit":
+                    continue
                 cx = np.asarray(cx)
                 cy = np.asarray(cy)
                 if len(cx) == 0:
@@ -435,6 +461,8 @@ class InputHandler(QObject):
         from PySide6.QtCore import QPointF
 
         for cid, (cx, cy) in self.viewmodel.curves.items():
+            if composite_has_components and cid == "fit":
+                continue
             cx = np.asarray(cx)
             cy = np.asarray(cy)
             if len(cx) == 0:
@@ -468,6 +496,61 @@ class InputHandler(QObject):
         except Exception:
             pass
         return tuple(sorted(names))
+
+    def _handle_numeric_hotkey(self, key) -> bool:
+        """Support number-key shortcuts for selecting components."""
+        try:
+            descriptors = []
+            if self.viewmodel and hasattr(self.viewmodel, "get_component_descriptors"):
+                descriptors = self.viewmodel.get_component_descriptors() or []
+        except Exception:
+            descriptors = []
+
+        composite_has_components = self._composite_has_components()
+
+        if not descriptors:
+            if key == Qt.Key_0:
+                self.clear_selected_curve()
+                return True
+            if key == Qt.Key_1 and not composite_has_components:
+                self.set_selected_curve("fit")
+                return True
+            return False
+
+        if key == Qt.Key_0:
+            self.clear_selected_curve()
+            return True
+
+        index = key - Qt.Key_1
+        if index < 0 or index >= len(descriptors):
+            return False
+
+        prefix = descriptors[index].get("prefix") if isinstance(descriptors[index], dict) else None
+        if not prefix:
+            return False
+        curve_id = f"component:{prefix}"
+        self.set_selected_curve(curve_id)
+        return True
+
+    def _is_composite_active(self) -> bool:
+        try:
+            if self.viewmodel is None or not hasattr(self.viewmodel, "state"):
+                return False
+            spec = getattr(self.viewmodel.state, "model_spec", None)
+            return isinstance(spec, CompositeModelSpec)
+        except Exception:
+            return False
+
+    def _composite_has_components(self) -> bool:
+        if not self._is_composite_active():
+            return False
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "get_component_descriptors"):
+                descriptors = self.viewmodel.get_component_descriptors() or []
+                return bool(descriptors)
+        except Exception:
+            return False
+        return False
 
     def on_wheel(self, obj, event):
         """Handle wheel events and map to parameter changes based on control_map."""
@@ -504,6 +587,11 @@ class InputHandler(QObject):
 
         for entry in self.control_map.get(key, []):
             try:
+                if not isinstance(entry, dict):
+                    continue
+                entry_component = entry.get("component")
+                if entry_component and entry_component != self.selected_component_prefix:
+                    continue
                 name = entry.get("name")
                 step_val = float(entry.get("step", 1.0))
                 cur = None

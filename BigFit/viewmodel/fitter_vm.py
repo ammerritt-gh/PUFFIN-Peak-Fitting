@@ -25,6 +25,16 @@ class FitterViewModel(QObject):
     def __init__(self, model_state=None):
         super().__init__()
         self.state = model_state or ModelState()
+        self._fit_worker = None
+        self._selected_curve_id = None  # currently selected curve ID (str or None)
+        self._datasets = []  # queued datasets [(dict)]
+        self._active_dataset_index = None
+        self.curves: dict = {}
+        # Attempt to restore previously queued files from configuration
+        try:
+            self._load_queue_from_config()
+        except Exception:
+            pass
 
     # --------------------------
     # Data I/O
@@ -550,15 +560,65 @@ class FitterViewModel(QObject):
 
     def update_plot(self):
         """Update plot without running a fit."""
-        y_fit = None
-        if hasattr(self.state, "evaluate"):
+        x = getattr(self.state, "x_data", None)
+        y = getattr(self.state, "y_data", None)
+        if x is None or y is None:
+            return
+
+        model_spec = getattr(self.state, "model_spec", None)
+        y_fit_payload = None
+        curves_payload = {}
+
+        if isinstance(model_spec, CompositeModelSpec):
             try:
-                y_fit = self.state.evaluate()
+                component_outputs = model_spec.evaluate_components(x)
             except Exception:
-                y_fit = None
+                component_outputs = []
+
+            total = np.zeros_like(np.asarray(x, dtype=float), dtype=float)
+            components_for_view = []
+
+            for component, values in component_outputs:
+                arr = np.asarray(values, dtype=float)
+                try:
+                    total += arr
+                except Exception:
+                    pass
+                components_for_view.append(
+                    {
+                        "prefix": component.prefix,
+                        "label": component.label,
+                        "color": component.color,
+                        "y": arr,
+                    }
+                )
+                curves_payload[f"component:{component.prefix}"] = (
+                    np.asarray(x, dtype=float),
+                    arr,
+                )
+
+            if components_for_view:
+                curves_payload["fit"] = (np.asarray(x, dtype=float), total)
+                y_fit_payload = {"total": total, "components": components_for_view}
+            else:
+                curves_payload["fit"] = (np.asarray(x, dtype=float), total)
+                y_fit_payload = total
+        else:
+            y_fit = None
+            if hasattr(self.state, "evaluate"):
+                try:
+                    y_fit = self.state.evaluate()
+                except Exception:
+                    y_fit = None
+            if y_fit is not None:
+                arr = np.asarray(y_fit, dtype=float)
+                curves_payload["fit"] = (np.asarray(x, dtype=float), arr)
+            y_fit_payload = y_fit
+
+        self.curves = curves_payload
         errs = getattr(self.state, "errors", None)
         errs = None if errs is None else np.asarray(errs, dtype=float)
-        self.plot_updated.emit(self.state.x_data, self.state.y_data, y_fit, errs)
+        self.plot_updated.emit(x, y, y_fit_payload, errs)
 
     def compute_statistics(self, y_fit=None, n_params: int = 0) -> dict:
         """Compute common fit statistics (reduced chi-squared, Cash) for current state.
@@ -1006,19 +1066,6 @@ class FitterViewModel(QObject):
     # --------------------------
     # Curve selection management
     # --------------------------
-    def __init__(self, model_state=None):
-        super().__init__()
-        self.state = model_state or ModelState()
-        self._fit_worker = None
-        self._selected_curve_id = None  # currently selected curve ID (str or None)
-        self._datasets = []  # queued datasets [(dict)]
-        self._active_dataset_index = None
-        # Attempt to restore previously queued files from configuration
-        try:
-            self._load_queue_from_config()
-        except Exception:
-            pass
-
     def set_selected_curve(self, curve_id: _typing.Optional[str]):
         """Set the active curve selection. Emits a signal if changed."""
         old = self._selected_curve_id
