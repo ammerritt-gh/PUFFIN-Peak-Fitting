@@ -239,6 +239,7 @@ def _clone_parameter(param: "Parameter", new_name: str, value: Any) -> "Paramete
         decimals=getattr(param, "decimals", None),
         step=getattr(param, "step", None),
         control=getattr(param, "control", None),
+        fixed=getattr(param, "fixed", False),
     )
 
 
@@ -281,7 +282,8 @@ class Parameter:
                  hint: str = "",
                  decimals: Optional[int] = None,
                  step: Optional[float] = None,
-                 control: Optional[Dict[str, Any]] = None):
+                 control: Optional[Dict[str, Any]] = None,
+                 fixed: Optional[bool] = False):
         self.name = name
         self.value = value
         # ptype recommended to be one of: "float","int","str","bool","choice"
@@ -300,6 +302,8 @@ class Parameter:
     # optional interactive control metadata describing how UI input maps to this param
     # example: {"action": "wheel", "modifiers": []}
         self.control = control
+        # whether this parameter should be held fixed during fitting
+        self.fixed = bool(fixed)
 
     def to_spec(self) -> Dict[str, Any]:
         """Export the parameter as a spec dict the view expects.
@@ -342,6 +346,11 @@ class Parameter:
             # so that a single-step value controls both widget increments and
             # interactive inputs.
             spec["control"] = dict(self.control)
+        # expose fixed state to the UI so parameters can be marked fixed/unfixed
+        try:
+            spec["fixed"] = bool(getattr(self, "fixed", False))
+        except Exception:
+            spec["fixed"] = False
         return spec
 
 class BaseModelSpec:

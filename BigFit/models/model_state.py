@@ -294,6 +294,7 @@ class ModelState:
             "x": self.x_data.tolist(),
             "y": self.y_data.tolist(),
             "parameters": {k: v.value for k, v in self.model_spec.params.items()},
+            "fixed": {k: bool(getattr(v, 'fixed', False)) for k, v in self.model_spec.params.items()},
             "excluded": np.asarray(self.excluded).astype(bool).tolist(),
         }
 
@@ -328,3 +329,14 @@ class ModelState:
         for k, v in snap.get("parameters", {}).items():
             if k in self.model_spec.params:
                 self.model_spec.params[k].value = v
+        # restore fixed-state if present
+        fixed_map = snap.get("fixed", {})
+        try:
+            for k, fv in fixed_map.items():
+                if k in self.model_spec.params:
+                    try:
+                        self.model_spec.params[k].fixed = bool(fv)
+                    except Exception:
+                        pass
+        except Exception:
+            pass

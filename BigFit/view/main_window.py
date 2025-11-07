@@ -1549,6 +1549,21 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            # If this is a fixed-toggle checkbox (named '<param>__fixed'),
+            # enable/disable the corresponding value widget for clarity.
+            if isinstance(name, str) and name.endswith("__fixed"):
+                base = name[: -len("__fixed")]
+                try:
+                    val_widget = self.param_widgets.get(base)
+                    if val_widget is not None:
+                        # disable value widget when fixed
+                        try:
+                            val_widget.setEnabled(not bool(value))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
             self.viewmodel.apply_parameters({name: value})
             self._param_last_values[name] = value
         except Exception as exc:
@@ -1806,6 +1821,26 @@ class MainWindow(QMainWindow):
                         hbox.addWidget(hint_label)
                     else:
                         hbox.addWidget(QLabel(""))
+
+                    # Fixed checkbox: allow user to mark parameter as fixed during fits
+                    try:
+                        fixed_val = bool(spec_dict.get("fixed", False))
+                    except Exception:
+                        fixed_val = False
+                    fixed_chk = QCheckBox("Fixed")
+                    try:
+                        fixed_chk.blockSignals(True)
+                        fixed_chk.setChecked(fixed_val)
+                    finally:
+                        fixed_chk.blockSignals(False)
+                    # disable the value widget when fixed to make intent clear
+                    try:
+                        widget.setEnabled(not fixed_val)
+                    except Exception:
+                        pass
+                    # bind the fixed checkbox under a distinct key so apply/commit sends it
+                    self._bind_param_widget(f"{name}__fixed", fixed_chk)
+                    hbox.addWidget(fixed_chk)
 
                     form_layout.addRow(f"{name}:", container_h)
                     self._bind_param_widget(name, widget)
