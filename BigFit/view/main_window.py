@@ -122,9 +122,9 @@ class MainWindow(QMainWindow):
         self.err_item = pg.ErrorBarItem(pen=pg.mkPen(ERROR_COLOR))
         self.plot_widget.addItem(self.err_item)
 
-    # Note: fit overlay is managed by update_plot_data via self.curves['fit']
-    # so we avoid creating a separate persistent `self.fit_curve` here to
-    # prevent duplicate plot items.
+    # Note: fit/component overlays are managed by update_plot_data via self.curves
+    # so we avoid creating separate persistent PlotDataItems here and prevent
+    # duplicate plot items.
 
         # axis colors
         for ax in ("left", "bottom", "right", "top"):
@@ -414,16 +414,26 @@ class MainWindow(QMainWindow):
             else:
                 elem_id = item.text()
 
+            elem_id = str(elem_id)
+            curve_id = None
+            if elem_id == 'model':
+                if self._composite_has_components():
+                    curve_id = None
+                else:
+                    curve_id = 'fit'
+            else:
+                curve_id = f"component:{elem_id}"
+
             # prefer ViewModel selection API when available
             if self.viewmodel and hasattr(self.viewmodel, 'set_selected_curve'):
                 try:
-                    self.viewmodel.set_selected_curve(elem_id)
+                    self.viewmodel.set_selected_curve(curve_id)
                 except Exception:
                     pass
             else:
                 try:
                     # fallback to view-level highlighting
-                    self._on_curve_selected(elem_id)
+                    self._on_curve_selected(curve_id)
                 except Exception:
                     pass
         except Exception as e:
@@ -974,23 +984,97 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _active_model_is_composite(self) -> bool:
+        try:
+            if not self.viewmodel:
+                return False
+            spec = getattr(self.viewmodel.state, "model_spec", None)
+            return isinstance(spec, CompositeModelSpec)
+        except Exception:
+            return False
+
+    def _composite_has_components(self) -> bool:
+        if not self._active_model_is_composite():
+            return False
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "get_component_descriptors"):
+                descriptors = self.viewmodel.get_component_descriptors() or []
+                return bool(descriptors)
+        except Exception:
+            return False
+        return False
+
+    def _ensure_scene_click_handler(self):
+        if getattr(self, "_scene_click_connected", False):
+            return
+        try:
+            scene = self.plot_widget.scene()
+            scene.sigMouseClicked.connect(self._on_scene_clicked)
+            self._scene_click_connected = True
+        except Exception:
+            pass
+
+    def _apply_curve_pen(self, curve: pg.PlotDataItem, selected: bool = False):
+        if curve is None:
+            return
+        color = getattr(curve, "_base_color", FIT_COLOR) or FIT_COLOR
+        is_component = bool(getattr(curve, "_is_component", False))
+        if selected:
+            width = 4 if is_component else 3
+            style = Qt.SolidLine
+        else:
+            width = 2
+            style = Qt.DashLine if is_component else Qt.SolidLine
+        try:
+            pen = pg.mkPen(color, width=width, style=style)
+            curve.setPen(pen)
+        except Exception:
+            pass
+
+    def _upsert_curve(self, curve_id: str, x_arr: np.ndarray, y_arr: np.ndarray,
+                      color: str, selectable: bool, is_component: bool):
+        if curve_id is None:
+            return
+        try:
+            x_use = np.asarray(x_arr, dtype=float)
+            y_use = np.asarray(y_arr, dtype=float)
+        except Exception:
+            return
+
+        curve = self.curves.get(curve_id)
+        if curve is None:
+            try:
+                curve = self.plot_widget.plot(x_use, y_use, pen=pg.mkPen(color or FIT_COLOR, width=2))
+            except Exception:
+                return
+            curve.curve_id = curve_id
+            self.curves[curve_id] = curve
+            self._ensure_scene_click_handler()
+        else:
+            try:
+                curve.setData(x_use, y_use)
+            except Exception:
+                pass
+
+        setattr(curve, "_base_color", color or FIT_COLOR)
+        setattr(curve, "_selectable", bool(selectable))
+        setattr(curve, "_is_component", bool(is_component))
+
+        selected = (self.selected_curve_id == curve_id)
+        self._apply_curve_pen(curve, selected=selected)
+
     def update_plot_data(self, x, y_data, y_fit=None, y_err=None):
-        # Draw scatter points
         if x is None or y_data is None:
             return
 
-        # Ensure numeric numpy arrays are used (prevents list subtraction errors in ErrorBarItem)
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y_data, dtype=float)
 
-        # If the ViewModel exposes an exclusion mask, split included/excluded points
         excl_mask = None
         try:
             if self.viewmodel is not None and hasattr(self.viewmodel, "state") and hasattr(self.viewmodel.state, "excluded"):
                 excl_mask = np.asarray(self.viewmodel.state.excluded, dtype=bool)
-                # ensure mask length matches
                 if len(excl_mask) != len(x_arr):
-                    # mismatch — ignore mask and log for debugging
                     try:
                         self.append_log(f"Exclusion mask length {len(excl_mask)} != x length {len(x_arr)} — ignoring exclusions")
                     except Exception:
@@ -998,7 +1082,7 @@ class MainWindow(QMainWindow):
                     excl_mask = None
         except Exception:
             excl_mask = None
-        # normalize incoming error array as numpy array when present
+
         y_err_arr = None
         if y_err is not None:
             try:
@@ -1007,21 +1091,17 @@ class MainWindow(QMainWindow):
                 y_err_arr = None
 
         if excl_mask is None:
-            # no exclusions — show all points in primary scatter
             self.scatter.setData(x=x_arr, y=y_arr)
-            # clear excluded overlay
             if self.excluded_scatter is not None:
                 try:
                     self.excluded_scatter.setData(x=np.array([], dtype=float), y=np.array([], dtype=float))
                 except Exception:
                     pass
-            # Draw vertical error bars when provided (all points)
             if y_err_arr is not None and len(y_err_arr) == len(y_arr):
                 top = np.abs(y_err_arr)
                 bottom = top
                 self.err_item.setData(x=x_arr, y=y_arr, top=top, bottom=bottom)
             else:
-                # clear error bars using numpy arrays (avoid passing Python lists)
                 empty = np.array([], dtype=float)
                 try:
                     self.err_item.setData(x=empty, y=empty, top=empty, bottom=empty)
@@ -1049,10 +1129,8 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            # Error bars only for included points
             if y_err_arr is not None:
                 try:
-                    # if full-length, index it by included mask; if it already matches included length, use directly
                     if len(y_err_arr) == len(y_arr):
                         top = np.abs(y_err_arr[incl])
                         bottom = top
@@ -1070,10 +1148,26 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-        # Fit line (if present)
-        # Compute and display reduced chi-squared (2 decimals) and Cash statistic (delegated to ViewModel)
+        components_meta = []
+        total_fit_arr = None
+        if isinstance(y_fit, dict):
+            try:
+                components_meta = list(y_fit.get("components") or [])
+            except Exception:
+                components_meta = []
+            total_payload = y_fit.get("total")
+            if total_payload is not None:
+                try:
+                    total_fit_arr = np.asarray(total_payload, dtype=float)
+                except Exception:
+                    total_fit_arr = None
+        elif y_fit is not None:
+            try:
+                total_fit_arr = np.asarray(y_fit, dtype=float)
+            except Exception:
+                total_fit_arr = None
+
         try:
-            # determine included arrays (preserve original inclusion logic)
             if excl_mask is None:
                 xin = x_arr
                 yin = y_arr
@@ -1081,7 +1175,7 @@ class MainWindow(QMainWindow):
                     errin = y_err_arr
                 else:
                     errin = None
-                yfit_for_chi = None if y_fit is None else np.asarray(y_fit, dtype=float)
+                yfit_for_chi = total_fit_arr if total_fit_arr is not None else None
             else:
                 xin = x_in if 'x_in' in locals() else np.array([], dtype=float)
                 yin = y_in if 'y_in' in locals() else np.array([], dtype=float)
@@ -1094,14 +1188,13 @@ class MainWindow(QMainWindow):
                         errin = y_err_arr
                     else:
                         errin = None
-                if y_fit is None:
+                if total_fit_arr is None:
                     yfit_for_chi = None
                 else:
-                    yfit_full = np.asarray(y_fit, dtype=float)
-                    if len(yfit_full) == len(x_arr):
-                        yfit_for_chi = yfit_full[~excl_mask]
-                    elif len(yfit_full) == len(xin):
-                        yfit_for_chi = yfit_full
+                    if len(total_fit_arr) == len(x_arr):
+                        yfit_for_chi = total_fit_arr[~excl_mask]
+                    elif len(total_fit_arr) == len(xin):
+                        yfit_for_chi = total_fit_arr
                     else:
                         yfit_for_chi = None
 
@@ -1135,28 +1228,57 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        if y_fit is not None:
-            yfit_arr = np.asarray(y_fit, dtype=float)
-            if "fit" not in self.curves:
-                curve = self.plot_widget.plot(x_arr, yfit_arr, pen=pg.mkPen(FIT_COLOR, width=2))
-                self.curves["fit"] = curve
-                curve.curve_id = "fit"
-                # Connect a single scene click handler (if not already) which
-                # inspects the items under the click and only selects the
-                # curve when the curve's graphics item was actually clicked.
-                if not getattr(self, '_scene_click_connected', False):
+        target_ids = set()
+        is_composite_payload = bool(components_meta)
+        for comp in components_meta:
+            if not isinstance(comp, dict):
+                continue
+            prefix = str(comp.get("prefix") or "")
+            if not prefix:
+                continue
+            comp_y = comp.get("y")
+            if comp_y is None:
+                continue
+            try:
+                comp_arr = np.asarray(comp_y, dtype=float)
+            except Exception:
+                continue
+            if len(comp_arr) != len(x_arr):
+                continue
+            color = comp.get("color") or FIT_COLOR
+            curve_id = f"component:{prefix}"
+            self._upsert_curve(curve_id, x_arr, comp_arr, color=color, selectable=True, is_component=True)
+            target_ids.add(curve_id)
+
+        if total_fit_arr is not None and len(total_fit_arr) == len(x_arr):
+            selectable_total = not is_composite_payload
+            self._upsert_curve("fit", x_arr, total_fit_arr, color=FIT_COLOR, selectable=selectable_total, is_component=False)
+            target_ids.add("fit")
+            if not selectable_total and self.selected_curve_id == "fit":
+                self.selected_curve_id = None
+                try:
+                    if self.viewmodel:
+                        self.viewmodel.clear_selected_curve()
+                except Exception:
+                    pass
+
+        for cid in list(self.curves.keys()):
+            if cid not in target_ids:
+                curve = self.curves.pop(cid)
+                try:
+                    self.plot_widget.removeItem(curve)
+                except Exception:
+                    pass
+                if self.selected_curve_id == cid:
+                    self.selected_curve_id = None
                     try:
-                        self.plot_widget.scene().sigMouseClicked.connect(self._on_scene_clicked)
-                        self._scene_click_connected = True
+                        if self.viewmodel:
+                            self.viewmodel.clear_selected_curve()
                     except Exception:
                         pass
-            else:
-                self.curves["fit"].setData(x_arr, yfit_arr)
-        else:
-            # remove fit curve if exists
-            if "fit" in self.curves:
-                self.plot_widget.removeItem(self.curves["fit"])
-                del self.curves["fit"]
+
+        if not target_ids:
+            self.selected_curve_id = None
 
 
     def _on_apply_clicked(self):
@@ -1372,7 +1494,11 @@ class MainWindow(QMainWindow):
                         except Exception:
                             step_val = 1.0
                         key = (action, mods)
-                        control_map.setdefault(key, []).append({"name": name, "step": step_val})
+                        entry = {"name": name, "step": step_val}
+                        comp_prefix = spec.get("component") if isinstance(spec, dict) else None
+                        if comp_prefix:
+                            entry["component"] = comp_prefix
+                        control_map.setdefault(key, []).append(entry)
                 except Exception:
                     continue
         except Exception:
@@ -1605,22 +1731,74 @@ class MainWindow(QMainWindow):
         """Handle mouse click on a curve."""
         if not self.viewmodel:
             return
+        curve = self.curves.get(curve_id)
+        if curve is not None and getattr(curve, "_selectable", True) is False:
+            return
         # Set this as the selected curve
         self.viewmodel.set_selected_curve(curve_id)
 
     def _on_curve_selected(self, curve_id):
         """Highlight the selected curve visually."""
-        # Deselect previous
+        if curve_id == "fit" and self._composite_has_components():
+            # keep composite total non-selectable
+            try:
+                if self.viewmodel:
+                    self.viewmodel.clear_selected_curve()
+            except Exception:
+                pass
+            curve_id = None
+
+        # reset previous curve pen
+        if self.selected_curve_id and self.selected_curve_id in self.curves:
+            self._apply_curve_pen(self.curves[self.selected_curve_id], selected=False)
+
+        self.selected_curve_id = curve_id if curve_id in self.curves else None
+
         if self.selected_curve_id and self.selected_curve_id in self.curves:
             curve = self.curves[self.selected_curve_id]
-            curve.setPen(pg.mkPen(FIT_COLOR, width=2))
-        self.selected_curve_id = curve_id
+            if getattr(curve, "_selectable", True):
+                self._apply_curve_pen(curve, selected=True)
+            else:
+                self.selected_curve_id = None
 
-        # Highlight new
-        if curve_id and curve_id in self.curves:
-            curve = self.curves[curve_id]
-            curve.setPen(pg.mkPen('red', width=4))
-        self.append_log(f"Curve selection changed → {curve_id or 'none'}")
+        # Sync element list selection when possible
+        if hasattr(self, "element_list"):
+            try:
+                self.element_list.blockSignals(True)
+                if self.selected_curve_id and self.selected_curve_id.startswith("component:"):
+                    prefix = self.selected_curve_id.split(":", 1)[1]
+                    target_row = -1
+                    for row in range(self.element_list.count()):
+                        item = self.element_list.item(row)
+                        data = item.data(Qt.UserRole) if item is not None else None
+                        if isinstance(data, dict) and data.get('id') == prefix:
+                            target_row = row
+                            break
+                    if target_row >= 0:
+                        self.element_list.setCurrentRow(target_row)
+                    else:
+                        self.element_list.clearSelection()
+                elif self.selected_curve_id == "fit":
+                    target_row = -1
+                    for row in range(self.element_list.count()):
+                        item = self.element_list.item(row)
+                        data = item.data(Qt.UserRole) if item is not None else None
+                        if isinstance(data, dict) and data.get('id') == 'model':
+                            target_row = row
+                            break
+                    if target_row >= 0:
+                        self.element_list.setCurrentRow(target_row)
+                    else:
+                        self.element_list.clearSelection()
+                else:
+                    self.element_list.clearSelection()
+            finally:
+                try:
+                    self.element_list.blockSignals(False)
+                except Exception:
+                    pass
+
+        self.append_log(f"Curve selection changed → {self.selected_curve_id or 'none'}")
 
     def _on_scene_clicked(self, ev):
         """Central handler for scene clicks. Map the click to data coords and
@@ -1635,11 +1813,12 @@ class MainWindow(QMainWindow):
             tol_pixels = float(CURVE_SELECT_TOL_PIXELS)
             t2 = tol_pixels * tol_pixels
             from PySide6.QtCore import QPointF
-            import numpy as _np
 
             # Iterate curves and test a small neighborhood around the nearest
             # x-value to avoid mapping every point for large datasets.
             for cid, curve in list(self.curves.items()):
+                if getattr(curve, "_selectable", True) is False:
+                    continue
                 try:
                     data = curve.getData()
                     if not data:
@@ -1647,10 +1826,10 @@ class MainWindow(QMainWindow):
                     cx, cy = data
                     if cx is None or len(cx) == 0:
                         continue
-                    cx_arr = _np.asarray(cx)
-                    cy_arr = _np.asarray(cy)
+                    cx_arr = np.asarray(cx)
+                    cy_arr = np.asarray(cy)
                     # find index nearest to clicked x in data-space
-                    idx = int(_np.argmin(_np.abs(cx_arr - x_click)))
+                    idx = int(np.argmin(np.abs(cx_arr - x_click)))
                     lo = max(0, idx - 5)
                     hi = min(len(cx_arr), idx + 6)
                     for xi, yi in zip(cx_arr[lo:hi], cy_arr[lo:hi]):
