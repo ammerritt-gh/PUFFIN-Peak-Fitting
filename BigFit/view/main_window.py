@@ -1887,6 +1887,8 @@ class MainWindow(QMainWindow):
                 try:
                     buttons.button(QDialogButtonBox.Ok).setEnabled(False)
                 except Exception:
+                    # If disabling the OK button fails, ignore the error.
+                    # This is non-critical: the dialog will still function, but may allow OK with no components.
                     pass
 
             self._selected_component = None
