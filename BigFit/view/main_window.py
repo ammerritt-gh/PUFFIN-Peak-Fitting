@@ -1570,7 +1570,6 @@ class MainWindow(QMainWindow):
             focused = QApplication.focusWidget()
             if focused is not None and focused in tuple(self.param_widgets.values()):
                 # mark pending so a later resume can trigger a refresh
-                self._pending_param_refresh = True
                 return
         except Exception:
             focused = None
