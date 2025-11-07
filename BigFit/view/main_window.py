@@ -1842,8 +1842,8 @@ class MainWindow(QMainWindow):
             try:
                 if hasattr(self, "input_handler") and self.input_handler is not None:
                     self.input_handler.set_control_map(control_map)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[MainWindow] Failed to set control map: {e}")
         finally:
             self._building_params = False
 
