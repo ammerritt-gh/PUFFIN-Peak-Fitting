@@ -592,8 +592,11 @@ class FitterViewModel(QObject):
                 arr = np.asarray(values, dtype=float)
                 try:
                     total += arr
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Non-fatal: if a component's output cannot be summed, skip it but show in plot.
+                    self.log_message.emit(
+                        f"Could not add component '{component.prefix}' to total fit: {e}"
+                    )
                 components_for_view.append(
                     {
                         "prefix": component.prefix,
