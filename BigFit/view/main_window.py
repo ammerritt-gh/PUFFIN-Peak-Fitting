@@ -140,14 +140,10 @@ class MainWindow(QMainWindow):
     # Plot interaction callbacks
     # --------------------------
     def _on_peak_selected(self, x, y):
-        # Only forward peak selection to the ViewModel when a curve is selected
-        try:
-            if hasattr(self, "input_handler") and getattr(self.input_handler, "selected_curve_id", None) is None:
-                # ignore peak selection unless a curve is selected
-                self.append_log("Peak clicked but no curve selected — ignored.")
-                return
-        except Exception:
-            pass
+        # Ensure we have a target curve before responding to the peak click so drag works.
+        if not self._ensure_curve_selection_for_peaks():
+            self.append_log("Peak clicked but no curve selected — ignored.")
+            return
 
         if self.viewmodel and hasattr(self.viewmodel, "on_peak_selected"):
             self.viewmodel.on_peak_selected(x, y)
@@ -155,12 +151,9 @@ class MainWindow(QMainWindow):
 
     def _on_peak_moved(self, info):
         # Only forward peak movement when a curve is selected
-        try:
-            if hasattr(self, "input_handler") and getattr(self.input_handler, "selected_curve_id", None) is None:
-                self.append_log("Peak moved but no curve selected — ignored.")
-                return
-        except Exception:
-            pass
+        if not self._ensure_curve_selection_for_peaks():
+            self.append_log("Peak moved but no curve selected — ignored.")
+            return
 
         if self.viewmodel and hasattr(self.viewmodel, "on_peak_moved"):
             self.viewmodel.on_peak_moved(info)
@@ -1013,6 +1006,58 @@ class MainWindow(QMainWindow):
             self._scene_click_connected = True
         except Exception:
             pass
+
+    def _auto_select_curve_for_peaks(self):
+        """Return a sensible default curve id for peak interactions when none selected."""
+        selectable_ids = []
+        try:
+            for cid, curve in self.curves.items():
+                if getattr(curve, "_selectable", True):
+                    selectable_ids.append(cid)
+        except Exception:
+            selectable_ids = []
+
+        if not selectable_ids:
+            return None
+
+        if self._composite_has_components():
+            component_ids = [cid for cid in selectable_ids if str(cid).startswith("component:")]
+            if len(component_ids) == 1:
+                return component_ids[0]
+            return None
+
+        # Non-composite: fall back to the fit curve when available
+        if "fit" in selectable_ids:
+            return "fit"
+        return selectable_ids[0]
+
+    def _ensure_curve_selection_for_peaks(self) -> bool:
+        """Ensure a curve is selected before peak interactions; auto-select when safe."""
+        try:
+            current = getattr(self.input_handler, "selected_curve_id", None)
+        except Exception:
+            current = None
+
+        if current:
+            return True
+
+        auto_id = self._auto_select_curve_for_peaks()
+        if not auto_id:
+            return False
+
+        try:
+            if hasattr(self.input_handler, "set_selected_curve"):
+                self.input_handler.set_selected_curve(auto_id)
+        except Exception:
+            pass
+
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "set_selected_curve"):
+                self.viewmodel.set_selected_curve(auto_id)
+        except Exception:
+            pass
+
+        return True
 
     def _apply_curve_pen(self, curve: pg.PlotDataItem, selected: bool = False):
         if curve is None:

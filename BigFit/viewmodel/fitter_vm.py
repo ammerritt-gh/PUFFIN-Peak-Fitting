@@ -504,13 +504,15 @@ class FitterViewModel(QObject):
                     # Apply fit result back into model_spec.params where possible so UI will reflect fitted values
                     try:
                         spec = getattr(self.state, "model_spec", None)
-                        if spec is not None and hasattr(spec, "params"):
+                        if spec is not None:
                             for k, v in result.items():
-                                if k in spec.params:
-                                    try:
+                                try:
+                                    if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                        spec.set_param_value(k, v)
+                                    elif hasattr(spec, "params") and k in spec.params:
                                         spec.params[k].value = v
-                                    except Exception:
-                                        pass
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
 
@@ -532,18 +534,25 @@ class FitterViewModel(QObject):
                     except Exception:
                         pass
 
-                    # Build a full-domain fit curve for plotting (evaluate on full x_data)
-                    full_y_fit = None
+                    plot_refreshed = False
                     try:
-                        # build ordered param list
-                        vals = [result.get(k) for k in param_keys]
-                        full_y_fit = wrapped_func(getattr(self.state, "x_data", np.array([])), *vals)
+                        self.update_plot()
+                        plot_refreshed = True
                     except Exception:
-                        full_y_fit = None
+                        plot_refreshed = False
 
-                    # Emit full-domain plot update (original full data)
-                    full_errs = getattr(self.state, "errors", None)
-                    self.plot_updated.emit(getattr(self.state, "x_data", x), getattr(self.state, "y_data", y), full_y_fit, full_errs)
+                    if not plot_refreshed:
+                        # Fallback: emit direct plot update if update_plot failed
+                        full_y_fit = None
+                        try:
+                            vals = [result.get(k) for k in param_keys]
+                            full_y_fit = wrapped_func(getattr(self.state, "x_data", np.array([])), *vals)
+                        except Exception:
+                            full_y_fit = None
+
+                        full_errs = getattr(self.state, "errors", None)
+                        self.plot_updated.emit(getattr(self.state, "x_data", x), getattr(self.state, "y_data", y), full_y_fit, full_errs)
+
                     self.log_message.emit("Fit completed successfully.")
                 else:
                     self.log_message.emit("Fit failed.")
@@ -1111,21 +1120,42 @@ class FitterViewModel(QObject):
         if new_center is None:
             return
 
-        # Apply into model via the standard apply_parameters path so state and
-        # model_spec are kept in sync and UI updates happen.
-        # Support both 'center' (lowercase) and 'Center' (capitalized) since
-        # some ModelSpecs (Gaussian) use "Center" while others use "center".
         try:
             val = float(new_center)
-            # Try lowercase first (common), then capitalized for backward compatibility.
-            try:
-                self.apply_parameters({"center": val})
-            except Exception:
-                pass
-            try:
-                self.apply_parameters({"Center": val})
-            except Exception:
-                pass
-            self.log_message.emit(f"Peak center updated -> {new_center}")
+        except Exception:
+            return
+
+        spec = getattr(self.state, "model_spec", None)
+        updates = {}
+
+        # If a composite model component is selected, scope the update to that component
+        if isinstance(spec, CompositeModelSpec):
+            selected_id = self.get_selected_curve()
+            if isinstance(selected_id, str) and selected_id.startswith("component:"):
+                prefix = selected_id.split(":", 1)[1]
+                for component in spec.list_components():
+                    if component.prefix == prefix and hasattr(component, "spec"):
+                        params = getattr(component.spec, "params", {}) or {}
+                        for name in params.keys():
+                            if name.lower() == "center":
+                                updates[f"{prefix}{name}"] = val
+                                break
+                        break
+
+        # Fallback: global parameter names on the active spec
+        if not updates:
+            params = getattr(spec, "params", {}) if spec is not None else {}
+            for candidate in ("center", "Center"):
+                if isinstance(params, dict) and candidate in params:
+                    updates[candidate] = val
+                    break
+
+        if not updates:
+            return
+
+        try:
+            self.apply_parameters(updates)
+            target = ", ".join(updates.keys())
+            self.log_message.emit(f"Peak center updated -> {val} ({target})")
         except Exception:
             pass
