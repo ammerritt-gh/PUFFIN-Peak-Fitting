@@ -2126,8 +2126,9 @@ class MainWindow(QMainWindow):
             finally:
                 try:
                     self.element_list.blockSignals(False)
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Non-critical: UI may remain in a blocked state, but app continues
+                    self.append_log(f"Error unblocking element_list signals: {e}")
 
         self.append_log(f"Curve selection changed → {self.selected_curve_id or 'none'}")
 
