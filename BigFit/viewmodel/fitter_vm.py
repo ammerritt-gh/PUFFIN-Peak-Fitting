@@ -4,7 +4,7 @@ import numpy as np
 import os
 from types import SimpleNamespace
 
-from models import ModelState
+from models import ModelState, CompositeModelSpec, get_model_spec, get_atomic_component_names
 from dataio.data_loader import select_and_load_files
 from dataio.data_saver import save_dataset
 import typing as _typing
@@ -665,6 +665,10 @@ class FitterViewModel(QObject):
                 "voigtmodel": "voigt",
                 "gaussian": "gaussian",
                 "gauss": "gaussian",
+                "custom": "custom model",
+                "custommodel": "custom model",
+                "custom model": "custom model",
+                "composite": "custom model",
             }
             key = str(model_name).strip()
             lower = key.lower()
@@ -678,12 +682,16 @@ class FitterViewModel(QObject):
 
             _log(f"get_parameters: normalized model key='{canonical}' (from '{model_name}')")
 
-            # Obtain spec instance (using local get_model_spec)
-            try:
-                model_spec = get_model_spec(canonical)
-            except Exception as e:
-                _log(f"get_parameters: get_model_spec('{canonical}') raised: {e}")
-                return {}
+            # Obtain spec instance: prefer existing state.model_spec when available
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                try:
+                    model_spec = get_model_spec(canonical)
+                    setattr(self.state, "model_spec", model_spec)
+                    setattr(self.state, "model_name", model_name)
+                except Exception as e:
+                    _log(f"get_parameters: get_model_spec('{canonical}') raised: {e}")
+                    return {}
 
             # If model_spec has initialize hook, call it with data
             try:
@@ -694,19 +702,20 @@ class FitterViewModel(QObject):
             # Build specs dict from Parameter objects if present
             specs = {}
             try:
-                params_map = getattr(model_spec, "params", None) or {}
-                for pname, pobj in params_map.items():
-                    try:
-                        # Parameter.to_spec() expected
-                        if hasattr(pobj, "to_spec"):
-                            specs[pname] = pobj.to_spec()
-                        else:
-                            # fall back to a minimal spec using the value
+                if hasattr(model_spec, "get_parameters"):
+                    specs = dict(model_spec.get_parameters() or {})
+                else:
+                    params_map = getattr(model_spec, "params", None) or {}
+                    for pname, pobj in params_map.items():
+                        try:
+                            if hasattr(pobj, "to_spec"):
+                                specs[pname] = pobj.to_spec()
+                            else:
+                                specs[pname] = {"value": getattr(pobj, "value", None)}
+                        except Exception:
                             specs[pname] = {"value": getattr(pobj, "value", None)}
-                    except Exception:
-                        specs[pname] = {"value": getattr(pobj, "value", None)}
             except Exception as e:
-                _log(f"get_parameters: failed to build specs from model_spec.params: {e}")
+                _log(f"get_parameters: failed to build specs from model_spec: {e}")
                 specs = {}
 
             # If a concrete state.model exists, override spec values with current model attrs
@@ -741,8 +750,7 @@ class FitterViewModel(QObject):
             model_name = (model_name or "").strip()
             if not model_name:
                 return
-            # Create and attach a model_spec for the requested model (local import)
-            from models import get_model_spec
+            # Create and attach a model_spec for the requested model
             model_spec = get_model_spec(model_name)
             # Allow the spec to initialize from current data
             try:
@@ -773,6 +781,133 @@ class FitterViewModel(QObject):
                 pass
         except Exception as e:
             self.log_message.emit(f"Failed to set model '{model_name}': {e}")
+
+    # --------------------------
+    # Composite model helpers
+    # --------------------------
+    def _require_composite(self, action: str) -> _typing.Optional[CompositeModelSpec]:
+        spec = getattr(self.state, "model_spec", None)
+        if not isinstance(spec, CompositeModelSpec):
+            self.log_message.emit(f"{action} requires the Custom model to be active.")
+            return None
+        return spec
+
+    def get_available_component_names(self) -> _typing.List[str]:
+        return get_atomic_component_names()
+
+    def get_component_descriptors(self) -> _typing.List[dict]:
+        spec = getattr(self.state, "model_spec", None)
+        if not isinstance(spec, CompositeModelSpec):
+            return []
+        descriptors = []
+        for idx, component in enumerate(spec.list_components()):
+            descriptors.append(
+                {
+                    "index": idx,
+                    "prefix": component.prefix,
+                    "label": component.label,
+                    "color": component.color,
+                    "spec_name": component.spec.__class__.__name__,
+                }
+            )
+        return descriptors
+
+    def add_component_to_model(self, component_name: str, initial_params: _typing.Optional[dict] = None) -> bool:
+        spec = self._require_composite("Adding elements")
+        if spec is None:
+            return False
+        try:
+            component = spec.add_component(
+                component_name,
+                initial_params or {},
+                data_x=getattr(self.state, "x_data", None),
+                data_y=getattr(self.state, "y_data", None),
+            )
+        except Exception as exc:
+            self.log_message.emit(f"Failed to add component '{component_name}': {exc}")
+            return False
+        self.log_message.emit(f"Added component {component.label} ({component.spec.__class__.__name__})")
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+        return True
+
+    def remove_component_at(self, index: int) -> bool:
+        spec = self._require_composite("Removing elements")
+        if spec is None:
+            return False
+        try:
+            removed = spec.remove_component_at(index)
+        except Exception as exc:
+            self.log_message.emit(f"Failed to remove component at index {index}: {exc}")
+            return False
+        if removed is None:
+            self.log_message.emit(f"No component found at index {index}.")
+            return False
+        self.log_message.emit(f"Removed component {removed.label}")
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+        return True
+
+    def remove_last_component(self) -> bool:
+        spec = self._require_composite("Removing elements")
+        if spec is None or not spec.list_components():
+            return False
+        return self.remove_component_at(len(spec.list_components()) - 1)
+
+    def reorder_component(self, old_index: int, new_index: int) -> bool:
+        spec = self._require_composite("Reordering elements")
+        if spec is None:
+            return False
+        try:
+            changed = spec.reorder_component(old_index, new_index)
+        except Exception as exc:
+            self.log_message.emit(f"Failed to reorder components: {exc}")
+            return False
+        if not changed:
+            return False
+        self.log_message.emit(f"Reordered component from {old_index} to {new_index}")
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+        return True
+
+    def reorder_components_by_prefix(self, prefix_order: _typing.List[str]) -> bool:
+        spec = self._require_composite("Reordering elements")
+        if spec is None:
+            return False
+        try:
+            changed = spec.reorder_by_prefix(prefix_order)
+        except Exception as exc:
+            self.log_message.emit(f"Failed to reorder components: {exc}")
+            return False
+        if not changed:
+            return False
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+        return True
 
     def apply_parameters(self, params: dict):
         """Apply parameters from the UI.
@@ -815,21 +950,29 @@ class FitterViewModel(QObject):
             mdl = SimpleNamespace()
             setattr(self.state, "model", mdl)
 
+        is_composite = isinstance(model_spec, CompositeModelSpec)
         applied = []
         for k, v in params.items():
             try:
                 # prefer to set attribute on the actual model object
                 try:
                     setattr(mdl, k, v)
+                    if is_composite and hasattr(model_spec, "set_param_value"):
+                        model_spec.set_param_value(k, v)
                     applied.append(k)
                 except Exception:
                     # if model doesn't accept attribute, fallback to model_spec if available
                     if model_spec is not None and k in model_spec.params:
-                        model_spec.params[k].value = v
+                        if is_composite and hasattr(model_spec, "set_param_value"):
+                            model_spec.set_param_value(k, v)
+                        else:
+                            model_spec.params[k].value = v
                         applied.append(k)
                     else:
                         # create attribute on model as last resort
                         setattr(mdl, k, v)
+                        if is_composite and hasattr(model_spec, "set_param_value"):
+                            model_spec.set_param_value(k, v)
                         applied.append(k)
             except Exception:
                 # ignore per-parameter failures
@@ -840,7 +983,11 @@ class FitterViewModel(QObject):
             for name in applied:
                 if name in model_spec.params:
                     try:
-                        model_spec.params[name].value = getattr(mdl, name)
+                        value = getattr(mdl, name)
+                        if is_composite and hasattr(model_spec, "set_param_value"):
+                            model_spec.set_param_value(name, value)
+                        else:
+                            model_spec.params[name].value = value
                     except Exception:
                         pass
 

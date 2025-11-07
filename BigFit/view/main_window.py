@@ -14,6 +14,7 @@ import numpy as np
 from view.view_box import CustomViewBox
 from view.input_handler import InputHandler
 from view.constants import CURVE_SELECT_TOL_PIXELS
+from models import CompositeModelSpec
 
 # -- color palette (change these) --
 PLOT_BG = "white"       # plot background
@@ -436,25 +437,38 @@ class MainWindow(QMainWindow):
         otherwise adds a local placeholder item so the UI remains usable.
         """
         try:
-            if self.viewmodel and hasattr(self.viewmodel, 'add_component_to_model'):
-                try:
-                    self.viewmodel.add_component_to_model()
-                except Exception as e:
-                    self.append_log(f"ViewModel failed to add component: {e}")
-                # allow ViewModel to emit updates; refresh local list
-                try:
-                    self._refresh_element_list()
-                except Exception:
-                    pass
+            if not self.viewmodel:
                 return
 
-            # local placeholder behavior
-            name = f"element{self.element_list.count() + 1}"
-            item = QListWidgetItem(name)
-            item.setData(Qt.UserRole, {'id': name, 'name': name})
-            self.element_list.addItem(item)
-            self.element_list.setCurrentRow(self.element_list.count() - 1)
-            self.append_log(f"Added placeholder element: {name}")
+            spec = getattr(self.viewmodel.state, "model_spec", None)
+            if not isinstance(spec, CompositeModelSpec):
+                self.append_log("Switch to the Custom model before adding elements.")
+                return
+
+            available = []
+            try:
+                if hasattr(self.viewmodel, "get_available_component_names"):
+                    available = self.viewmodel.get_available_component_names()
+            except Exception:
+                available = []
+            if not available:
+                available = ["Gaussian", "Voigt", "Linear Background"]
+
+            dialog = self._AddElementDialog(self, available)
+            if dialog.exec() == QDialog.Accepted:
+                component_name = dialog.selected_component
+                initial_params = dialog.initial_params or {}
+                if component_name:
+                    try:
+                        added = self.viewmodel.add_component_to_model(component_name, initial_params)
+                    except Exception as e:
+                        self.append_log(f"Failed to add component: {e}")
+                        added = False
+                    if added:
+                        try:
+                            self._refresh_element_list()
+                        except Exception:
+                            pass
         except Exception as e:
             try:
                 self.append_log(f"Failed to add element: {e}")
@@ -498,7 +512,7 @@ class MainWindow(QMainWindow):
             # prefer ViewModel removal APIs
             if self.viewmodel and hasattr(self.viewmodel, 'remove_component_at'):
                 try:
-                    self.viewmodel.remove_component_at(row)
+                    self.viewmodel.remove_component_at(row - 1)
                     self._refresh_element_list()
                     return
                 except Exception:
@@ -542,6 +556,53 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        def _on_element_rows_moved(self, parent, start, end, dest_parent, dest_row):
+            """Sync drag-and-drop ordering back to the ViewModel."""
+            try:
+                if not self.viewmodel:
+                    return
+                if start <= 0:
+                    # keep the model entry fixed at the top
+                    self._refresh_element_list()
+                    return
+                first = self.element_list.item(0) if hasattr(self, 'element_list') else None
+                if first is None:
+                    return
+                first_data = first.data(Qt.UserRole) if isinstance(first, QListWidgetItem) else None
+                if not isinstance(first_data, dict) or first_data.get('id') != 'model':
+                    self._refresh_element_list()
+                    return
+                prefixes = []
+                count = self.element_list.count() if hasattr(self, 'element_list') else 0
+                for idx in range(1, count):
+                    item = self.element_list.item(idx)
+                    if item is None:
+                        continue
+                    data = item.data(Qt.UserRole)
+                    if isinstance(data, dict):
+                        prefix = data.get('id')
+                        if prefix and prefix != 'model':
+                            prefixes.append(prefix)
+                if not prefixes:
+                    return
+                if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
+                    self.viewmodel.reorder_components_by_prefix(prefixes)
+                elif hasattr(self.viewmodel, 'reorder_component') and end == start:
+                    # fallback best-effort: compute positions relative to list excluding model
+                    old_index = start - 1
+                    new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
+                    if new_index >= len(prefixes):
+                        new_index = len(prefixes) - 1
+                    if new_index != old_index:
+                        self.viewmodel.reorder_component(old_index, new_index)
+                else:
+                    self._refresh_element_list()
+            except Exception as e:
+                try:
+                    self.append_log(f"Failed to reorder elements: {e}")
+                except Exception:
+                    pass
+
     def _refresh_element_list(self):
         """Populate the element list from the ViewModel/state when possible.
         This is tolerant of non-composite specs and will try to infer prefixes
@@ -552,28 +613,51 @@ class MainWindow(QMainWindow):
                 return
             self.element_list.blockSignals(True)
             self.element_list.clear()
-            if self.viewmodel and hasattr(self.viewmodel, 'state') and hasattr(self.viewmodel.state, 'model_spec'):
+            descriptors = []
+            if self.viewmodel and hasattr(self.viewmodel, 'get_component_descriptors'):
+                try:
+                    descriptors = self.viewmodel.get_component_descriptors() or []
+                except Exception:
+                    descriptors = []
+
+            if descriptors:
+                for desc in descriptors:
+                    prefix = desc.get('prefix') or ''
+                    label = desc.get('label') or prefix.rstrip('_') or 'element'
+                    item = QListWidgetItem(label)
+                    data = {'id': prefix, 'name': label}
+                    if 'color' in desc:
+                        data['color'] = desc['color']
+                    item.setData(Qt.UserRole, data)
+                    color = desc.get('color')
+                    if color:
+                        try:
+                            item.setForeground(QBrush(QColor(color)))
+                        except Exception:
+                            pass
+                    try:
+                        item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
+                    self.element_list.addItem(item)
+            elif self.viewmodel and hasattr(self.viewmodel, 'state') and hasattr(self.viewmodel.state, 'model_spec'):
+                # Fallback: infer prefixes from parameter names when descriptors unavailable
                 spec = self.viewmodel.state.model_spec
-                comps = getattr(spec, '_components', None)
-                if isinstance(comps, list) and len(comps) > 0:
-                    for prefix, sub in comps:
-                        name = prefix.rstrip('_')
-                        item = QListWidgetItem(name)
-                        item.setData(Qt.UserRole, {'id': prefix, 'name': name})
-                        self.element_list.addItem(item)
-                else:
-                    # infer prefixes from param names (prefix_name pattern)
-                    params = getattr(spec, 'params', {}) or {}
-                    prefixes = {}
-                    for k in params.keys():
-                        if '_' in k:
-                            p = k.split('_', 1)[0] + '_'
-                            prefixes[p] = prefixes.get(p, 0) + 1
-                    for p in sorted(prefixes.keys()):
-                        name = p.rstrip('_')
-                        item = QListWidgetItem(name)
-                        item.setData(Qt.UserRole, {'id': p, 'name': name})
-                        self.element_list.addItem(item)
+                params = getattr(spec, 'params', {}) or {}
+                prefixes = {}
+                for k in params.keys():
+                    if '_' in k:
+                        p = k.split('_', 1)[0] + '_'
+                        prefixes[p] = prefixes.get(p, 0) + 1
+                for p in sorted(prefixes.keys()):
+                    name = p.rstrip('_')
+                    item = QListWidgetItem(name)
+                    item.setData(Qt.UserRole, {'id': p, 'name': name})
+                    try:
+                        item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
+                    self.element_list.addItem(item)
             # Prepend an entry representing the active/current model so it's always visible
             try:
                 model_label = None
@@ -608,6 +692,10 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
                     self.element_list.insertItem(0, model_item)
+                    try:
+                        model_item.setFlags(model_item.flags() & ~Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             # If nothing detected (no composite components or inferred prefixes),
@@ -639,6 +727,10 @@ class MainWindow(QMainWindow):
                     item.setData(Qt.UserRole, {'id': 'model', 'name': name})
                     if tooltip:
                         item.setToolTip(tooltip)
+                    try:
+                        item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
                     self.element_list.addItem(item)
                 except Exception:
                     pass
@@ -681,7 +773,10 @@ class MainWindow(QMainWindow):
                 # remove trailing 'ModelSpec' and split CamelCase into words
                 s = re.sub(r"ModelSpec$", "", name)
                 s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
-                return s.strip()
+                pretty = s.strip()
+                if pretty.lower() == "composite":
+                    return "Custom Model"
+                return pretty
 
             spec_class_names = get_available_model_names()
             display_names = [_pretty(n) for n in spec_class_names]
@@ -788,6 +883,10 @@ class MainWindow(QMainWindow):
         # light-weight element list
         self.element_list = QListWidget()
         self.element_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.element_list.setDragEnabled(True)
+        self.element_list.setAcceptDrops(True)
+        self.element_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.element_list.setDefaultDropAction(Qt.MoveAction)
         vlayout.addWidget(self.element_list)
 
         # add / remove row
@@ -829,6 +928,10 @@ class MainWindow(QMainWindow):
         # Wire UI handlers
         try:
             self.element_list.currentRowChanged.connect(self._on_element_selected)
+        except Exception:
+            pass
+        try:
+            self.element_list.model().rowsMoved.connect(self._on_element_rows_moved)
         except Exception:
             pass
         try:
@@ -1290,6 +1393,113 @@ class MainWindow(QMainWindow):
     # --------------------------
     # Config dialog (view-only)
     # --------------------------
+    class _AddElementDialog(QDialog):
+        def __init__(self, parent, component_names):
+            super().__init__(parent)
+            self.setWindowTitle("Add Element")
+            self._component_names = list(component_names or [])
+
+            layout = QVBoxLayout(self)
+
+            selector_form = QFormLayout()
+            self.component_box = QComboBox()
+            if self._component_names:
+                self.component_box.addItems(self._component_names)
+            selector_form.addRow("Component", self.component_box)
+            layout.addLayout(selector_form)
+
+            self._param_scroll = QScrollArea()
+            self._param_scroll.setWidgetResizable(True)
+            self._param_widget = QWidget()
+            self._param_form = QFormLayout(self._param_widget)
+            self._param_scroll.setWidget(self._param_widget)
+            layout.addWidget(self._param_scroll)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            buttons.accepted.connect(self.accept)
+            buttons.rejected.connect(self.reject)
+            layout.addWidget(buttons)
+
+            self._param_inputs: dict = {}
+            self._param_meta: dict = {}
+            self.component_box.currentTextChanged.connect(self._on_component_changed)
+
+            if self._component_names:
+                self._on_component_changed(self._component_names[0])
+            else:
+                try:
+                    buttons.button(QDialogButtonBox.Ok).setEnabled(False)
+                except Exception:
+                    pass
+
+            self._selected_component = None
+            self._initial_params = {}
+
+        def _clear_params(self):
+            while self._param_form.count():
+                item = self._param_form.takeAt(0)
+                if item is None:
+                    continue
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+
+        def _on_component_changed(self, name: str):
+            self._clear_params()
+            self._param_inputs = {}
+            self._param_meta = {}
+            params = {}
+            try:
+                from models import get_model_spec
+                spec = get_model_spec(name)
+                params = spec.get_parameters()
+            except Exception:
+                params = {}
+            for param_name, meta in params.items():
+                value = meta.get("value", "")
+                editor = QLineEdit(str(value) if value is not None else "")
+                self._param_inputs[param_name] = editor
+                self._param_meta[param_name] = meta
+                self._param_form.addRow(param_name, editor)
+
+        def _coerce_value(self, param_name: str, text: str):
+            meta = self._param_meta.get(param_name, {})
+            ptype = str(meta.get("type", "")).lower()
+            if ptype in ("float", "double"):
+                try:
+                    return float(text)
+                except Exception:
+                    return meta.get("value")
+            if ptype == "int":
+                try:
+                    return int(float(text))
+                except Exception:
+                    return meta.get("value")
+            if ptype == "bool":
+                return text.strip().lower() in ("1", "true", "yes", "on")
+            return text
+
+        def get_result(self):
+            component = self.component_box.currentText().strip()
+            values = {}
+            for name, widget in self._param_inputs.items():
+                values[name] = self._coerce_value(name, widget.text())
+            return component, values
+
+        def accept(self):
+            component, params = self.get_result()
+            self._selected_component = component
+            self._initial_params = params
+            super().accept()
+
+        @property
+        def selected_component(self):
+            return self._selected_component
+
+        @property
+        def initial_params(self):
+            return self._initial_params
+
     class _ConfigDialog(QDialog):
         def __init__(self, parent, cfg_dict):
             super().__init__(parent)
