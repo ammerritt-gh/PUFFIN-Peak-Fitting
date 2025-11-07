@@ -1555,9 +1555,26 @@ class MainWindow(QMainWindow):
             self.append_log(f"Failed to update parameter '{name}': {exc}")
 
     def _refresh_parameters(self):
-        """Ask the ViewModel for parameter specs and rebuild the form."""
+        """Ask the ViewModel for parameter specs and rebuild the form.
+
+        If the user is currently interacting with a parameter widget (focus
+        is inside one of our param widgets), defer the refresh to avoid
+        rebuilding widgets under active interaction which steals focus and
+        interrupts continuous adjustments (holding arrow keys or mouse).
+        """
         if not self.viewmodel:
             return
+        # If a parameter widget currently has focus, defer refresh
+        try:
+            from PySide6.QtWidgets import QApplication
+            focused = QApplication.focusWidget()
+            if focused is not None and focused in tuple(self.param_widgets.values()):
+                # mark pending so a later resume can trigger a refresh
+                self._pending_param_refresh = True
+                return
+        except Exception:
+            focused = None
+
         try:
             specs = getattr(self.viewmodel, "get_parameters", lambda: {})()
             if specs is None:
@@ -1575,7 +1592,30 @@ class MainWindow(QMainWindow):
             elif not isinstance(specs, dict):
                 # unknown shape — nothing to do
                 specs = {}
+
+            # capture name of focused widget so we can restore focus after rebuild
+            focused_name = None
+            try:
+                if focused is not None:
+                    for pname, pw in self.param_widgets.items():
+                        if pw is focused:
+                            focused_name = pname
+                            break
+            except Exception:
+                focused_name = None
+
             self._populate_parameters(specs)
+
+            # restore focus to the equivalent parameter widget if present
+            try:
+                if focused_name and focused_name in self.param_widgets:
+                    try:
+                        self.param_widgets[focused_name].setFocus()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             self.append_log("Parameter panel refreshed.")
         except Exception as e:
             self.append_log(f"Failed to refresh parameters: {e}")

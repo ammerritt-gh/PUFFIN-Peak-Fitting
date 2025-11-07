@@ -19,8 +19,14 @@ def main():
     viewmodel.plot_updated.connect(window.update_plot_data)
     viewmodel.log_message.connect(window.append_log)
     # Refresh parameter panel when viewmodel reports parameter changes (e.g. after a fit)
+    # If the MainWindow implements its own auto-apply / refresh handling (exposed
+    # via `_auto_apply_param`) then the window will manage parameter refreshes
+    # itself and we should avoid double-connecting the same handler here because
+    # it can cause duplicate refreshes (which may rebuild widgets and steal
+    # focus from active spinboxes during held adjustments).
     try:
-        viewmodel.parameters_updated.connect(window._refresh_parameters)
+        if not getattr(window, "_auto_apply_param", False):
+            viewmodel.parameters_updated.connect(window._refresh_parameters)
     except Exception:
         pass
 
