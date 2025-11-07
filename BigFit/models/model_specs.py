@@ -3,7 +3,6 @@ from scipy.special import wofz, voigt_profile
 from scipy.fft import fft, ifft
 from scipy.interpolate import interp1d
 from scipy.signal import fftconvolve
-from scipy.interpolate import interp1d
 from dataclasses import dataclass
 from itertools import cycle
 
