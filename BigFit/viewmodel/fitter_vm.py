@@ -457,11 +457,20 @@ class FitterViewModel(QObject):
             self.log_message.emit("Selected model does not provide an evaluate(x, **params) function.")
             return
 
-        # build initial parameters and bounds from model_spec.params
+        # build initial parameter value map and separate free (optimised) parameters
         try:
-            params = {k: getattr(v, "value", v) for k, v in getattr(model_spec, "params", {}).items()}
-            lower = [v.min if getattr(v, "min", None) is not None else -np.inf for v in getattr(model_spec, "params", {}).values()]
-            upper = [v.max if getattr(v, "max", None) is not None else np.inf for v in getattr(model_spec, "params", {}).values()]
+            full_values = {k: getattr(v, "value", None) for k, v in getattr(model_spec, "params", {}).items()}
+            # Determine which parameters are free (not fixed)
+            free_keys = [k for k, v in getattr(model_spec, "params", {}).items() if not bool(getattr(v, "fixed", False))]
+            if not free_keys:
+                self.log_message.emit("No free parameters to fit (all parameters are fixed).")
+                return
+
+            # initial values for free params
+            params = {k: full_values.get(k) for k in free_keys}
+            # bounds for free params (ordered to match free_keys)
+            lower = [getattr(model_spec.params[k], "min", None) if getattr(model_spec.params[k], "min", None) is not None else -np.inf for k in free_keys]
+            upper = [getattr(model_spec.params[k], "max", None) if getattr(model_spec.params[k], "max", None) is not None else np.inf for k in free_keys]
             bounds = (lower, upper)
         except Exception as e:
             self.log_message.emit(f"Failed to build parameter/bounds list: {e}")
@@ -471,8 +480,13 @@ class FitterViewModel(QObject):
         param_keys = list(params.keys())
 
         def wrapped_func(xx, *args):
-            # build param dict from positional args (curve_fit provides positional params)
-            p = dict(zip(param_keys, args))
+            # start from the full map (including fixed values) and overwrite free keys
+            p = dict(full_values)
+            try:
+                for k, val in zip(param_keys, args):
+                    p[k] = val
+            except Exception:
+                pass
             # IMPORTANT: some ModelSpec.evaluate implementations expect a single 'params' dict
             # as the second positional argument (evaluate(x, params)). Others accept **kwargs.
             # Pass the params dict positionally to support evaluate(x, params).
@@ -546,8 +560,25 @@ class FitterViewModel(QObject):
                         # Fallback: emit direct plot update if update_plot failed
                         full_y_fit = None
                         try:
-                            vals = [result.get(k) for k in param_keys]
-                            full_y_fit = wrapped_func(getattr(self.state, "x_data", np.array([])), *vals)
+                            # build a full param dict (merge fixed/full values with fitted results)
+                            spec = getattr(self.state, "model_spec", None)
+                            if spec is not None and hasattr(spec, "get_param_values"):
+                                full_params = spec.get_param_values()
+                            else:
+                                # fall back to merging captured full_values with result
+                                full_params = dict(full_values)
+                                try:
+                                    full_params.update(result or {})
+                                except Exception:
+                                    pass
+
+                            try:
+                                full_y_fit = model_func(getattr(self.state, "x_data", np.array([])), full_params)
+                            except TypeError:
+                                try:
+                                    full_y_fit = model_func(getattr(self.state, "x_data", np.array([])), **full_params)
+                                except Exception:
+                                    full_y_fit = None
                         except Exception:
                             full_y_fit = None
 
@@ -1024,8 +1055,54 @@ class FitterViewModel(QObject):
             setattr(self.state, "model", mdl)
 
         is_composite = isinstance(model_spec, CompositeModelSpec)
-        applied = []
+        # split fixed toggles (keys ending with '__fixed') from value updates
+        fixed_suffix = "__fixed"
+        fixed_updates = {}
+        value_updates = {}
         for k, v in params.items():
+            try:
+                if isinstance(k, str) and k.endswith(fixed_suffix):
+                    base = k[: -len(fixed_suffix)]
+                    fixed_updates[base] = bool(v)
+                else:
+                    value_updates[k] = v
+            except Exception:
+                # fallback: treat as value update
+                value_updates[k] = v
+
+        applied = []
+        # First apply fixed-state updates so UI and fit logic see changes immediately
+        for base, fv in fixed_updates.items():
+            try:
+                if model_spec is not None and base in model_spec.params:
+                    try:
+                        model_spec.params[base].fixed = bool(fv)
+                    except Exception:
+                        pass
+                    # If composite, also propagate fixed state back to the underlying component param
+                    try:
+                        if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, 'get_link'):
+                            link = model_spec.get_link(base)
+                            if link and isinstance(link, tuple) and len(link) >= 2:
+                                component, pname = link
+                                try:
+                                    if pname in getattr(component.spec, 'params', {}):
+                                        component.spec.params[pname].fixed = bool(fv)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                # also record on the concrete model object if present
+                try:
+                    setattr(mdl, f"{base}{fixed_suffix}", bool(fv))
+                except Exception:
+                    pass
+                applied.append(f"{base}{fixed_suffix}")
+            except Exception:
+                pass
+
+        # Now apply value updates (regular parameter assignments)
+        for k, v in value_updates.items():
             try:
                 # prefer to set attribute on the actual model object
                 try:
@@ -1043,9 +1120,15 @@ class FitterViewModel(QObject):
                         applied.append(k)
                     else:
                         # create attribute on model as last resort
-                        setattr(mdl, k, v)
+                        try:
+                            setattr(mdl, k, v)
+                        except Exception:
+                            pass
                         if is_composite and hasattr(model_spec, "set_param_value"):
-                            model_spec.set_param_value(k, v)
+                            try:
+                                model_spec.set_param_value(k, v)
+                            except Exception:
+                                pass
                         applied.append(k)
             except Exception:
                 # ignore per-parameter failures
