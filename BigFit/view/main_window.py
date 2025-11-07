@@ -235,39 +235,29 @@ class MainWindow(QMainWindow):
             config_btn.clicked.connect(self._on_edit_config_clicked)
             # Exclude mode button toggles the CustomViewBox exclude_mode
             def _on_exclude_toggled(checked):
-                # Snapshot current parameters so toggling exclude mode doesn't reset UI values
-                snap = {}
+                # Toggle exclude mode in the ViewBox and log the change.
+                # IMPORTANT: do not touch or reapply any model parameters here —
+                # that responsibility belongs to the Apply/Run Fit controls in the
+                # parameter panel and ViewModel. Removing parameter snapshot/reapply
+                # prevents accidental fit redraws when toggling exclusion mode.
                 try:
-                    if self.viewmodel and hasattr(self.viewmodel, "get_parameters"):
-                        specs = self.viewmodel.get_parameters() or {}
-                        for k, v in specs.items():
-                            if isinstance(v, dict):
-                                snap[k] = v.get("value")
-                            else:
-                                snap[k] = v
-                except Exception:
-                    snap = {}
+                    # Setting exclude mode on the viewbox updates interaction only
+                    if hasattr(self, 'viewbox') and self.viewbox is not None:
+                        self.viewbox.set_exclude_mode(bool(checked))
 
-                try:
-                    self.viewbox.set_exclude_mode(bool(checked))
-                    # ensure input handler knows selection state
+                    # Keep input handler selection state unchanged (no notify)
                     try:
-                        self.input_handler.selected_curve_id = self.input_handler.selected_curve_id
+                        if hasattr(self, 'input_handler'):
+                            self.input_handler.selected_curve_id = getattr(self.input_handler, 'selected_curve_id', None)
                     except Exception:
                         pass
+
                     if checked:
                         self.append_log("Exclude mode enabled.")
                     else:
                         self.append_log("Exclude mode disabled.")
                 except Exception as e:
                     self.append_log(f"Failed to toggle exclude mode: {e}")
-
-                # Reapply snapped parameter values so any accidental resets are undone
-                try:
-                    if snap and self.viewmodel and hasattr(self.viewmodel, "apply_parameters"):
-                        self.viewmodel.apply_parameters(snap)
-                except Exception:
-                    pass
 
             exclude_btn.toggled.connect(_on_exclude_toggled)
             include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
