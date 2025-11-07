@@ -382,21 +382,75 @@ class InputHandler(QObject):
             return idx
         return None
 
-    def detect_curve_at(self, plot_widget, x, y, tol=0.05):
+    # Use shared constant default for selection tolerance so it's easy to tune
+    from view.constants import CURVE_SELECT_TOL_PIXELS
+
+    def detect_curve_at(self, plot_widget, x, y, tol_pixels: int = CURVE_SELECT_TOL_PIXELS):
         """
-        Attempt to detect which curve (if any) was clicked at (x, y).
-        Returns a curve_id or None.
+        Attempt to detect which curve (if any) was clicked at data coords (x, y).
+
+        Uses a pixel-space distance test (scene coordinates) so selection is
+        independent of data scaling. Returns a curve_id or None.
+
+        tol_pixels: maximum distance in screen pixels for a click to count as
+                    "on the curve" (default 8 px).
         """
         if self.viewmodel is None or not hasattr(self.viewmodel, "curves"):
             return None
+
+        try:
+            vb = plot_widget.getViewBox()
+        except Exception:
+            vb = None
+
+        # Map the clicked data coord to scene (pixel) coords if possible.
+        click_scene = None
+        if vb is not None:
+            try:
+                from PySide6.QtCore import QPointF
+
+                click_scene_pt = vb.mapViewToScene(QPointF(float(x), float(y)))
+                click_scene = (float(click_scene_pt.x()), float(click_scene_pt.y()))
+            except Exception:
+                click_scene = None
+
+        # Fallback: if we couldn't map to scene coords, use a conservative
+        # data-space distance test (small tolerance) so we don't select
+        # everything. This happens rarely but keeps behavior safe.
+        if click_scene is None:
+            for cid, (cx, cy) in self.viewmodel.curves.items():
+                cx = np.asarray(cx)
+                cy = np.asarray(cy)
+                if len(cx) == 0:
+                    continue
+                dist = np.min(np.sqrt((cx - x) ** 2 + (cy - y) ** 2))
+                if dist < 1e-6:  # extremely small fallback
+                    return cid
+            return None
+
+        # Otherwise compute pixel distances. This is a bit more expensive
+        # (maps curve points to scene coords) but remains fast for typical
+        # plotted arrays. We return the first curve within tol_pixels.
+        tpx = float(tol_pixels)
+        from PySide6.QtCore import QPointF
+
         for cid, (cx, cy) in self.viewmodel.curves.items():
             cx = np.asarray(cx)
             cy = np.asarray(cy)
             if len(cx) == 0:
                 continue
-            dist = np.min(np.sqrt((cx - x) ** 2 + (cy - y) ** 2))
-            if dist < tol:
-                return cid
+            try:
+                # Map each data point to scene coords and compute min distance
+                # to the click. We'll bail out early if any point is close enough.
+                for xi, yi in zip(cx, cy):
+                    pt = vb.mapViewToScene(QPointF(float(xi), float(yi)))
+                    dx = float(pt.x()) - click_scene[0]
+                    dy = float(pt.y()) - click_scene[1]
+                    if (dx * dx + dy * dy) <= (tpx * tpx):
+                        return cid
+            except Exception:
+                # If mapping fails for this curve, skip it.
+                continue
         return None
 
     # -----------------------
