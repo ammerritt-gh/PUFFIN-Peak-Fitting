@@ -4,12 +4,14 @@ from PySide6.QtWidgets import (
     QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
     QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog,
     QScrollArea, QSpinBox, QCheckBox, QListWidget, QListWidgetItem,
-    QAbstractItemView
+    QAbstractItemView, QGroupBox
 )
 from PySide6.QtCore import Qt, QPointF
 from PySide6.QtGui import QColor, QBrush
 import pyqtgraph as pg
 import numpy as np
+import math
+from functools import partial
 
 from view.view_box import CustomViewBox
 from view.input_handler import InputHandler
@@ -30,10 +32,17 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("PUMA Peak Fitter")
         self.viewmodel = viewmodel
         self.param_widgets = {}   # name -> widget
+        self._param_last_values = {}
+        self._building_params = False
         self.curves = {}  # curve_id -> PlotDataItem
         self.selected_curve_id = None
         # internal: ensure we connect scene click handler only once
         self._scene_click_connected = False
+        self.legend = None
+        self._legend_entries = {}
+        self._component_legend_order = []
+        self._fit_label = "Total Fit"
+        self._excluded_has_points = False
 
         # --- Central Plot ---
         # Initialize the plot widget inside _init_plot() to avoid duplicate
@@ -110,10 +119,18 @@ class MainWindow(QMainWindow):
 
         # scatter (data points)
         self.scatter = pg.ScatterPlotItem(size=6, pen=None, brush=pg.mkBrush(POINT_COLOR))
+        try:
+            self.scatter.setOpts(name="Data")
+        except Exception:
+            pass
         self.plot_widget.addItem(self.scatter)
         # excluded points overlay (small grey 'x' markers)
         try:
             self.excluded_scatter = pg.ScatterPlotItem(size=8, pen=pg.mkPen('gray'), brush=None, symbol='x')
+            try:
+                self.excluded_scatter.setOpts(name="Excluded Data")
+            except Exception:
+                pass
             self.plot_widget.addItem(self.excluded_scatter)
         except Exception:
             self.excluded_scatter = None
@@ -121,6 +138,13 @@ class MainWindow(QMainWindow):
         # error bars
         self.err_item = pg.ErrorBarItem(pen=pg.mkPen(ERROR_COLOR))
         self.plot_widget.addItem(self.err_item)
+
+        # legend showing data, fits, and components
+        try:
+            self.legend = self.plot_widget.addLegend(offset=(12, 12))
+        except Exception:
+            self.legend = None
+        self._legend_entries = {}
 
     # Note: fit/component overlays are managed by update_plot_data via self.curves
     # so we avoid creating separate persistent PlotDataItems here and prevent
@@ -135,11 +159,41 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        self._update_legend()
+
 
     # --------------------------
     # Plot interaction callbacks
     # --------------------------
     def _on_peak_selected(self, x, y):
+        # Require the click to land near an existing curve before responding.
+        current_curve = self.selected_curve_id
+        target_curve = None
+        try:
+            if self.input_handler is not None:
+                target_curve = self.input_handler.detect_curve_at(self.plot_widget, x, y)
+        except Exception:
+            target_curve = None
+
+        if target_curve is None:
+            self.append_log(f"Peak click ignored — no peak near ({x:.3f}, {y:.3f}).")
+            try:
+                self.viewbox.clear_selection()
+            except Exception:
+                pass
+            if current_curve is not None and self.viewmodel is not None:
+                try:
+                    self.viewmodel.set_selected_curve(current_curve)
+                except Exception:
+                    pass
+            return
+
+        if target_curve != self.selected_curve_id and self.viewmodel is not None:
+            try:
+                self.viewmodel.set_selected_curve(target_curve)
+            except Exception:
+                pass
+
         # Ensure we have a target curve before responding to the peak click so drag works.
         if not self._ensure_curve_selection_for_peaks():
             self.append_log("Peak clicked but no curve selected — ignored.")
@@ -1077,7 +1131,7 @@ class MainWindow(QMainWindow):
             pass
 
     def _upsert_curve(self, curve_id: str, x_arr: np.ndarray, y_arr: np.ndarray,
-                      color: str, selectable: bool, is_component: bool):
+                      color: str, selectable: bool, is_component: bool, label: str = None):
         if curve_id is None:
             return
         try:
@@ -1089,7 +1143,12 @@ class MainWindow(QMainWindow):
         curve = self.curves.get(curve_id)
         if curve is None:
             try:
-                curve = self.plot_widget.plot(x_use, y_use, pen=pg.mkPen(color or FIT_COLOR, width=2))
+                curve = self.plot_widget.plot(
+                    x_use,
+                    y_use,
+                    pen=pg.mkPen(color or FIT_COLOR, width=2),
+                    name=label or curve_id,
+                )
             except Exception:
                 return
             curve.curve_id = curve_id
@@ -1100,13 +1159,77 @@ class MainWindow(QMainWindow):
                 curve.setData(x_use, y_use)
             except Exception:
                 pass
+            try:
+                curve.setOpts(name=label or curve_id)
+            except Exception:
+                pass
 
         setattr(curve, "_base_color", color or FIT_COLOR)
         setattr(curve, "_selectable", bool(selectable))
         setattr(curve, "_is_component", bool(is_component))
+        setattr(curve, "_legend_label", label or curve_id)
 
         selected = (self.selected_curve_id == curve_id)
         self._apply_curve_pen(curve, selected=selected)
+
+    def _update_legend(self):
+        legend = getattr(self, "legend", None)
+        if legend is None:
+            return
+
+        desired_entries = []
+        if getattr(self, "scatter", None) is not None:
+            desired_entries.append(("Data", self.scatter))
+        if getattr(self, "excluded_scatter", None) is not None:
+            desired_entries.append(("Excluded Data", self.excluded_scatter))
+
+        fit_curve = self.curves.get("fit") if hasattr(self, "curves") else None
+        if fit_curve is not None:
+            label = getattr(fit_curve, "_legend_label", self._fit_label)
+            desired_entries.append((label or self._fit_label, fit_curve))
+
+        for label, cid in getattr(self, "_component_legend_order", []):
+            curve = self.curves.get(cid)
+            if curve is None:
+                continue
+            entry_label = getattr(curve, "_legend_label", label)
+            desired_entries.append((entry_label or label, curve))
+
+        # Ensure legend labels are unique by appending counters when necessary.
+        label_counts = {}
+        unique_entries = []
+        for label, item in desired_entries:
+            if item is None:
+                continue
+            text = label or ""
+            count = label_counts.get(text, 0)
+            label_counts[text] = count + 1
+            if count == 0:
+                unique_entries.append((text, item))
+            else:
+                unique_entries.append((f"{text} ({count + 1})", item))
+
+        desired_map = {label: item for label, item in unique_entries}
+
+        # Remove legend entries that are no longer desired or whose item changed.
+        for label in list(self._legend_entries.keys()):
+            item = self._legend_entries.get(label)
+            if label not in desired_map or desired_map[label] is not item:
+                try:
+                    legend.removeItem(label)
+                except Exception:
+                    pass
+                self._legend_entries.pop(label, None)
+
+        # Add missing entries in order.
+        for label, item in unique_entries:
+            if self._legend_entries.get(label) is item:
+                continue
+            try:
+                legend.addItem(item, label)
+                self._legend_entries[label] = item
+            except Exception:
+                pass
 
     def update_plot_data(self, x, y_data, y_fit=None, y_err=None):
         if x is None or y_data is None:
@@ -1114,6 +1237,8 @@ class MainWindow(QMainWindow):
 
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y_data, dtype=float)
+        self._component_legend_order = []
+        self._excluded_has_points = False
 
         excl_mask = None
         try:
@@ -1142,6 +1267,7 @@ class MainWindow(QMainWindow):
                     self.excluded_scatter.setData(x=np.array([], dtype=float), y=np.array([], dtype=float))
                 except Exception:
                     pass
+            self._excluded_has_points = False
             if y_err_arr is not None and len(y_err_arr) == len(y_arr):
                 top = np.abs(y_err_arr)
                 bottom = top
@@ -1173,6 +1299,7 @@ class MainWindow(QMainWindow):
                     self.excluded_scatter.setData(x=x_ex, y=y_ex)
                 except Exception:
                     pass
+                self._excluded_has_points = bool(len(x_ex))
 
             if y_err_arr is not None:
                 try:
@@ -1292,12 +1419,22 @@ class MainWindow(QMainWindow):
                 continue
             color = comp.get("color") or FIT_COLOR
             curve_id = f"component:{prefix}"
-            self._upsert_curve(curve_id, x_arr, comp_arr, color=color, selectable=True, is_component=True)
+            label = comp.get("label") or prefix.rstrip("_") or prefix
+            self._upsert_curve(curve_id, x_arr, comp_arr, color=color, selectable=True, is_component=True, label=label)
             target_ids.add(curve_id)
+            self._component_legend_order.append((label, curve_id))
 
         if total_fit_arr is not None and len(total_fit_arr) == len(x_arr):
             selectable_total = not is_composite_payload
-            self._upsert_curve("fit", x_arr, total_fit_arr, color=FIT_COLOR, selectable=selectable_total, is_component=False)
+            self._upsert_curve(
+                "fit",
+                x_arr,
+                total_fit_arr,
+                color=FIT_COLOR,
+                selectable=selectable_total,
+                is_component=False,
+                label=self._fit_label,
+            )
             target_ids.add("fit")
             if not selectable_total and self.selected_curve_id == "fit":
                 self.selected_curve_id = None
@@ -1321,6 +1458,9 @@ class MainWindow(QMainWindow):
                             self.viewmodel.clear_selected_curve()
                     except Exception:
                         pass
+
+        self._component_legend_order = [(label, cid) for label, cid in self._component_legend_order if cid in target_ids]
+        self._update_legend()
 
         if not target_ids:
             self.selected_curve_id = None
@@ -1359,6 +1499,74 @@ class MainWindow(QMainWindow):
     # --------------------------
     # Dynamic parameter helpers
     # --------------------------
+    def _read_param_widget(self, widget):
+        if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
+            return widget.value()
+        if isinstance(widget, QCheckBox):
+            return widget.isChecked()
+        if isinstance(widget, QComboBox):
+            return widget.currentText()
+        if isinstance(widget, QLineEdit):
+            return widget.text()
+        return getattr(widget, "value", lambda: None)()
+
+    def _bind_param_widget(self, name: str, widget):
+        if widget is None:
+            return
+        self.param_widgets[name] = widget
+        self._param_last_values[name] = self._read_param_widget(widget)
+
+        if isinstance(widget, QDoubleSpinBox):
+            try:
+                widget.setKeyboardTracking(False)
+            except Exception:
+                pass
+            widget.valueChanged.connect(partial(self._on_param_value_changed, name))
+            widget.editingFinished.connect(partial(self._on_param_editing_finished, name))
+        elif isinstance(widget, QSpinBox):
+            try:
+                widget.setKeyboardTracking(False)
+            except Exception:
+                pass
+            widget.valueChanged.connect(partial(self._on_param_value_changed, name))
+            widget.editingFinished.connect(partial(self._on_param_editing_finished, name))
+        elif isinstance(widget, QCheckBox):
+            widget.toggled.connect(partial(self._on_param_value_changed, name))
+        elif isinstance(widget, QComboBox):
+            widget.currentTextChanged.connect(partial(self._on_param_value_changed, name))
+        elif isinstance(widget, QLineEdit):
+            widget.editingFinished.connect(partial(self._on_param_editing_finished, name))
+
+    def _on_param_value_changed(self, name, *args):
+        self._commit_parameter(name)
+
+    def _on_param_editing_finished(self, name):
+        self._commit_parameter(name)
+
+    def _commit_parameter(self, name: str):
+        if self._building_params:
+            return
+        widget = self.param_widgets.get(name)
+        if widget is None:
+            return
+        value = self._read_param_widget(widget)
+        last = self._param_last_values.get(name, None)
+        if isinstance(value, float) and isinstance(last, float):
+            if math.isclose(value, last, rel_tol=1e-9, abs_tol=1e-9):
+                return
+        elif value == last:
+            return
+
+        if not self.viewmodel:
+            self._param_last_values[name] = value
+            return
+
+        try:
+            self.viewmodel.apply_parameters({name: value})
+            self._param_last_values[name] = value
+        except Exception as exc:
+            self.append_log(f"Failed to update parameter '{name}': {exc}")
+
     def _refresh_parameters(self):
         """Ask the ViewModel for parameter specs and rebuild the form."""
         if not self.viewmodel:
@@ -1396,170 +1604,222 @@ class MainWindow(QMainWindow):
         QDoubleSpinBox (display precision). 'step' controls the single-step
         increment used when the user clicks the up/down arrows.
         """
-        # Build a fresh form widget and replace the scroll area's widget
-        new_widget = QWidget()
-        new_form = QFormLayout(new_widget)
-        new_param_widgets = {}
-
-        for name, spec in specs.items():
-            # Normalize spec into dict with at least 'value' and 'type'
-            if isinstance(spec, dict):
-                val = spec.get("value")
-                ptype = spec.get("type", None)
-            else:
-                val = spec
-                ptype = None
-
-            # Infer type if not provided
-            if ptype is None:
-                if isinstance(val, bool):
-                    ptype = "bool"
-                elif isinstance(val, int) and not isinstance(val, bool):
-                    ptype = "int"
-                elif isinstance(val, float):
-                    ptype = "float"
-                elif isinstance(val, (list, tuple)):
-                    ptype = "choice"
+        self._building_params = True
+        try:
+            normalized_specs = {}
+            grouped: dict = {}
+            group_order = []
+            for name, spec in specs.items():
+                if isinstance(spec, dict):
+                    meta = dict(spec)
                 else:
-                    ptype = "str"
+                    meta = {"value": spec}
+                normalized_specs[name] = meta
+                component_key = meta.get("component") if isinstance(meta, dict) else None
+                if component_key not in grouped:
+                    grouped[component_key] = []
+                    group_order.append(component_key)
+                grouped[component_key].append((name, meta))
 
-            widget = None
-            try:
-                if ptype == "float":
-                    w = QDoubleSpinBox()
-                    # Apply provided min/max if available, otherwise use safe large bounds
-                    w.setRange(spec.get("min", -1e9), spec.get("max", 1e9) if isinstance(spec, dict) else 1e9)
-                    # 'decimals' controls how many decimal places the spinbox displays.
-                    w.setDecimals(spec.get("decimals", 6) if isinstance(spec, dict) else 6)
-                    # 'step' controls the increment when the user clicks arrows or presses keys
-                    w.setSingleStep(spec.get("step", 0.1) if isinstance(spec, dict) else 0.1)
-                    if val is not None:
-                        w.setValue(float(val))
-                    widget = w
+            if None in grouped:
+                group_order = [key for key in group_order if key is None] + [key for key in group_order if key is not None]
 
-                elif ptype == "int":
-                    w = QSpinBox()
-                    w.setRange(int(spec.get("min", -2147483648)), int(spec.get("max", 2147483647)))
-                    w.setSingleStep(int(spec.get("step", 1)))
-                    if val is not None:
-                        w.setValue(int(val))
-                    widget = w
+            new_widget = QWidget()
+            outer_layout = QVBoxLayout(new_widget)
+            outer_layout.setContentsMargins(8, 8, 8, 8)
+            outer_layout.setSpacing(10)
 
-                elif ptype == "bool":
-                    w = QCheckBox()
-                    w.setChecked(bool(val))
-                    widget = w
+            self.param_widgets = {}
+            self._param_last_values = {}
 
-                elif ptype == "choice":
-                    w = QComboBox()
-                    choices = []
-                    if isinstance(spec, dict) and "choices" in spec:
-                        choices = spec.get("choices") or []
-                    elif isinstance(val, (list, tuple)):
-                        choices = list(val)
-                    for c in choices:
-                        w.addItem(str(c))
-                    # set current
-                    cur = spec.get("value") if isinstance(spec, dict) else (val[0] if val else "")
-                    if cur is not None:
-                        idx = w.findText(str(cur))
-                        if idx >= 0:
-                            w.setCurrentIndex(idx)
-                    widget = w
+            for group_key in group_order:
+                entries = grouped.get(group_key, [])
+                if not entries:
+                    continue
+                sample_meta = entries[0][1] if entries else {}
+                if group_key is None:
+                    label = "Model Parameters" if len(group_order) > 1 else "Parameters"
+                    color = "#666666"
+                else:
+                    label = sample_meta.get("component_label") or str(group_key).rstrip("_") or str(group_key)
+                    color = sample_meta.get("color") or FIT_COLOR
+                group_box = QGroupBox(label)
+                style = (
+                    f"QGroupBox {{ border: 2px solid {color}; border-radius: 6px; margin-top: 8px; padding: 8px; }}"
+                    f" QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; padding: 0 6px; color: {color}; font-weight: bold; }}"
+                )
+                try:
+                    group_box.setStyleSheet(style)
+                except Exception:
+                    pass
 
-                else:  # str and fallback
-                    w = QLineEdit()
-                    if val is not None:
-                        w.setText(str(val))
-                    widget = w
-            except Exception:
-                # on any error, fallback to a simple line edit
-                w = QLineEdit()
-                if val is not None:
-                    w.setText(str(val))
-                widget = w
+                form_layout = QFormLayout()
+                form_layout.setContentsMargins(6, 12, 6, 6)
+                form_layout.setSpacing(6)
+                group_box.setLayout(form_layout)
 
-            # Keep the label text as the parameter name. If the spec provides an
-            # interactive control hint, expose it both as a tooltip and as a
-            # small visible hint label next to the control so users can discover
-            # what mouse/keyboard actions affect the parameter.
-            hint = ""
-            try:
-                if isinstance(spec, dict) and spec.get("control"):
-                    ctrl = spec.get("control")
-                    action = ctrl.get("action") or ""
-                    mods = "+".join(ctrl.get("modifiers", [])) if ctrl.get("modifiers") else ""
-                    hint = f"{action}" + (f"+{mods}" if mods else "")
+                for name, meta in entries:
+                    spec_dict = meta
+                    val = spec_dict.get("value")
+                    ptype = spec_dict.get("type")
+                    if ptype is None:
+                        if isinstance(val, bool):
+                            ptype = "bool"
+                        elif isinstance(val, int) and not isinstance(val, bool):
+                            ptype = "int"
+                        elif isinstance(val, float):
+                            ptype = "float"
+                        elif isinstance(val, (list, tuple)):
+                            ptype = "choice"
+                        else:
+                            ptype = "str"
+
+                    widget = None
                     try:
-                        widget.setToolTip(f"Interactive: {hint}")
+                        if ptype == "float":
+                            w = QDoubleSpinBox()
+                            w.setRange(spec_dict.get("min", -1e9), spec_dict.get("max", 1e9))
+                            w.setDecimals(spec_dict.get("decimals", 6))
+                            w.setSingleStep(spec_dict.get("step", 0.1))
+                            if val is not None:
+                                w.blockSignals(True)
+                                try:
+                                    w.setValue(float(val))
+                                finally:
+                                    w.blockSignals(False)
+                            widget = w
+                        elif ptype == "int":
+                            w = QSpinBox()
+                            w.setRange(int(spec_dict.get("min", -2147483648)), int(spec_dict.get("max", 2147483647)))
+                            w.setSingleStep(int(spec_dict.get("step", 1)))
+                            if val is not None:
+                                w.blockSignals(True)
+                                try:
+                                    w.setValue(int(val))
+                                finally:
+                                    w.blockSignals(False)
+                            widget = w
+                        elif ptype == "bool":
+                            w = QCheckBox()
+                            if val is not None:
+                                w.blockSignals(True)
+                                try:
+                                    w.setChecked(bool(val))
+                                finally:
+                                    w.blockSignals(False)
+                            widget = w
+                        elif ptype == "choice":
+                            w = QComboBox()
+                            choices = []
+                            if spec_dict.get("choices") is not None:
+                                choices = list(spec_dict.get("choices"))
+                            elif isinstance(val, (list, tuple)):
+                                choices = list(val)
+                            w.blockSignals(True)
+                            try:
+                                for c in choices:
+                                    w.addItem(str(c))
+                                cur = spec_dict.get("value")
+                                if cur is not None:
+                                    idx = w.findText(str(cur))
+                                    if idx >= 0:
+                                        w.setCurrentIndex(idx)
+                                elif choices:
+                                    w.setCurrentIndex(0)
+                            finally:
+                                w.blockSignals(False)
+                            widget = w
+                        else:
+                            w = QLineEdit()
+                            if val is not None:
+                                w.blockSignals(True)
+                                try:
+                                    w.setText(str(val))
+                                finally:
+                                    w.blockSignals(False)
+                            widget = w
+                    except Exception:
+                        w = QLineEdit()
+                        if val is not None:
+                            w.blockSignals(True)
+                            try:
+                                w.setText(str(val))
+                            finally:
+                                w.blockSignals(False)
+                        widget = w
+
+                    hint = ""
+                    try:
+                        if spec_dict.get("control"):
+                            ctrl = spec_dict.get("control") or {}
+                            action = ctrl.get("action") or ""
+                            mods = ctrl.get("modifiers", []) or []
+                            hint = action + ("+" + "+".join(mods) if mods else "")
+                            widget.setToolTip(f"Interactive: {hint}")
+                    except Exception:
+                        hint = ""
+
+                    try:
+                        meta_hint = spec_dict.get("hint")
+                        if meta_hint:
+                            existing_tip = widget.toolTip() if hasattr(widget, "toolTip") else ""
+                            combined = f"{existing_tip}\n{meta_hint}".strip()
+                            widget.setToolTip(combined)
                     except Exception:
                         pass
-            except Exception:
-                pass
 
-            # Container so we can show the widget and a right-hand hint label
-            container_h = QWidget()
-            hbox = QHBoxLayout(container_h)
-            hbox.setContentsMargins(0, 0, 0, 0)
-            hbox.addWidget(widget)
-            if hint:
-                hint_label = QLabel(f"({hint})")
-                # subtle visual style so it's unobtrusive but readable
-                hint_label.setStyleSheet("color: gray; font-size: 11px;")
-                hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                hint_label.setToolTip(f"Interactive control: {hint}")
-                hbox.addWidget(hint_label)
-            else:
-                # keep layout stable when no hint exists
-                hbox.addWidget(QLabel(""))
+                    container_h = QWidget()
+                    hbox = QHBoxLayout(container_h)
+                    hbox.setContentsMargins(0, 0, 0, 0)
+                    hbox.addWidget(widget)
+                    if hint:
+                        hint_label = QLabel(f"({hint})")
+                        hint_label.setStyleSheet("color: gray; font-size: 11px;")
+                        hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                        hint_label.setToolTip(f"Interactive control: {hint}")
+                        hbox.addWidget(hint_label)
+                    else:
+                        hbox.addWidget(QLabel(""))
 
-            new_form.addRow(name + ":", container_h)
-            new_param_widgets[name] = widget
+                    form_layout.addRow(f"{name}:", container_h)
+                    self._bind_param_widget(name, widget)
 
-        # Replace the widget shown in the scroll area (frees old widgets)
-        self.param_scroll.takeWidget()
-        self.param_scroll.setWidget(new_widget)
-        self.param_form_widget = new_widget
-        self.param_form = new_form
-        # Build control map for InputHandler based on specs' optional 'control' entries.
-        control_map = {}
-        try:
-            for name, spec in specs.items():
+                outer_layout.addWidget(group_box)
+
+            outer_layout.addStretch(1)
+
+            self.param_scroll.takeWidget()
+            self.param_scroll.setWidget(new_widget)
+            self.param_form_widget = new_widget
+            self.param_form = None
+
+            control_map = {}
+            for name, meta in normalized_specs.items():
                 try:
-                    if isinstance(spec, dict) and "control" in spec:
-                        ctrl = spec.get("control") or {}
-                        action = ctrl.get("action")
-                        mods = tuple(sorted(ctrl.get("modifiers", []))) if ctrl.get("modifiers") is not None else tuple()
-                        # Unified behaviour: derive interactive increment from the
-                        # parameter 'step' so a single wheel notch = spinbox single-step.
-                        # Always use the 'step' value from the spec; no legacy
-                        # fallback is consulted.
-                        try:
-                            step_val = float(spec.get("step", 1.0))
-                        except Exception:
-                            step_val = 1.0
-                        key = (action, mods)
-                        entry = {"name": name, "step": step_val}
-                        comp_prefix = spec.get("component") if isinstance(spec, dict) else None
-                        if comp_prefix:
-                            entry["component"] = comp_prefix
-                        control_map.setdefault(key, []).append(entry)
+                    ctrl = meta.get("control")
+                    if not ctrl:
+                        continue
+                    action = ctrl.get("action")
+                    mods = tuple(sorted(ctrl.get("modifiers", []))) if ctrl.get("modifiers") else tuple()
+                    try:
+                        step_val = float(meta.get("step", 1.0))
+                    except Exception:
+                        step_val = 1.0
+                    entry = {"name": name, "step": step_val}
+                    comp_prefix = meta.get("component")
+                    if comp_prefix:
+                        entry["component"] = comp_prefix
+                    control_map.setdefault((action, mods), []).append(entry)
                 except Exception:
                     continue
-        except Exception:
-            control_map = {}
 
-        # Provide control map to input handler if available
-        try:
-            if hasattr(self, "input_handler") and self.input_handler is not None:
-                self.input_handler.set_control_map(control_map)
-        except Exception:
-            pass
-
-        self.param_widgets = new_param_widgets
-
-        # No legacy fallbacks: the view exposes only the dynamic param_widgets mapping.
-        # Consumers should read parameters from param_widgets or use the ViewModel API.
+            try:
+                if hasattr(self, "input_handler") and self.input_handler is not None:
+                    self.input_handler.set_control_map(control_map)
+            except Exception:
+                pass
+        finally:
+            self._building_params = False
 
     # --------------------------
     # Config dialog (view-only)
