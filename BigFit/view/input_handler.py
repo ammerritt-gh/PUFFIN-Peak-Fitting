@@ -312,6 +312,17 @@ class InputHandler(QObject):
                 self.viewbox.clear_selection()
             self.clear_selected_curve()
             return True
+        elif key == Qt.Key_F:
+            if self.viewmodel is not None and hasattr(self.viewmodel, "run_fit"):
+                try:
+                    self.viewmodel.run_fit()
+                except Exception:
+                    pass
+            return True
+        elif key in (Qt.Key_E, Qt.Key_Q):
+            step = 1 if key == Qt.Key_E else -1
+            if self._cycle_selected_component(step):
+                return True
         elif key == Qt.Key_D:
             # Toggle exclude mode on the ViewBox
             try:
@@ -382,6 +393,45 @@ class InputHandler(QObject):
                 self.viewmodel.log_message.emit("Curve deselected (spacebar).")
             except Exception:
                 pass
+
+    def _cycle_selected_component(self, step: int) -> bool:
+        if step == 0:
+            return False
+        if self.viewmodel is None:
+            return False
+
+        descriptors = []
+        try:
+            if hasattr(self.viewmodel, "get_component_descriptors"):
+                descriptors = self.viewmodel.get_component_descriptors() or []
+        except Exception:
+            descriptors = []
+
+        curve_order = []
+        for desc in descriptors:
+            prefix = desc.get("prefix")
+            if not prefix:
+                continue
+            curve_order.append(f"component:{prefix}")
+
+        if not curve_order:
+            try:
+                existing = list(getattr(self.viewmodel, "curves", {}).keys())
+            except Exception:
+                existing = []
+            curve_order = [cid for cid in existing if cid]
+            if not curve_order:
+                return False
+
+        current = self.selected_curve_id if self.selected_curve_id in curve_order else None
+        if current is None:
+            target = curve_order[0] if step > 0 else curve_order[-1]
+        else:
+            idx = curve_order.index(current)
+            target = curve_order[(idx + step) % len(curve_order)]
+
+        self.set_selected_curve(target)
+        return True
 
     # -----------------------
     # Utility helpers
