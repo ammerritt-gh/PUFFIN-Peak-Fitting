@@ -26,6 +26,8 @@
     <Compile Include="fitting_functions\functions.py" />
     <Compile Include="fitting_functions\__init__.py" />
     <Compile Include="PySide_Fitter_PyQtGraph.py" />
+    <Compile Include="PySide_Fitter_PyQtGraph_drag.py" />
+    <Compile Include="PySide_Fitter_PyQtGraph_scroll.py" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="fitting_functions\" />

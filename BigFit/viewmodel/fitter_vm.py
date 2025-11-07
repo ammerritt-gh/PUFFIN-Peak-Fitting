@@ -1,6 +1,7 @@
 ﻿# viewmodel/fitter_vm.py
 from PySide6.QtCore import QObject, Signal
 import numpy as np
+import os
 from types import SimpleNamespace
 
 from models import ModelState
@@ -14,49 +15,344 @@ class FitterViewModel(QObject):
     Central logic layer: handles loading/saving, fitting, and updates to the plot.
     """
 
-    plot_updated = Signal(object, object, object, object)  # x, y_data, y_fit, y_err
+    plot_updated = Signal(object, object, object, object)   # x, y_data, y_fit, y_err
+    curve_selection_changed = Signal(object)                # emits curve_id or None
     log_message = Signal(str)
     parameters_updated = Signal()
+    files_updated = Signal(object)                          # list of queued file metadata
+
 
     def __init__(self, model_state=None):
         super().__init__()
         self.state = model_state or ModelState()
-        # mapping of input event -> list of handlers built from parameter specs
-        self._input_map = {}
 
     # --------------------------
     # Data I/O
     # --------------------------
     def load_data(self):
-        """Open file dialog and load a dataset."""
+        """Open file dialog and append one or more datasets to the queue."""
         loaded = select_and_load_files(None)
         if not loaded:
             return
-        x, y, err, info = loaded[0]
-        # Ensure numeric numpy arrays and a well-formed error array
-        x = np.asarray(x, dtype=float)
-        y = np.asarray(y, dtype=float)
+
+        added = 0
+        last_info = None
+        for x, y, err, info in loaded:
+            try:
+                x_arr, y_arr, err_arr = self._prepare_dataset(x, y, err)
+            except Exception as exc:
+                name = (info or {}).get("name") if isinstance(info, dict) else None
+                label = name or "dataset"
+                self.log_message.emit(f"Skipped {label}: {exc}")
+                continue
+
+            dataset = {
+                "x": x_arr,
+                "y": y_arr,
+                "err": err_arr,
+                "info": info or {},
+            }
+            self._datasets.append(dataset)
+            added += 1
+            last_info = info or last_info
+
+        if added == 0:
+            return
+
+        if isinstance(last_info, dict):
+            self._persist_last_loaded(last_info)
+
+        plural = "file" if added == 1 else "files"
+        self.log_message.emit(f"Queued {added} {plural} for viewing.")
+        self._emit_file_queue()
+
+        # If nothing is currently active, auto-activate the first queued dataset
+        try:
+            if self._active_dataset_index is None and len(self._datasets) > 0:
+                # activate_file will apply to state, emit updated queue, and update plot
+                try:
+                    self.activate_file(0)
+                except Exception:
+                    # fallback: set active index and emit queue
+                    self._active_dataset_index = 0
+                    try:
+                        self._emit_file_queue()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _prepare_dataset(self, x, y, err):
+        x_arr = np.asarray(x, dtype=float)
+        y_arr = np.asarray(y, dtype=float)
         if err is None:
-            err = np.sqrt(np.clip(np.abs(y), 1e-12, np.inf))
+            err_arr = np.sqrt(np.clip(np.abs(y_arr), 1e-12, np.inf))
         else:
-            err = np.asarray(err, dtype=float)
-        # Trim to the shortest common length to avoid mismatched arrays
-        common_len = min(len(x), len(y), len(err))
-        x = x[:common_len]
-        y = y[:common_len]
-        err = err[:common_len]
-        self.state.x_data = x
-        self.state.y_data = y
-        self.state.errors = err
-        self.state.file_info = info
-        self.log_message.emit(f"Loaded data file: {info['name']}")
-        self.update_plot()
+            err_arr = np.asarray(err, dtype=float)
+
+        if len(x_arr) == 0 or len(y_arr) == 0 or len(err_arr) == 0:
+            raise ValueError("Dataset is empty.")
+
+        common_len = min(len(x_arr), len(y_arr), len(err_arr))
+        if common_len == 0:
+            raise ValueError("Dataset has no overlapping values.")
+
+        return (
+            np.array(x_arr[:common_len], dtype=float, copy=True),
+            np.array(y_arr[:common_len], dtype=float, copy=True),
+            np.array(err_arr[:common_len], dtype=float, copy=True),
+        )
+
+    def _persist_last_loaded(self, info: dict):
+        try:
+            path = info.get("path")
+            if not path:
+                return
+            from dataio import get_config
+
+            cfg = get_config()
+            cfg.last_loaded_file = path
+            folder = os.path.dirname(path)
+            if folder:
+                cfg.default_load_folder = folder
+            try:
+                cfg.save()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _emit_file_queue(self):
+        files = []
+        for idx, dataset in enumerate(self._datasets):
+            info = dataset.get("info") if isinstance(dataset, dict) else {}
+            info = info if isinstance(info, dict) else {}
+            entry = {
+                "index": idx,
+                "name": info.get("name") or f"Dataset {idx + 1}",
+                "path": info.get("path"),
+                "size": info.get("size"),
+                "active": idx == self._active_dataset_index,
+                "info": info,
+            }
+            files.append(entry)
+        try:
+            self.files_updated.emit(files)
+        except Exception:
+            pass
+        # persist queue to config so it survives restarts
+        try:
+            self._save_queue_to_config()
+        except Exception:
+            pass
+
+    def notify_file_queue(self):
+        self._emit_file_queue()
+
+    def _save_queue_to_config(self):
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            # Save as simple list of file paths and optional metadata
+            queued = []
+            for ds in self._datasets:
+                info = ds.get("info") if isinstance(ds, dict) else {}
+                path = None
+                if isinstance(info, dict):
+                    path = info.get("path")
+                if not path:
+                    path = ds.get("info", {}).get("path") if isinstance(ds.get("info"), dict) else None
+                queued.append({"path": path, "name": (info.get("name") if isinstance(info, dict) else None)})
+            cfg.queued_files = queued
+            # store active index if present
+            cfg.queued_active = self._active_dataset_index
+            try:
+                cfg.save()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _load_queue_from_config(self):
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            q = getattr(cfg, "queued_files", None)
+            active = getattr(cfg, "queued_active", None)
+            if not q:
+                return
+            # Attempt to load each path into the queue
+            from dataio.data_loader import load_data_from_file
+            added = 0
+            for entry in q:
+                try:
+                    path = entry.get("path") if isinstance(entry, dict) else None
+                    if not path or not os.path.isfile(path):
+                        continue
+                    x, y, err, info = load_data_from_file(path)
+                    x_arr, y_arr, err_arr = self._prepare_dataset(x, y, err)
+                    dataset = {"x": x_arr, "y": y_arr, "err": err_arr, "info": info}
+                    self._datasets.append(dataset)
+                    added += 1
+                except Exception:
+                    continue
+            # restore active index if valid
+            if isinstance(active, int) and 0 <= active < len(self._datasets):
+                self._active_dataset_index = int(active)
+            else:
+                self._active_dataset_index = None
+            if added:
+                # notify UI
+                try:
+                    self._emit_file_queue()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _apply_dataset_to_state(self, dataset: dict):
+        x = dataset.get("x")
+        y = dataset.get("y")
+        err = dataset.get("err")
+        info = dataset.get("info") if isinstance(dataset.get("info"), dict) else {}
+
+        x_arr = np.asarray(x, dtype=float)
+        y_arr = np.asarray(y, dtype=float)
+
+        try:
+            self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
+        except Exception:
+            self.state.x_data = np.array(x_arr, copy=True)
+            self.state.y_data = np.array(y_arr, copy=True)
+            try:
+                self.state.model_spec.initialize(self.state.x_data, self.state.y_data)
+            except Exception:
+                pass
+            try:
+                self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
+            except Exception:
+                self.state.excluded = np.array([], dtype=bool)
+
+        try:
+            self.state.errors = np.array(err, dtype=float, copy=True)
+        except Exception:
+            self.state.errors = np.sqrt(np.clip(np.abs(self.state.y_data), 1e-12, np.inf))
+
+        if info:
+            try:
+                self.state.file_info = info
+            except Exception:
+                pass
+
+    def activate_file(self, index: int):
+        try:
+            idx = int(index)
+        except Exception:
+            return
+
+        if idx < 0 or idx >= len(self._datasets):
+            return
+
+        dataset = self._datasets[idx]
+        self._apply_dataset_to_state(dataset)
+        self._active_dataset_index = idx
+
+        info = dataset.get("info") if isinstance(dataset, dict) else {}
+        if not isinstance(info, dict):
+            info = {}
+        name = info.get("name")
+        label = name or f"Dataset {idx + 1}"
+        self.log_message.emit(f"Loaded dataset: {label}")
+
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+
+        self._emit_file_queue()
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
+    def remove_file_at(self, index: int):
+        try:
+            idx = int(index)
+        except Exception:
+            return
+
+        if idx < 0 or idx >= len(self._datasets):
+            return
+
+        dataset = self._datasets.pop(idx)
+        info_obj = dataset.get("info") if isinstance(dataset, dict) else {}
+        info = info_obj if isinstance(info_obj, dict) else {}
+        name = info.get("name") or f"Dataset {idx + 1}"
+        self.log_message.emit(f"Removed dataset: {name}")
+
+        if self._active_dataset_index == idx:
+            self._active_dataset_index = None
+            if self._datasets:
+                next_idx = idx if idx < len(self._datasets) else len(self._datasets) - 1
+                self.activate_file(next_idx)
+            else:
+                self.clear_loaded_files(emit_log=False)
+                self.log_message.emit("Dataset queue is now empty; reverted to default data.")
+        else:
+            if self._active_dataset_index is not None and idx < self._active_dataset_index:
+                self._active_dataset_index -= 1
+            self._emit_file_queue()
+
+    def clear_loaded_files(self, emit_log=True):
+        self._datasets.clear()
+        self._active_dataset_index = None
+        model_name = getattr(self.state, "model_name", "Voigt") if hasattr(self, "state") else "Voigt"
+        try:
+            self.state = ModelState(model_name=model_name)
+        except Exception:
+            self.state = ModelState()
+        self._fit_worker = None
+        self._emit_file_queue()
+        try:
+            self.parameters_updated.emit()
+        except Exception:
+            pass
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+        if emit_log:
+            self.log_message.emit("Cleared queued datasets and restored initial synthetic data.")
 
     def save_data(self):
         """Save current data and fit to file."""
         y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
         save_dataset(self.state.x_data, self.state.y_data, y_fit=y_fit)
         self.log_message.emit("Data saved successfully.")
+
+    def clear_plot(self):
+        """Reset to initial synthetic dataset and clear stored last-loaded file in config."""
+        try:
+            self.clear_loaded_files(emit_log=False)
+
+            # clear saved last-loaded file in config if available
+            try:
+                from dataio import get_config
+                cfg = get_config()
+                cfg.last_loaded_file = None
+                try:
+                    cfg.save()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            self.log_message.emit("Cleared queued datasets and restored initial synthetic data.")
+        except Exception as e:
+            try:
+                self.log_message.emit(f"Failed to clear plot: {e}")
+            except Exception:
+                pass
 
     # --------------------------
     # Configuration accessors (ViewModel handles logic/persistence)
@@ -120,13 +416,18 @@ class FitterViewModel(QObject):
             return
 
         # basic data checks
-        x = getattr(self.state, "x_data", None)
-        y = getattr(self.state, "y_data", None)
+        # Use masked (included) data for fitting so excluded points are ignored
+        try:
+            x_incl, y_incl, err_incl = self.state.get_masked_data()
+        except Exception:
+            x_incl, y_incl, err_incl = None, None, None
+        x = x_incl if x_incl is not None else getattr(self.state, "x_data", None)
+        y = y_incl if y_incl is not None else getattr(self.state, "y_data", None)
         if x is None or y is None:
             self.log_message.emit("No data available to fit.")
             return
 
-        err = getattr(self.state, "errors", None)
+        err = err_incl if err_incl is not None else getattr(self.state, "errors", None)
 
         # obtain model_spec (use existing or create one)
         model_spec = getattr(self.state, "model_spec", None)
@@ -221,7 +522,18 @@ class FitterViewModel(QObject):
                     except Exception:
                         pass
 
-                    self.plot_updated.emit(x, y, y_fit, err)
+                    # Build a full-domain fit curve for plotting (evaluate on full x_data)
+                    full_y_fit = None
+                    try:
+                        # build ordered param list
+                        vals = [result.get(k) for k in param_keys]
+                        full_y_fit = wrapped_func(getattr(self.state, "x_data", np.array([])), *vals)
+                    except Exception:
+                        full_y_fit = None
+
+                    # Emit full-domain plot update (original full data)
+                    full_errs = getattr(self.state, "errors", None)
+                    self.plot_updated.emit(getattr(self.state, "x_data", x), getattr(self.state, "y_data", y), full_y_fit, full_errs)
                     self.log_message.emit("Fit completed successfully.")
                 else:
                     self.log_message.emit("Fit failed.")
@@ -248,6 +560,75 @@ class FitterViewModel(QObject):
         errs = None if errs is None else np.asarray(errs, dtype=float)
         self.plot_updated.emit(self.state.x_data, self.state.y_data, y_fit, errs)
 
+    def compute_statistics(self, y_fit=None, n_params: int = 0) -> dict:
+        """Compute common fit statistics (reduced chi-squared, Cash) for current state.
+
+        Returns a dict with keys: 'reduced_chi2', 'cash', 'reduced_cash'. Values may be None on failure.
+        This method performs a lazy import of models.metrics to avoid module-time coupling.
+        """
+        try:
+            # import locally to avoid circular imports at module import time
+            from models.metrics import compute_statistics_from_state
+            stats = compute_statistics_from_state(self.state, y_fit, n_params)
+            return stats
+        except Exception as e:
+            try:
+                self.log_message.emit(f"Failed to compute statistics: {e}")
+            except Exception:
+                pass
+            return {"reduced_chi2": None, "cash": None, "reduced_cash": None}
+
+    # --------------------------
+    # Exclusion management (called from InputHandler/View)
+    # --------------------------
+    def toggle_point_exclusion(self, x, y, tol=0.05):
+        """Toggle exclusion for the nearest point to (x,y)."""
+        try:
+            if hasattr(self.state, "toggle_point_exclusion"):
+                idx = self.state.toggle_point_exclusion(x, y, tol=tol)
+                self.log_message.emit(f"Toggled exclusion for point index: {idx}")
+            else:
+                self.log_message.emit("State does not support point exclusion.")
+        except Exception as e:
+            self.log_message.emit(f"Failed to toggle point exclusion: {e}")
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
+    def toggle_box_exclusion(self, x0, y0, x1, y1):
+        """Toggle exclusion for points inside the given box."""
+        try:
+            if hasattr(self.state, "toggle_box_exclusion"):
+                inds = self.state.toggle_box_exclusion(x0, y0, x1, y1)
+                self.log_message.emit(f"Toggled exclusion for {len(inds)} points.")
+            else:
+                self.log_message.emit("State does not support box exclusion.")
+        except Exception as e:
+            self.log_message.emit(f"Failed to toggle box exclusion: {e}")
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
+    def clear_exclusions(self):
+        """Include all points (clear any exclusion mask) without touching model parameters."""
+        try:
+            if hasattr(self.state, "excluded"):
+                try:
+                    self.state.excluded = np.zeros_like(getattr(self.state, "x_data", np.array([])), dtype=bool)
+                except Exception:
+                    self.state.excluded = np.array([], dtype=bool)
+                self.log_message.emit("Cleared all exclusions (included all points).")
+            else:
+                self.log_message.emit("No exclusion mask present on state.")
+        except Exception as e:
+            self.log_message.emit(f"Failed to clear exclusions: {e}")
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
     def get_parameters(self) -> dict:
         """Return parameter specs for the current model.
 
@@ -259,7 +640,7 @@ class FitterViewModel(QObject):
         """
         try:
             # local import to avoid circular import problems at module import time
-            from models import get_model_spec, canonical_model_key
+            from models import get_model_spec
             # Helper to log safely
             def _log(msg):
                 try:
@@ -278,9 +659,23 @@ class FitterViewModel(QObject):
 
             _log(f"get_parameters: requested model_name raw='{model_name}'")
 
-            # Normalize the requested model name to the canonical registry key
+            # Normalize common UI labels to canonical keys expected by get_model_spec
+            _map = {
+                "voigt": "voigt",
+                "voigtmodel": "voigt",
+                "gaussian": "gaussian",
+                "gauss": "gaussian",
+            }
             key = str(model_name).strip()
-            canonical = canonical_model_key(key)
+            lower = key.lower()
+            # try direct map, then fall back to cleaned lowercase
+            if lower in _map:
+                canonical = _map[lower]
+            else:
+                # clean up common variants (remove spaces/underscores)
+                clean = lower.replace(" ", "").replace("_", "")
+                canonical = _map.get(clean, lower)
+
             _log(f"get_parameters: normalized model key='{canonical}' (from '{model_name}')")
 
             # Obtain spec instance (using local get_model_spec)
@@ -331,13 +726,6 @@ class FitterViewModel(QObject):
             # ensure we store the canonical name/spec for future calls
             setattr(self.state, "model_name", canonical)
             setattr(self.state, "model_spec", model_spec)
-
-            # Build input-action map for interactive controls
-            try:
-                self._input_map = self._build_input_map(specs)
-            except Exception:
-                self._input_map = {}
-
             return specs
 
         except Exception as e:
@@ -346,135 +734,6 @@ class FitterViewModel(QObject):
             except Exception:
                 print(f"Failed to build parameter specs: {e}")
             return {}
-
-    def get_addable_model_names(self) -> list:
-        """Return a list of model display names that are addable (exclude constructed models).
-
-        This is a convenience wrapper for the view when presenting a list of elements
-        that can be added to composites.
-        """
-        try:
-            from models import get_available_model_names
-            return get_available_model_names(addable_only=True)
-        except Exception:
-            return []
-
-    def _build_input_map(self, specs: dict) -> dict:
-        """
-        Build a mapping of input events -> handlers from parameter specs.
-        Each handler is a dict: { 'param': name, 'action': {...} }
-        Recognized event keys: 'click', 'drag', 'wheel', 'key'
-        The 'input' entry in a spec may be a str, list or a dict describing those keys.
-        """
-        from collections import defaultdict
-        mapping = defaultdict(list)
-        for pname, pspec in (specs or {}).items():
-            try:
-                inp = None
-                if isinstance(pspec, dict):
-                    inp = pspec.get("input")
-                # allow older string hints as label-only (skip)
-                if not inp:
-                    continue
-                # if it's a string, keep as hint-only and skip actionable mapping
-                if isinstance(inp, str):
-                    continue
-                # assume dict-like structure mapping event -> action-spec
-                if isinstance(inp, dict):
-                    for ev, act in inp.items():
-                        mapping[ev].append({"param": pname, "action": act})
-            except Exception:
-                continue
-        return dict(mapping)
-
-    # Selection lifecycle API
-    def begin_selection(self, pname: str, x: float, y: float) -> bool:
-        """Begin a selection/interactive session for parameter `pname`.
-        Returns True if a session was started."""
-        try:
-            # find drag handlers for this parameter
-            drag_handlers = [h for h in (self._input_map.get("drag", []) or []) if h.get("param") == pname]
-            if not drag_handlers:
-                return False
-            # store selected param and an interactive drag session with filtered handlers
-            setattr(self.state, "_selected_param", pname)
-            setattr(self.state, "_interactive_drag_info", {"handlers": drag_handlers, "last_x": float(x), "last_y": float(y)})
-            self.log_message.emit(f"Selection started for parameter: {pname}")
-            return True
-        except Exception as e:
-            try:
-                self.log_message.emit(f"Failed to begin selection for {pname}: {e}")
-            except Exception:
-                pass
-            return False
-
-    def end_selection(self):
-        """End any current selection / interactive session."""
-        try:
-            if hasattr(self.state, "_interactive_drag_info"):
-                try:
-                    del self.state._interactive_drag_info
-                except Exception:
-                    try:
-                        setattr(self.state, "_interactive_drag_info", None)
-                    except Exception:
-                        pass
-            if hasattr(self.state, "_selected_param"):
-                try:
-                    del self.state._selected_param
-                except Exception:
-                    try:
-                        setattr(self.state, "_selected_param", None)
-                    except Exception:
-                        pass
-            self.log_message.emit("Selection ended.")
-        except Exception:
-            pass
-
-    # --- helpers for interactive drag updates ---
-    def _get_param_value(self, pname):
-        """Return the current numeric value for a parameter from state.model or model_spec, or None."""
-        try:
-            mdl = getattr(self.state, "model", None)
-            if mdl is not None and hasattr(mdl, pname):
-                return getattr(mdl, pname)
-            ms = getattr(self.state, "model_spec", None)
-            if ms is not None and pname in ms.params:
-                return ms.params[pname].value
-        except Exception:
-            pass
-        return None
-
-    def _set_param_value(self, pname, value):
-        """Set parameter value via apply_parameters (keeps single codepath/update)."""
-        try:
-            # coerce numeric types where sensible
-            if isinstance(value, (np.floating, np.integer)):
-                value = float(value)
-            self.apply_parameters({pname: value})
-        except Exception as e:
-            try:
-                self.log_message.emit(f"Failed to set {pname}: {e}")
-            except Exception:
-                pass
-
-    def _modifiers_match(self, modifiers, required_mods):
-        """Return True if all required_mods (list of names) are present in modifiers."""
-        try:
-            from PySide6.QtCore import Qt
-            if not required_mods:
-                return True
-            for r in required_mods:
-                rn = str(r).lower()
-                if rn == "ctrl" and not bool(modifiers & Qt.ControlModifier):
-                    return False
-                if rn == "shift" and not bool(modifiers & Qt.ShiftModifier):
-                    return False
-                if rn == "alt" and not bool(modifiers & Qt.AltModifier):
-                    return False
-            return True
-        except Exception:
-            return False
 
     def set_model(self, model_name: str):
         """Switch the active model specification to `model_name`."""
@@ -591,301 +850,88 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
-        # Notify any views that parameter values have changed so they can refresh their widgets.
+        # Notify views that parameters changed so UI can refresh widgets
         try:
             self.parameters_updated.emit()
         except Exception:
-            # avoid raising if no listeners or signal fails
             pass
-    
+
     # --------------------------
-    # Input event handlers (integrated from PySide_Fitter_PyQtGraph.py patterns)
+    # Curve selection management
     # --------------------------
-    def handle_plot_click(self, x, y, button):
-        """
-        Handle plot click events from the view.
-
-        Args:
-            x: X coordinate in data space
-            y: Y coordinate in data space
-            button: Mouse button used
-        """
+    def __init__(self, model_state=None):
+        super().__init__()
+        self.state = model_state or ModelState()
+        self._fit_worker = None
+        self._selected_curve_id = None  # currently selected curve ID (str or None)
+        self._datasets = []  # queued datasets [(dict)]
+        self._active_dataset_index = None
+        # Attempt to restore previously queued files from configuration
         try:
-            self.log_message.emit(f"Plot clicked at data coords: ({x:.3f}, {y:.3f})")
-            # Only use click here to start a drag session if a "drag" handler exists.
-            try:
-                from PySide6.QtCore import Qt
-                if button is not None and int(button) == int(Qt.LeftButton):
-                    drag_handlers = (self._input_map or {}).get("drag", [])
-                    if drag_handlers:
-                        # Start an interactive drag session storing handlers and initial coords.
-                        self.state._interactive_drag_info = {
-                            "handlers": drag_handlers,
-                            "last_x": float(x),
-                            "last_y": float(y)
-                        }
-                        self.log_message.emit(f"Interactive: started drag session for {[h.get('param') for h in drag_handlers]}")
-                # Do not perform immediate 'set' on plain click — clicks reserved for other UI parts.
-            except Exception:
-                pass
-
-            # Future: Add logic for selecting/manipulating peaks or markers
-            # For now, just log the event
-        except Exception as e:
-            self.log_message.emit(f"Error in handle_plot_click: {e}")
-
-    def handle_plot_mouse_move(self, x, y, buttons=None):
-        """
-        Handle plot mouse move events from the view.
-        If a button is pressed and the model declared a 'drag' action for a parameter,
-        update that parameter continuously. When no buttons are pressed, stop drag.
-        """
-        try:
-            from PySide6.QtCore import Qt
-            # Determine if left-button (or any) is pressed
-            left_pressed = False
-            try:
-                if buttons is not None:
-                    left_pressed = bool(int(buttons) & int(Qt.LeftButton))
-            except Exception:
-                left_pressed = False
-
-            # If a drag session was started, honor it
-            try:
-                drag_info = getattr(self.state, "_interactive_drag_info", None)
-                # If left button released, stop drag session (but keep selection until explicit end_selection)
-                if not left_pressed:
-                    if drag_info is not None:
-                        try:
-                            del self.state._interactive_drag_info
-                        except Exception:
-                            try:
-                                setattr(self.state, "_interactive_drag_info", None)
-                            except Exception:
-                                pass
-                    return
-
-                if drag_info is None:
-                    # No explicit session, but still allow declared handlers (fallback)
-                    handlers = (self._input_map or {}).get("drag", [])
-                    # If there is an explicit selected param, filter to it
-                    selected = getattr(self.state, "_selected_param", None)
-                    if selected:
-                        handlers = [h for h in handlers if h.get("param") == selected]
-                    if not handlers:
-                        return
-                    # Build a temporary session using handlers with last positions = current
-                    drag_info = {"handlers": handlers, "last_x": float(x), "last_y": float(y)}
-
-                # Compute deltas
-                last_x = float(drag_info.get("last_x", x))
-                last_y = float(drag_info.get("last_y", y))
-                dx = float(x) - last_x
-                dy = float(y) - last_y
-                # update last positions
-                drag_info["last_x"] = float(x)
-                drag_info["last_y"] = float(y)
-                # persist back if real session
-                if getattr(self.state, "_interactive_drag_info", None) is not None:
-                    self.state._interactive_drag_info = drag_info
-
-                # Apply handlers: allow separate horizontal ('h') and vertical ('v') actions
-                for h in drag_info.get("handlers", []):
-                    pname = h.get("param")
-                    act = h.get("action", {}) or {}
-                    # If action specifies separate horizontal/vertical sub-actions
-                    if isinstance(act, dict) and ("h" in act or "v" in act):
-                        # Horizontal part
-                        if "h" in act and abs(dx) > 0:
-                            ah = act["h"]
-                            # support 'set' (absolute), 'increment' (by step * sign), 'scale' (multiply by factor^sign)
-                            try:
-                                cur = self._get_param_value(pname)
-                                if ah.get("action") == "set":
-                                    val = x if ah.get("value_from", "x") == "x" else y
-                                    self._set_param_value(pname, float(val))
-                                elif ah.get("action") == "increment" and cur is not None:
-                                    step = float(ah.get("step", 0.01))
-                                    new = float(cur) + step * np.sign(dx)
-                                    self._set_param_value(pname, new)
-                                elif ah.get("action") == "scale" and cur is not None:
-                                    factor = float(ah.get("factor", 1.02))
-                                    mult = factor if dx > 0 else (1.0 / factor)
-                                    self._set_param_value(pname, float(cur) * mult)
-                            except Exception:
-                                pass
-                        # Vertical part — may target same param or different field via 'v.param'
-                        if "v" in act and abs(dy) > 0:
-                            av = act["v"]
-                            try:
-                                # by default vertical modifies the same parameter; handler may specify 'param_v'
-                                target = av.get("param", pname)
-                                cur = self._get_param_value(target)
-                                if av.get("action") == "set":
-                                    val = y if av.get("value_from", "y") == "y" else x
-                                    self._set_param_value(target, float(val))
-                                elif av.get("action") == "increment" and cur is not None:
-                                    step = float(av.get("step", 0.01))
-                                    new = float(cur) + step * np.sign(dy)
-                                    self._set_param_value(target, new)
-                                elif av.get("action") == "scale" and cur is not None:
-                                    factor = float(av.get("factor", 1.02))
-                                    mult = factor if dy > 0 else (1.0 / factor)
-                                    self._set_param_value(target, float(cur) * mult)
-                            except Exception:
-                                pass
-                    else:
-                        # Simple legacy behavior: treat action as a set-from-x on horizontal movement
-                        try:
-                            if abs(dx) > 0:
-                                if act.get("action") == "set":
-                                    vfrom = act.get("value_from", "x")
-                                    val = x if vfrom == "x" else y
-                                    self._set_param_value(pname, float(val))
-                                elif act.get("action") == "increment":
-                                    step = float(act.get("step", 0.01))
-                                    cur = self._get_param_value(pname)
-                                    if cur is not None:
-                                        new = float(cur) + step * np.sign(dx)
-                                        self._set_param_value(pname, new)
-                                elif act.get("action") == "scale":
-                                    factor = float(act.get("factor", 1.02))
-                                    cur = self._get_param_value(pname)
-                                    if cur is not None:
-                                        mult = factor if dx > 0 else (1.0 / factor)
-                                        self._set_param_value(pname, float(cur) * mult)
-                                else:
-                                    # fallback: absolute set to x
-                                    self._set_param_value(pname, float(x))
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
+            self._load_queue_from_config()
         except Exception:
-            # be quiet for mouse-move errors to avoid spam
+            pass
+
+    def set_selected_curve(self, curve_id: _typing.Optional[str]):
+        """Set the active curve selection. Emits a signal if changed."""
+        old = self._selected_curve_id
+        if old != curve_id:
+            self._selected_curve_id = curve_id
+            self.curve_selection_changed.emit(curve_id)
+            self.log_message.emit(
+                f"Curve selection changed: {curve_id if curve_id else 'None'}"
+            )
+
+    def get_selected_curve(self) -> _typing.Optional[str]:
+        """Return the currently selected curve ID (or None if nothing selected)."""
+        return self._selected_curve_id
+
+    def clear_selected_curve(self):
+        """Deselect any active curve."""
+        if self._selected_curve_id is not None:
+            self._selected_curve_id = None
+            self.curve_selection_changed.emit(None)
+            self.log_message.emit("Curve selection cleared.")
+
+    # --------------------------
+    # Peak interaction hooks (called from the view)
+    # --------------------------
+    def on_peak_selected(self, x, y):
+        """Optional hook called when the View announces a peak was selected.
+
+        Default: no-op. Implementations may choose to select a curve or
+        prepare for a drag.
+        """
+        # default: do nothing, but keep method present so the view can call it
+        return
+
+    def on_peak_moved(self, info: dict):
+        """Called when the View reports a peak was moved.
+
+        This will map a movement of the selected peak to the model's 'center'
+        parameter if present.
+        """
+        if not isinstance(info, dict):
+            return
+        new_center = info.get("center", None)
+        if new_center is None:
             return
 
-    def handle_key_press(self, key, modifiers):
-        """
-        Handle keyboard events from the plot.
-        
-        Args:
-            key: Qt key code
-            modifiers: Qt keyboard modifiers
-        """
+        # Apply into model via the standard apply_parameters path so state and
+        # model_spec are kept in sync and UI updates happen.
+        # Support both 'center' (lowercase) and 'Center' (capitalized) since
+        # some ModelSpecs (Gaussian) use "Center" while others use "center".
         try:
-            from PySide6.QtCore import Qt
-            
-            # Handle specific keys
-            if key == Qt.Key_Space:
-                self.log_message.emit("Space key: Clear selection")
-                # Future: Clear any active selections
-            elif key == Qt.Key_F:
-                # Example: Trigger fit
-                self.log_message.emit("F key: Run fit")
-                try:
-                    self.run_fit()
-                except Exception as e:
-                    self.log_message.emit(f"Fit failed: {e}")
-            elif key == Qt.Key_U:
-                # Example: Update plot
-                self.log_message.emit("U key: Update plot")
-                try:
-                    self.update_plot()
-                except Exception:
-                    pass
-            # Add more key handlers as needed
-                
-        except Exception as e:
-            self.log_message.emit(f"Error in handle_key_press: {e}")
-    
-    def handle_wheel_scroll(self, delta, modifiers):
-        """
-        Handle mouse wheel scroll events with keyboard modifiers.
-
-        Can be used to adjust parameters interactively.
-        """
-        try:
-            from PySide6.QtCore import Qt
-
-            is_ctrl = bool(modifiers & Qt.ControlModifier)
-            is_shift = bool(modifiers & Qt.ShiftModifier)
-            is_alt = bool(modifiers & Qt.AltModifier)
-
-            # Determine scroll direction
-            step_sign = 1 if delta > 0 else -1
-
-            # First consult input_map 'wheel' handlers
+            val = float(new_center)
+            # Try lowercase first (common), then capitalized for backward compatibility.
             try:
-                handlers = (self._input_map or {}).get("wheel", [])
-                # if a parameter is selected, limit handlers to that parameter
-                selected = getattr(self.state, "_selected_param", None)
-                if selected:
-                    handlers = [h for h in handlers if h.get("param") == selected]
-                for h in handlers:
-                    pname = h.get("param")
-                    act = h.get("action", {}) or {}
-                    req_mods = [m for m in (act.get("modifiers") or [])]
-                    if not self._modifiers_match(modifiers, req_mods):
-                        continue
-                    # action types: scale (multiply by factor^sign), increment (add step * sign)
-                    if act.get("action") == "scale":
-                        factor = float(act.get("factor", 1.05))
-                        try:
-                            cur = self._get_param_value(pname)
-                            if isinstance(cur, (int, float)):
-                                mult = factor if step_sign > 0 else (1.0 / factor)
-                                new_val = float(cur) * mult
-                                self.apply_parameters({pname: new_val})
-                                self.log_message.emit(f"Interactive: wheel scaled {pname} -> {new_val:.4g}")
-                        except Exception as e:
-                            self.log_message.emit(f"Wheel scale failed for {pname}: {e}")
-                    elif act.get("action") == "increment":
-                        step = float(act.get("step", 0.1))
-                        try:
-                            cur = self._get_param_value(pname)
-                            if isinstance(cur, (int, float)):
-                                new_val = float(cur) + step * step_sign
-                                self.apply_parameters({pname: new_val})
-                                self.log_message.emit(f"Interactive: wheel increment {pname} -> {new_val:.4g}")
-                        except Exception as e:
-                            self.log_message.emit(f"Wheel increment failed for {pname}: {e}")
-                # if any handler consumed, return
+                self.apply_parameters({"center": val})
             except Exception:
                 pass
-
-            # Fallback: previous behavior - adjust first numeric parameter with Ctrl only (but if selected, try selected param)
-            selected = getattr(self.state, "_selected_param", None)
-            if selected:
-                try:
-                    cur = self._get_param_value(selected)
-                    if isinstance(cur, (int, float)):
-                        factor = 1.1 if step_sign > 0 else 0.9
-                        new_val = float(cur) * factor
-                        self.apply_parameters({selected: new_val})
-                        self.log_message.emit(f"Wheel on selected: Adjusted {selected} to {new_val:.3f}")
-                        return
-                except Exception:
-                    pass
-
-            if is_ctrl and not is_shift and not is_alt:
-                try:
-                    specs = self.get_parameters()
-                    if specs:
-                        param_name = next(iter(specs.keys()))
-                        spec = specs[param_name]
-                        if isinstance(spec, dict):
-                            current_val = spec.get('value', 0)
-                        else:
-                            current_val = spec
-                        if isinstance(current_val, (int, float)):
-                            factor = 1.1 if step_sign > 0 else 0.9
-                            new_val = current_val * factor
-                            self.apply_parameters({param_name: new_val})
-                            self.log_message.emit(f"Ctrl+Wheel: Adjusted {param_name} to {new_val:.3f}")
-                except Exception as e:
-                    self.log_message.emit(f"Could not adjust parameter (fallback): {e}")
-
-        except Exception as e:
-            self.log_message.emit(f"Error in handle_wheel_scroll: {e}")
+            try:
+                self.apply_parameters({"Center": val})
+            except Exception:
+                pass
+            self.log_message.emit(f"Peak center updated -> {new_center}")
+        except Exception:
+            pass

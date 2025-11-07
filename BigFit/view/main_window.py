@@ -3,59 +3,49 @@ from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QPushButton,
     QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
     QDialog, QLineEdit, QDialogButtonBox, QHBoxLayout, QFileDialog,
-    QScrollArea, QSpinBox, QCheckBox
+    QScrollArea, QSpinBox, QCheckBox, QListWidget, QListWidgetItem,
+    QAbstractItemView
 )
-from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush
 import pyqtgraph as pg
 import numpy as np
-from .input_handler import InputHandler
+
+from view.view_box import CustomViewBox
+from view.input_handler import InputHandler
 
 # -- color palette (change these) --
 PLOT_BG = "white"       # plot background
 POINT_COLOR = "black"   # scatter points
 ERROR_COLOR = "black"   # error bars (can match points)
-FIT_COLOR = "red"     # fit line
+FIT_COLOR = "purple"     # fit line
 AXIS_COLOR = "black"    # axis and tick labels
 GRID_ALPHA = 0.5
 
 class MainWindow(QMainWindow):
-    # Signal emitted when parameters are updated (for reconnecting signals)
-    parameters_updated = Signal()
-    
     def __init__(self, viewmodel=None):
         super().__init__()
         self.setWindowTitle("PUMA Peak Fitter")
         self.viewmodel = viewmodel
         self.param_widgets = {}   # name -> widget
-        # debounce timers for auto-apply per-parameter
-        self._debounce_timers = {}
-        # debounce interval in milliseconds (tunable)
-        # debounce interval in milliseconds (tunable)
-        # 0 -> immediate apply; keep debounce available for future tuning
-        self.auto_apply_debounce_ms = 0
-        # whether auto-apply is enabled (can add UI toggle later)
-        self.auto_apply_enabled = True
-        # Last plotted arrays (x, y, y_fit) for selection logic
-        self._last_plot_arrays = (None, None, None)
-        # selected curve id/name (e.g., 'fit' or 'data')
-        self._selected_curve = None
-        # store original pen/visuals for curves so we can restore them
-        self._curve_original_opts = {}
+        self.curves = {}  # curve_id -> PlotDataItem
+        self.selected_curve_id = None
 
         # --- Central Plot ---
-        self.plot_widget = pg.PlotWidget(title="Data and Fit")
-        self.setCentralWidget(self.plot_widget)
+        # Initialize the plot widget inside _init_plot() to avoid duplicate
+        # creation and ensure a single central widget is used.
         self._init_plot()
-        
-        # --- Input Handler ---
-        self.input_handler = InputHandler(self.plot_widget)
-        self._connect_input_handler()
 
         # --- Docks ---
         self._init_left_dock()
         # create the bottom (log) dock before the right dock so logging is available
         self._init_bottom_dock()
         self._init_right_dock()
+        # Elements dock (separate dock placed under Parameters)
+        try:
+            self._init_elements_dock()
+        except Exception:
+            pass
 
         for dock in [self.left_dock, self.right_dock, self.bottom_dock]:
             dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -66,24 +56,73 @@ class MainWindow(QMainWindow):
     # Plot setup
     # --------------------------
     def _init_plot(self):
-        # Replace line-plot for data with a scatter + error bars,
-        # keep a line plot for the fit.
-        # apply background and grid
+        # Use custom ViewBox for interactive behavior
+        self.viewbox = CustomViewBox()
+        self.plot_widget = pg.PlotWidget(viewBox=self.viewbox, title="Data and Fit")
+        self.setCentralWidget(self.plot_widget)
+
+        # optional InputHandler for global mouse/key binding (pass viewbox so it can connect signals)
+        self.input_handler = InputHandler(self.viewbox, self.viewmodel)
+        self.plot_widget.installEventFilter(self.input_handler)
+        # Also install event filter on the ViewBox so we can intercept wheel events
+        # (ViewBox handles zoom by default). This allows the InputHandler to
+        # intercept wheel events when a curve is selected and use them for
+        # parameter updates instead of zooming.
+        try:
+            self.viewbox.installEventFilter(self.input_handler)
+            # keep a backref so the ViewBox can delegate wheel handling when needed
+            try:
+                setattr(self.viewbox, "_input_handler", self.input_handler)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # connect ViewBox interaction signals → ViewModel
+        if self.viewmodel:
+            self.viewbox.peakSelected.connect(self._on_peak_selected)
+            self.viewbox.peakDeselected.connect(lambda: self.viewmodel.set_selected_curve(None))
+            self.viewbox.peakMoved.connect(self._on_peak_moved)
+            self.viewbox.excludePointClicked.connect(self._on_exclude_point)
+            self.viewbox.excludeBoxDrawn.connect(self._on_exclude_box)
+
+        # connect curve selection changes
+        # Let the InputHandler know when the selected curve changes (no notify back)
+        try:
+            self.viewmodel.curve_selection_changed.connect(lambda cid: self.input_handler.set_selected_curve(cid, notify_vm=False))
+        except Exception:
+            pass
+        # Guard the secondary connect so the absence of a ViewModel or signal
+        # won't raise during initialization.
+        try:
+            self.viewmodel.curve_selection_changed.connect(self._on_curve_selected)
+        except Exception:
+            pass
+
+
+        # --- visual setup ---
         self.plot_widget.setBackground(PLOT_BG)
         self.plot_widget.showGrid(x=True, y=True, alpha=GRID_ALPHA)
 
         # scatter (data points)
         self.scatter = pg.ScatterPlotItem(size=6, pen=None, brush=pg.mkBrush(POINT_COLOR))
         self.plot_widget.addItem(self.scatter)
+        # excluded points overlay (small grey 'x' markers)
+        try:
+            self.excluded_scatter = pg.ScatterPlotItem(size=8, pen=pg.mkPen('gray'), brush=None, symbol='x')
+            self.plot_widget.addItem(self.excluded_scatter)
+        except Exception:
+            self.excluded_scatter = None
 
         # error bars
         self.err_item = pg.ErrorBarItem(pen=pg.mkPen(ERROR_COLOR))
         self.plot_widget.addItem(self.err_item)
 
-        # fit line
-        self.fit_curve = self.plot_widget.plot([], [], pen=pg.mkPen(FIT_COLOR, width=2), name="Fit")
+    # Note: fit overlay is managed by update_plot_data via self.curves['fit']
+    # so we avoid creating a separate persistent `self.fit_curve` here to
+    # prevent duplicate plot items.
 
-        # axis colors (safe: try each axis)
+        # axis colors
         for ax in ("left", "bottom", "right", "top"):
             try:
                 axis = self.plot_widget.getAxis(ax)
@@ -91,6 +130,47 @@ class MainWindow(QMainWindow):
                 axis.setTextPen(pg.mkPen(AXIS_COLOR))
             except Exception:
                 pass
+
+
+    # --------------------------
+    # Plot interaction callbacks
+    # --------------------------
+    def _on_peak_selected(self, x, y):
+        # Only forward peak selection to the ViewModel when a curve is selected
+        try:
+            if hasattr(self, "input_handler") and getattr(self.input_handler, "selected_curve_id", None) is None:
+                # ignore peak selection unless a curve is selected
+                self.append_log("Peak clicked but no curve selected — ignored.")
+                return
+        except Exception:
+            pass
+
+        if self.viewmodel and hasattr(self.viewmodel, "on_peak_selected"):
+            self.viewmodel.on_peak_selected(x, y)
+        self.append_log(f"Selected peak near ({x:.3f}, {y:.3f})")
+
+    def _on_peak_moved(self, info):
+        # Only forward peak movement when a curve is selected
+        try:
+            if hasattr(self, "input_handler") and getattr(self.input_handler, "selected_curve_id", None) is None:
+                self.append_log("Peak moved but no curve selected — ignored.")
+                return
+        except Exception:
+            pass
+
+        if self.viewmodel and hasattr(self.viewmodel, "on_peak_moved"):
+            self.viewmodel.on_peak_moved(info)
+        self.append_log(f"Moved peak → center={info.get('center', 0):.3f}")
+
+    def _on_exclude_point(self, x, y):
+        if self.viewmodel and hasattr(self.viewmodel, "on_exclude_point"):
+            self.viewmodel.on_exclude_point(x, y)
+        self.append_log(f"Toggled exclusion at ({x:.3f}, {y:.3f})")
+
+    def _on_exclude_box(self, x0, y0, x1, y1):
+        if self.viewmodel and hasattr(self.viewmodel, "on_exclude_box"):
+            self.viewmodel.on_exclude_box(x0, y0, x1, y1)
+        self.append_log(f"Box exclusion from ({x0:.3f}, {y0:.3f}) → ({x1:.3f}, {y1:.3f})")
 
     # --------------------------
     # Docks
@@ -104,16 +184,54 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("Save Data")
         fit_btn = QPushButton("Run Fit")
         update_btn = QPushButton("Update Plot")
-        reload_cfg_btn = QPushButton("Reload Config")
         config_btn = QPushButton("Edit Config")
 
         layout.addWidget(QLabel("Data Controls"))
         layout.addWidget(load_btn)
         layout.addWidget(save_btn)
         layout.addWidget(fit_btn)
-        layout.addWidget(reload_cfg_btn)
         layout.addWidget(config_btn)
         layout.addWidget(update_btn)
+        # Exclude toggle (click to enable box/point exclusion)
+        exclude_btn = QPushButton("Exclude")
+        exclude_btn.setCheckable(True)
+        layout.addWidget(exclude_btn)
+        # keep a reference for external updates (e.g. hotkey toggles)
+        self.exclude_btn = exclude_btn
+        # wire the button to the viewbox so clicking updates exclude mode
+        try:
+            if hasattr(self, "viewbox") and self.viewbox is not None:
+                exclude_btn.toggled.connect(self.viewbox.set_exclude_mode)
+                # Keep the button state synced when the viewbox mode is changed
+                if hasattr(self.viewbox, "excludeModeChanged"):
+                    try:
+                        self.viewbox.excludeModeChanged.connect(exclude_btn.setChecked)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Include All button placed directly under the Exclude toggle for convenience
+        include_all_btn = QPushButton("Include All")
+        layout.addWidget(include_all_btn)
+
+        layout.addWidget(QLabel("Loaded Files"))
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.file_list)
+
+        file_btn_row = QHBoxLayout()
+        remove_btn = QPushButton("Remove Selected")
+        clear_list_btn = QPushButton("Clear List")
+        file_btn_row.addWidget(remove_btn)
+        file_btn_row.addWidget(clear_list_btn)
+        layout.addLayout(file_btn_row)
+
+        self.file_remove_btn = remove_btn
+        self.file_clear_btn = clear_list_btn
+        # keep a backref to the include-all button placed above
+        self.include_all_btn = include_all_btn
+
         layout.addStretch(1)
 
         self.left_dock.setWidget(left_widget)
@@ -125,8 +243,422 @@ class MainWindow(QMainWindow):
             save_btn.clicked.connect(self.viewmodel.save_data)
             fit_btn.clicked.connect(self.viewmodel.run_fit)
             update_btn.clicked.connect(self.viewmodel.update_plot)
-            reload_cfg_btn.clicked.connect(getattr(self.viewmodel, "reload_config", lambda: None))
+            # The file-list Clear button handles clearing queued datasets (see below)
             config_btn.clicked.connect(self._on_edit_config_clicked)
+            # Exclude mode button toggles the CustomViewBox exclude_mode
+            def _on_exclude_toggled(checked):
+                # Toggle exclude mode in the ViewBox and log the change.
+                # IMPORTANT: do not touch or reapply any model parameters here —
+                # that responsibility belongs to the Apply/Run Fit controls in the
+                # parameter panel and ViewModel. Removing parameter snapshot/reapply
+                # prevents accidental fit redraws when toggling exclusion mode.
+                try:
+                    # Setting exclude mode on the viewbox updates interaction only
+                    if hasattr(self, 'viewbox') and self.viewbox is not None:
+                        self.viewbox.set_exclude_mode(bool(checked))
+
+                    # Keep input handler selection state unchanged (no notify)
+                    try:
+                        if hasattr(self, 'input_handler'):
+                            self.input_handler.selected_curve_id = getattr(self.input_handler, 'selected_curve_id', None)
+                    except Exception:
+                        pass
+
+                    if checked:
+                        self.append_log("Exclude mode enabled.")
+                    else:
+                        self.append_log("Exclude mode disabled.")
+                except Exception as e:
+                    self.append_log(f"Failed to toggle exclude mode: {e}")
+
+            exclude_btn.toggled.connect(_on_exclude_toggled)
+            include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
+
+            try:
+                self.viewmodel.files_updated.connect(self._on_files_updated)
+            except Exception:
+                pass
+            self.file_list.currentRowChanged.connect(self._on_file_selected)
+            remove_btn.clicked.connect(self._on_remove_file_clicked)
+            clear_list_btn.clicked.connect(self._on_clear_files_clicked)
+            # Element list wiring (connect if element widgets exist in a separate dock)
+            if hasattr(self, 'element_list'):
+                try:
+                    self.element_list.currentRowChanged.connect(self._on_element_selected)
+                except Exception:
+                    pass
+            if hasattr(self, 'element_add_btn'):
+                try:
+                    self.element_add_btn.clicked.connect(self._on_element_added_clicked)
+                except Exception:
+                    pass
+            if hasattr(self, 'element_remove_btn'):
+                try:
+                    self.element_remove_btn.clicked.connect(self._on_element_remove_clicked)
+                except Exception:
+                    pass
+            try:
+                self.viewmodel.notify_file_queue()
+            except Exception:
+                pass
+            try:
+                self._refresh_element_list()
+            except Exception:
+                pass
+        else:
+            self._update_file_action_state()
+
+        # ensure element list is populated even when no ViewModel present
+        try:
+            self._refresh_element_list()
+        except Exception:
+            pass
+
+        self._update_file_action_state()
+
+    def _on_files_updated(self, files):
+        if not hasattr(self, "file_list"):
+            return
+
+        entries = files or []
+        active_row = -1
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+
+        for entry in entries:
+            entry_dict = entry if isinstance(entry, dict) else {}
+            name = entry_dict.get("name")
+            if not name:
+                idx = entry_dict.get("index")
+                name = f"Dataset {idx + 1}" if idx is not None else "Dataset"
+
+            item = QListWidgetItem(name)
+            info_obj = entry_dict.get("info")
+            info = info_obj if isinstance(info_obj, dict) else {}
+            path = entry_dict.get("path")
+            if not path and info:
+                path = info.get("path")
+            if path:
+                item.setToolTip(str(path))
+            if entry_dict.get("active"):
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+            item.setData(Qt.UserRole, entry)
+            self.file_list.addItem(item)
+            if entry_dict.get("active"):
+                active_row = self.file_list.count() - 1
+
+        if active_row >= 0:
+            self.file_list.setCurrentRow(active_row)
+
+        self.file_list.blockSignals(False)
+        self._update_file_action_state()
+
+    def _on_file_selected(self, row):
+        self._update_file_action_state()
+        if not self.viewmodel or row is None or row < 0:
+            return
+        try:
+            self.viewmodel.activate_file(row)
+        except Exception as e:
+            self.append_log(f"Failed to load dataset: {e}")
+
+    def _on_remove_file_clicked(self):
+        if not self.viewmodel:
+            return
+        row = self.file_list.currentRow() if hasattr(self, "file_list") else -1
+        if row < 0:
+            return
+        try:
+            self.viewmodel.remove_file_at(row)
+        except Exception as e:
+            self.append_log(f"Failed to remove dataset: {e}")
+
+    def _on_clear_files_clicked(self):
+        if not self.viewmodel:
+            return
+        try:
+            if hasattr(self.viewmodel, "clear_plot"):
+                self.viewmodel.clear_plot()
+            else:
+                getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
+        except Exception as e:
+            self.append_log(f"Failed to clear datasets: {e}")
+
+    # --------------------------
+    # Element list handlers
+    # --------------------------
+    def _on_element_selected(self, row):
+        """Called when user selects an element in the Elements list.
+        Tries to select the corresponding curve via the ViewModel if available
+        otherwise falls back to local highlighting.
+        """
+        try:
+            if not hasattr(self, 'element_list'):
+                return
+            if row is None or row < 0:
+                return
+            item = self.element_list.item(row)
+            if item is None:
+                return
+            data = item.data(Qt.UserRole)
+            elem_id = None
+            if isinstance(data, dict):
+                elem_id = data.get('id') or data.get('name') or item.text()
+            else:
+                elem_id = item.text()
+
+            # prefer ViewModel selection API when available
+            if self.viewmodel and hasattr(self.viewmodel, 'set_selected_curve'):
+                try:
+                    self.viewmodel.set_selected_curve(elem_id)
+                except Exception:
+                    pass
+            else:
+                try:
+                    # fallback to view-level highlighting
+                    self._on_curve_selected(elem_id)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self.append_log(f"Element select failed: {e}")
+            except Exception:
+                pass
+
+    def _on_element_added_clicked(self):
+        """Add a new element. Calls ViewModel.add_component_to_model() if present;
+        otherwise adds a local placeholder item so the UI remains usable.
+        """
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, 'add_component_to_model'):
+                try:
+                    self.viewmodel.add_component_to_model()
+                except Exception as e:
+                    self.append_log(f"ViewModel failed to add component: {e}")
+                # allow ViewModel to emit updates; refresh local list
+                try:
+                    self._refresh_element_list()
+                except Exception:
+                    pass
+                return
+
+            # local placeholder behavior
+            name = f"element{self.element_list.count() + 1}"
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, {'id': name, 'name': name})
+            self.element_list.addItem(item)
+            self.element_list.setCurrentRow(self.element_list.count() - 1)
+            self.append_log(f"Added placeholder element: {name}")
+        except Exception as e:
+            try:
+                self.append_log(f"Failed to add element: {e}")
+            except Exception:
+                pass
+
+    def _on_element_remove_clicked(self):
+        """Remove the currently selected element. Attempts to call ViewModel
+        removal APIs if present, otherwise removes from the local list.
+        """
+        try:
+            if not hasattr(self, 'element_list'):
+                return
+            row = self.element_list.currentRow()
+            if row is None or row < 0:
+                return
+
+            # Prevent removing the special 'model' entry or the last remaining element
+            total = self.element_list.count() if hasattr(self, 'element_list') else 0
+            # if only one item remains, disallow removal
+            if total <= 1:
+                try:
+                    self.append_log("Cannot remove the last element.")
+                except Exception:
+                    pass
+                return
+
+            # inspect selected item data to prevent removing the model placeholder
+            try:
+                it = self.element_list.item(row)
+                itdata = it.data(Qt.UserRole) if it is not None else None
+                if isinstance(itdata, dict) and itdata.get('id') == 'model':
+                    try:
+                        self.append_log("Cannot remove the active model entry.")
+                    except Exception:
+                        pass
+                    return
+            except Exception:
+                pass
+
+            # prefer ViewModel removal APIs
+            if self.viewmodel and hasattr(self.viewmodel, 'remove_component_at'):
+                try:
+                    self.viewmodel.remove_component_at(row)
+                    self._refresh_element_list()
+                    return
+                except Exception:
+                    pass
+            if self.viewmodel and hasattr(self.viewmodel, 'remove_last_component'):
+                try:
+                    self.viewmodel.remove_last_component()
+                    self._refresh_element_list()
+                    return
+                except Exception:
+                    pass
+
+            # fallback: remove from UI only
+            item = self.element_list.item(row)
+            # protect model item
+            if item is not None:
+                try:
+                    dat = item.data(Qt.UserRole)
+                    if isinstance(dat, dict) and dat.get('id') == 'model':
+                        try:
+                            self.append_log("Cannot remove the active model entry.")
+                        except Exception:
+                            pass
+                        return
+                except Exception:
+                    pass
+            taken = self.element_list.takeItem(row)
+            if taken:
+                self.append_log(f"Removed element: {taken.text()}")
+            # clear selection in ViewModel if present
+            try:
+                if self.viewmodel and hasattr(self.viewmodel, 'set_selected_curve'):
+                    self.viewmodel.set_selected_curve(None)
+                else:
+                    self._on_curve_selected(None)
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                self.append_log(f"Failed to remove element: {e}")
+            except Exception:
+                pass
+
+    def _refresh_element_list(self):
+        """Populate the element list from the ViewModel/state when possible.
+        This is tolerant of non-composite specs and will try to infer prefixes
+        from parameter names as a fallback.
+        """
+        try:
+            if not hasattr(self, 'element_list'):
+                return
+            self.element_list.blockSignals(True)
+            self.element_list.clear()
+            if self.viewmodel and hasattr(self.viewmodel, 'state') and hasattr(self.viewmodel.state, 'model_spec'):
+                spec = self.viewmodel.state.model_spec
+                comps = getattr(spec, '_components', None)
+                if isinstance(comps, list) and len(comps) > 0:
+                    for prefix, sub in comps:
+                        name = prefix.rstrip('_')
+                        item = QListWidgetItem(name)
+                        item.setData(Qt.UserRole, {'id': prefix, 'name': name})
+                        self.element_list.addItem(item)
+                else:
+                    # infer prefixes from param names (prefix_name pattern)
+                    params = getattr(spec, 'params', {}) or {}
+                    prefixes = {}
+                    for k in params.keys():
+                        if '_' in k:
+                            p = k.split('_', 1)[0] + '_'
+                            prefixes[p] = prefixes.get(p, 0) + 1
+                    for p in sorted(prefixes.keys()):
+                        name = p.rstrip('_')
+                        item = QListWidgetItem(name)
+                        item.setData(Qt.UserRole, {'id': p, 'name': name})
+                        self.element_list.addItem(item)
+            # Prepend an entry representing the active/current model so it's always visible
+            try:
+                model_label = None
+                if self.viewmodel and hasattr(self.viewmodel, 'state'):
+                    model_label = getattr(self.viewmodel.state, 'model_name', None)
+                if not model_label:
+                    model_label = 'Model'
+                # Avoid duplicate if a component uses the same id
+                first = self.element_list.item(0)
+                # Safely determine whether the first item is the injected 'model'
+                first_has_model_id = False
+                if first is not None:
+                    try:
+                        fd = first.data(Qt.UserRole)
+                        if isinstance(fd, dict) and fd.get('id') == 'model':
+                            first_has_model_id = True
+                    except Exception:
+                        first_has_model_id = False
+                if first is None or not first_has_model_id:
+                    model_item = QListWidgetItem(str(model_label))
+                    model_item.setData(Qt.UserRole, {'id': 'model', 'name': model_label})
+                    # make it visually distinct (bold + subtle background)
+                    try:
+                        f = model_item.font()
+                        f.setBold(True)
+                        model_item.setFont(f)
+                    except Exception:
+                        pass
+                    try:
+                        model_item.setBackground(QBrush(QColor("#f2f2f7")))
+                        model_item.setToolTip("Active model (non-removable)")
+                    except Exception:
+                        pass
+                    self.element_list.insertItem(0, model_item)
+            except Exception:
+                pass
+            # If nothing detected (no composite components or inferred prefixes),
+            # ensure we include the active/current model as a single element so
+            # the UI always shows at least one selectable entry.
+            if self.element_list.count() == 0:
+                try:
+                    name = None
+                    if self.viewmodel and hasattr(self.viewmodel, 'state'):
+                        name = getattr(self.viewmodel.state, 'model_name', None)
+                    if not name:
+                        name = "Model"
+                    # attempt to annotate with a center value if available
+                    tooltip = None
+                    try:
+                        mdl = getattr(self.viewmodel.state, 'model', None) if self.viewmodel and hasattr(self.viewmodel, 'state') else None
+                        if mdl is not None:
+                            center_val = None
+                            if hasattr(mdl, 'center'):
+                                center_val = getattr(mdl, 'center')
+                            elif hasattr(mdl, 'Center'):
+                                center_val = getattr(mdl, 'Center')
+                            if center_val is not None:
+                                tooltip = f"center={center_val}"
+                    except Exception:
+                        tooltip = None
+
+                    item = QListWidgetItem(str(name))
+                    item.setData(Qt.UserRole, {'id': 'model', 'name': name})
+                    if tooltip:
+                        item.setToolTip(tooltip)
+                    self.element_list.addItem(item)
+                except Exception:
+                    pass
+
+            self.element_list.blockSignals(False)
+        except Exception:
+            try:
+                self.element_list.blockSignals(False)
+            except Exception:
+                pass
+
+    def _update_file_action_state(self):
+        if not hasattr(self, "file_list"):
+            return
+        has_files = self.file_list.count() > 0
+        has_selection = self.file_list.currentRow() >= 0
+        if hasattr(self, "file_remove_btn"):
+            self.file_remove_btn.setEnabled(has_selection)
+        if hasattr(self, "file_clear_btn"):
+            # Allow Clear List to be used even when the visible list is empty.
+            # This helps when a file is loaded but for some reason doesn't appear
+            # in the list — the user can still force-clear queued/loaded state.
+            self.file_clear_btn.setEnabled(True)
 
     def _init_right_dock(self):
         # Replaced static parameter controls with a dynamic, scrollable form.
@@ -136,18 +668,40 @@ class MainWindow(QMainWindow):
 
         # Model selector placed at the top of the parameters panel
         self.model_selector = QComboBox()
-        # Populate model selector dynamically from the models package when possible.
+        # Populate model selector dynamically from discovered model specs where possible.
         try:
+            # lazy import to avoid circular imports at module import time
             from models import get_available_model_names
-            names = get_available_model_names() or []
-            # ensure a sensible fallback
-            if not names:
-                names = ["Voigt", "DHO+Voigt", "Gaussian", "DHO"]
+            import re
+
+            def _pretty(name: str) -> str:
+                # remove trailing 'ModelSpec' and split CamelCase into words
+                s = re.sub(r"ModelSpec$", "", name)
+                s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
+                return s.strip()
+
+            spec_class_names = get_available_model_names()
+            display_names = [_pretty(n) for n in spec_class_names]
+            # ensure we have at least the historical defaults as fallback
+            if display_names:
+                self.model_selector.addItems(display_names)
+            else:
+                self.model_selector.addItems(["Voigt", "Gaussian"])
         except Exception:
-            names = ["Voigt", "DHO+Voigt", "Gaussian", "DHO"]
-        self.model_selector.addItems(names)
+            # Fall back to the original static list if discovery fails
+            self.model_selector.addItems(["Voigt", "Gaussian"])
         vlayout.addWidget(QLabel("Model:"))
         vlayout.addWidget(self.model_selector)
+
+        # Chi-squared display (placed above the parameter list)
+        self.chi_label = QLabel("Chi-squared: N/A")
+        try:
+            f = self.chi_label.font()
+            f.setPointSize(max(8, f.pointSize() - 1))
+            self.chi_label.setFont(f)
+        except Exception:
+            pass
+        vlayout.addWidget(self.chi_label)
 
         # set initial selection from viewmodel/state if available
         try:
@@ -168,6 +722,11 @@ class MainWindow(QMainWindow):
                     self.viewmodel.set_model(name)
                 # refresh UI parameters for the selected model
                 self._refresh_parameters()
+                # ensure elements list reflects the newly selected model
+                try:
+                    self._refresh_element_list()
+                except Exception:
+                    pass
             except Exception as e:
                 self.append_log(f"Failed to switch model: {e}")
 
@@ -194,19 +753,95 @@ class MainWindow(QMainWindow):
 
         self.right_dock.setWidget(container)
         self.addDockWidget(Qt.RightDockWidgetArea, self.right_dock)
+        # Make the parameters dock wider by default so controls and hints are visible
+        try:
+            # A minimum width allows the user to resize smaller/larger while
+            # providing a comfortable default layout on startup.
+            self.right_dock.setMinimumWidth(360)
+        except Exception:
+            pass
 
         # Connect to ViewModel (if present)
         if self.viewmodel:
             apply_btn.clicked.connect(self._on_apply_clicked)
             refresh_btn.clicked.connect(self._refresh_parameters)
-            # When the ViewModel reports parameter changes (e.g. after a fit), refresh UI
-            try:
-                if hasattr(self.viewmodel, "parameters_updated"):
-                    self.viewmodel.parameters_updated.connect(self._refresh_parameters)
-            except Exception:
-                pass
             # initial populate
             self._refresh_parameters()
+            # Update elements list whenever parameters (and model selection) change
+            try:
+                self.viewmodel.parameters_updated.connect(self._refresh_element_list)
+            except Exception:
+                pass
+
+    def _init_elements_dock(self):
+        """Create a separate dock on the right to host model elements (peaks).
+        This sits beneath the Parameters dock and holds the element list and
+        add/remove buttons.
+        """
+        self.elements_dock = QDockWidget("Elements", self)
+        container = QWidget()
+        vlayout = QVBoxLayout(container)
+
+        # light-weight element list
+        self.element_list = QListWidget()
+        self.element_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        vlayout.addWidget(self.element_list)
+
+        # add / remove row
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Add Element")
+        remove_btn = QPushButton("Remove Element")
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(remove_btn)
+        vlayout.addLayout(btn_row)
+
+        # keep references for other methods
+        self.element_add_btn = add_btn
+        self.element_remove_btn = remove_btn
+
+        self.elements_dock.setWidget(container)
+        # Prefer placing the Elements dock to the right of the Log (bottom)
+        # dock so it appears at the lower-right corner of the UI. If the
+        # bottom dock is not present, fall back to placing it in the right
+        # column under Parameters (previous behavior).
+        try:
+            # attempt to add into the bottom area first
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.elements_dock)
+            if hasattr(self, 'bottom_dock'):
+                # split horizontally so the elements dock sits to the right of the Log
+                self.splitDockWidget(self.bottom_dock, self.elements_dock, Qt.Horizontal)
+        except Exception:
+            try:
+                # fallback: add to the right column and stack under Parameters
+                self.addDockWidget(Qt.RightDockWidgetArea, self.elements_dock)
+                if hasattr(self, 'right_dock'):
+                    self.splitDockWidget(self.right_dock, self.elements_dock, Qt.Vertical)
+            except Exception:
+                pass
+        try:
+            self.elements_dock.setMinimumWidth(260)
+        except Exception:
+            pass
+
+        # Wire UI handlers
+        try:
+            self.element_list.currentRowChanged.connect(self._on_element_selected)
+        except Exception:
+            pass
+        try:
+            add_btn.clicked.connect(self._on_element_added_clicked)
+        except Exception:
+            pass
+        try:
+            remove_btn.clicked.connect(self._on_element_remove_clicked)
+        except Exception:
+            pass
+
+        # Populate initial contents
+        try:
+            self._refresh_element_list()
+        except Exception:
+            pass
 
     def _init_bottom_dock(self):
         self.bottom_dock = QDockWidget("Log", self)
@@ -242,34 +877,174 @@ class MainWindow(QMainWindow):
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y_data, dtype=float)
 
-        self.scatter.setData(x=x_arr, y=y_arr)
-
-        # Draw vertical error bars when provided
-        if y_err is not None and len(y_err) == len(y_arr):
-            top = np.abs(np.asarray(y_err, dtype=float))
-            bottom = top
-            self.err_item.setData(x=x_arr, y=y_arr, top=top, bottom=bottom)
-        else:
-            # clear error bars using numpy arrays (avoid passing Python lists)
-            empty = np.array([], dtype=float)
+        # If the ViewModel exposes an exclusion mask, split included/excluded points
+        excl_mask = None
+        try:
+            if self.viewmodel is not None and hasattr(self.viewmodel, "state") and hasattr(self.viewmodel.state, "excluded"):
+                excl_mask = np.asarray(self.viewmodel.state.excluded, dtype=bool)
+                # ensure mask length matches
+                if len(excl_mask) != len(x_arr):
+                    # mismatch — ignore mask and log for debugging
+                    try:
+                        self.append_log(f"Exclusion mask length {len(excl_mask)} != x length {len(x_arr)} — ignoring exclusions")
+                    except Exception:
+                        pass
+                    excl_mask = None
+        except Exception:
+            excl_mask = None
+        # normalize incoming error array as numpy array when present
+        y_err_arr = None
+        if y_err is not None:
             try:
-                self.err_item.setData(x=empty, y=empty, top=empty, bottom=empty)
+                y_err_arr = np.asarray(y_err, dtype=float)
+            except Exception:
+                y_err_arr = None
+
+        if excl_mask is None:
+            # no exclusions — show all points in primary scatter
+            self.scatter.setData(x=x_arr, y=y_arr)
+            # clear excluded overlay
+            if self.excluded_scatter is not None:
+                try:
+                    self.excluded_scatter.setData(x=np.array([], dtype=float), y=np.array([], dtype=float))
+                except Exception:
+                    pass
+            # Draw vertical error bars when provided (all points)
+            if y_err_arr is not None and len(y_err_arr) == len(y_arr):
+                top = np.abs(y_err_arr)
+                bottom = top
+                self.err_item.setData(x=x_arr, y=y_arr, top=top, bottom=bottom)
+            else:
+                # clear error bars using numpy arrays (avoid passing Python lists)
+                empty = np.array([], dtype=float)
+                try:
+                    self.err_item.setData(x=empty, y=empty, top=empty, bottom=empty)
+                except Exception:
+                    pass
+        else:
+            incl = ~excl_mask
+            try:
+                x_in = x_arr[incl]
+                y_in = y_arr[incl]
+            except Exception:
+                x_in = np.array([], dtype=float)
+                y_in = np.array([], dtype=float)
+            try:
+                x_ex = x_arr[excl_mask]
+                y_ex = y_arr[excl_mask]
+            except Exception:
+                x_ex = np.array([], dtype=float)
+                y_ex = np.array([], dtype=float)
+
+            self.scatter.setData(x=x_in, y=y_in)
+            if self.excluded_scatter is not None:
+                try:
+                    self.excluded_scatter.setData(x=x_ex, y=y_ex)
+                except Exception:
+                    pass
+
+            # Error bars only for included points
+            if y_err_arr is not None:
+                try:
+                    # if full-length, index it by included mask; if it already matches included length, use directly
+                    if len(y_err_arr) == len(y_arr):
+                        top = np.abs(y_err_arr[incl])
+                        bottom = top
+                        self.err_item.setData(x=x_in, y=y_in, top=top, bottom=bottom)
+                    elif len(y_err_arr) == len(x_in):
+                        top = np.abs(y_err_arr)
+                        bottom = top
+                        self.err_item.setData(x=x_in, y=y_in, top=top, bottom=bottom)
+                    else:
+                        empty = np.array([], dtype=float)
+                        try:
+                            self.err_item.setData(x=empty, y=empty, top=empty, bottom=empty)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        # Fit line (if present)
+        # Compute and display reduced chi-squared (2 decimals) and Cash statistic (delegated to ViewModel)
+        try:
+            # determine included arrays (preserve original inclusion logic)
+            if excl_mask is None:
+                xin = x_arr
+                yin = y_arr
+                if y_err_arr is not None and len(y_err_arr) == len(y_arr):
+                    errin = y_err_arr
+                else:
+                    errin = None
+                yfit_for_chi = None if y_fit is None else np.asarray(y_fit, dtype=float)
+            else:
+                xin = x_in if 'x_in' in locals() else np.array([], dtype=float)
+                yin = y_in if 'y_in' in locals() else np.array([], dtype=float)
+                if y_err_arr is None:
+                    errin = None
+                else:
+                    if len(y_err_arr) == len(y_arr):
+                        errin = y_err_arr[~excl_mask]
+                    elif len(y_err_arr) == len(xin):
+                        errin = y_err_arr
+                    else:
+                        errin = None
+                if y_fit is None:
+                    yfit_for_chi = None
+                else:
+                    yfit_full = np.asarray(y_fit, dtype=float)
+                    if len(yfit_full) == len(x_arr):
+                        yfit_for_chi = yfit_full[~excl_mask]
+                    elif len(yfit_full) == len(xin):
+                        yfit_for_chi = yfit_full
+                    else:
+                        yfit_for_chi = None
+
+            reduced_str = "N/A"
+            red_cash_str = "N/A"
+
+            if self.viewmodel is not None and yfit_for_chi is not None and xin.size > 0:
+                try:
+                    n_params = max(0, len(self.param_widgets))
+                    stats = self.viewmodel.compute_statistics(y_fit=yfit_for_chi, n_params=n_params)
+                    red = stats.get("reduced_chi2")
+                    red_cash = stats.get("reduced_cash")
+                    if red is not None:
+                        reduced_str = f"{red:.2f}"
+                    if red_cash is not None:
+                        red_cash_str = f"{red_cash:.2f}"
+                except Exception:
+                    reduced_str = "N/A"
+                    red_cash_str = "N/A"
+
+            label_text = f"reduced χ²={reduced_str}; reduced Cash={red_cash_str}"
+            try:
+                if hasattr(self, 'chi_label') and self.chi_label is not None:
+                    self.chi_label.setText(label_text)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                if hasattr(self, 'chi_label') and self.chi_label is not None:
+                    self.chi_label.setText("reduced χ²=N/A; Cash=N/A")
             except Exception:
                 pass
 
-        # Fit line (if present)
         if y_fit is not None:
             yfit_arr = np.asarray(y_fit, dtype=float)
-            self.fit_curve.setData(x_arr, yfit_arr)
+            if "fit" not in self.curves:
+                curve = self.plot_widget.plot(x_arr, yfit_arr, pen=pg.mkPen(FIT_COLOR, width=2))
+                self.curves["fit"] = curve
+                curve.curve_id = "fit"
+                # Enable clicking on curve
+                curve.scene().sigMouseClicked.connect(lambda ev, cid="fit": self._on_curve_clicked(ev, cid))
+            else:
+                self.curves["fit"].setData(x_arr, yfit_arr)
         else:
-            yfit_arr = None
-            self.fit_curve.clear()
+            # remove fit curve if exists
+            if "fit" in self.curves:
+                self.plot_widget.removeItem(self.curves["fit"])
+                del self.curves["fit"]
 
-        # store last plotted arrays for selection logic
-        try:
-            self._last_plot_arrays = (x_arr, y_arr, yfit_arr)
-        except Exception:
-            self._last_plot_arrays = (None, None, None)
 
     def _on_apply_clicked(self):
         if not self.viewmodel:
@@ -300,88 +1075,6 @@ class MainWindow(QMainWindow):
             self.append_log("Parameters applied.")
         except Exception as e:
             self.append_log(f"Failed to apply parameters: {e}")
-
-    def _auto_apply_param(self, name, widget):
-        """Auto-apply a single parameter from its widget when the widget value changes.
-
-        This reads the new value from the widget and calls ViewModel.apply_parameters
-        with a single-entry dict. Signals are connected only after widgets are
-        initialized to avoid spurious triggers during panel population.
-        """
-        if not self.viewmodel:
-            return
-        try:
-            # Extract value depending on widget type
-            val = None
-            if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
-                val = widget.value()
-            elif isinstance(widget, QCheckBox):
-                val = widget.isChecked()
-            elif isinstance(widget, QComboBox):
-                val = widget.currentText()
-            elif isinstance(widget, QLineEdit):
-                val = widget.text()
-            else:
-                # fallback: try a value() callable
-                try:
-                    val = getattr(widget, "value")()
-                except Exception:
-                    val = None
-
-            # Apply single-parameter update via the ViewModel
-            try:
-                self.viewmodel.apply_parameters({name: val})
-            except Exception as e:
-                # do not raise; log instead
-                try:
-                    self.append_log(f"Auto-apply failed for {name}: {e}")
-                except Exception:
-                    pass
-        except Exception:
-            # be quiet on widget-read errors
-            pass
-
-    def _schedule_auto_apply(self, name, widget):
-        """Schedule a debounced auto-apply for parameter `name`.
-
-        Rapid widget changes will reset the timer; the ViewModel.apply will be
-        invoked only after `self.auto_apply_debounce_ms` of inactivity.
-        """
-        if not getattr(self, "auto_apply_enabled", True):
-            return
-        try:
-            # get existing timer or create one
-            t = self._debounce_timers.get(name)
-            if t is None:
-                t = QTimer(self)
-                t.setSingleShot(True)
-                # connect to call the actual apply
-                t.timeout.connect(lambda n=name, w=widget: self._auto_apply_param(n, w))
-                self._debounce_timers[name] = t
-            else:
-                # update the connected widget reference by reconnecting on timeout
-                try:
-                    # disconnect previous and reconnect to use the latest widget
-                    try:
-                        t.timeout.disconnect()
-                    except Exception:
-                        pass
-                    t.timeout.connect(lambda n=name, w=widget: self._auto_apply_param(n, w))
-                except Exception:
-                    pass
-
-            # restart timer
-            try:
-                t.stop()
-            except Exception:
-                pass
-            t.start(int(self.auto_apply_debounce_ms))
-        except Exception:
-            # fallback: immediate apply on any error
-            try:
-                self._auto_apply_param(name, widget)
-            except Exception:
-                pass
 
     # --------------------------
     # Dynamic parameter helpers
@@ -418,7 +1111,7 @@ class MainWindow(QMainWindow):
         Each specs entry may be:
           name: value                      # infer type from value
           name: { 'value': v, 'type': 'float'|'int'|'str'|'bool'|'choice',
-                  'min': ..., 'max': ..., 'choices': [...], 'decimals': ..., 'step': ..., 'input': ..., 'hint': ... }
+                  'min': ..., 'max': ..., 'choices': [...], 'decimals': ..., 'step': ... }
         Note: 'decimals' controls the number of decimal places shown by the
         QDoubleSpinBox (display precision). 'step' controls the single-step
         increment used when the user clicks the up/down arrows.
@@ -499,104 +1192,83 @@ class MainWindow(QMainWindow):
                     if val is not None:
                         w.setText(str(val))
                     widget = w
-
-                # Attach hints/tooltip
-                input_hint = None
-                if isinstance(spec, dict):
-                    input_hint = spec.get("input") or spec.get("input_hint")
-                    help_hint = spec.get("hint")
-                else:
-                    help_hint = None
-
-                # set tooltip from help hint and input hint (string or structured)
-                try:
-                    tt = help_hint or ""
-                    display_hint = ""
-                    if input_hint:
-                        # if structured dict, produce a concise human-readable summary
-                        if isinstance(input_hint, dict):
-                            parts = []
-                            for k, v in input_hint.items():
-                                if k == "wheel":
-                                    mods = ",".join(v.get("modifiers", [])) if isinstance(v, dict) else ""
-                                    parts.append(f"Wheel{(' + ' + mods) if mods else ''}: {v.get('action')}")
-                                elif k == "drag":
-                                    parts.append(f"Drag: {v.get('action')}")
-                                elif k == "hotkey":
-                                    parts.append(f"Hotkey: {v.get('key') if isinstance(v, dict) else str(v)}")
-                                else:
-                                    parts.append(f"{k}: {str(v)}")
-                            display_hint = "; ".join(parts)
-                        else:
-                            display_hint = str(input_hint)
-                        if display_hint:
-                            tt = (tt + "\n" + display_hint).strip()
-                    if tt and widget is not None:
-                        widget.setToolTip(tt)
-                except Exception:
-                    pass
-
-                # If there's an input hint, show a small label beside the control
-                if input_hint:
-                    container = QWidget()
-                    h = QHBoxLayout(container)
-                    h.setContentsMargins(0, 0, 0, 0)
-                    h.addWidget(widget)
-                    # show the display_hint (from above) or a short textual fallback
-                    hint_text = display_hint if 'display_hint' in locals() and display_hint else (str(input_hint) if not isinstance(input_hint, dict) else "interactive")
-                    hint_label = QLabel(hint_text)
-                    hint_label.setToolTip(widget.toolTip() or hint_text)
-                    try:
-                        hint_label.setStyleSheet("color: gray; font-size: 11px;")
-                    except Exception:
-                        pass
-                    h.addWidget(hint_label)
-                    new_form.addRow(name + ":", container)
-                else:
-                    new_form.addRow(name + ":", widget)
-
-                new_param_widgets[name] = widget
-                # Connect widget change signals to auto-apply (connect after initial value set)
-                try:
-                    # connect to a scheduler that debounces rapid changes
-                    if isinstance(widget, QDoubleSpinBox) or isinstance(widget, QSpinBox):
-                        widget.valueChanged.connect(lambda v, n=name, w=widget: self._schedule_auto_apply(n, w))
-                    elif isinstance(widget, QCheckBox):
-                        widget.stateChanged.connect(lambda s, n=name, w=widget: self._schedule_auto_apply(n, w))
-                    elif isinstance(widget, QComboBox):
-                        widget.currentIndexChanged.connect(lambda i, n=name, w=widget: self._schedule_auto_apply(n, w))
-                    elif isinstance(widget, QLineEdit):
-                        widget.textChanged.connect(lambda t, n=name, w=widget: self._schedule_auto_apply(n, w))
-                except Exception:
-                    pass
-
             except Exception:
                 # on any error, fallback to a simple line edit
                 w = QLineEdit()
                 if val is not None:
                     w.setText(str(val))
-                # set tooltip if available
-                try:
-                    if isinstance(spec, dict):
-                        t = spec.get("hint") or spec.get("input") or ""
-                        if t:
-                            w.setToolTip(t)
-                except Exception:
-                    pass
-                new_form.addRow(name + ":", w)
-                new_param_widgets[name] = w
-                # Connect fallback widget signals
-                try:
-                    w.textChanged.connect(lambda t, n=name, w=w: self._schedule_auto_apply(n, w))
-                except Exception:
-                    pass
+                widget = w
+
+            # Keep the label text as the parameter name. If the spec provides an
+            # interactive control hint, expose it both as a tooltip and as a
+            # small visible hint label next to the control so users can discover
+            # what mouse/keyboard actions affect the parameter.
+            hint = ""
+            try:
+                if isinstance(spec, dict) and spec.get("control"):
+                    ctrl = spec.get("control")
+                    action = ctrl.get("action") or ""
+                    mods = "+".join(ctrl.get("modifiers", [])) if ctrl.get("modifiers") else ""
+                    hint = f"{action}" + (f"+{mods}" if mods else "")
+                    try:
+                        widget.setToolTip(f"Interactive: {hint}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Container so we can show the widget and a right-hand hint label
+            container_h = QWidget()
+            hbox = QHBoxLayout(container_h)
+            hbox.setContentsMargins(0, 0, 0, 0)
+            hbox.addWidget(widget)
+            if hint:
+                hint_label = QLabel(f"({hint})")
+                # subtle visual style so it's unobtrusive but readable
+                hint_label.setStyleSheet("color: gray; font-size: 11px;")
+                hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                hint_label.setToolTip(f"Interactive control: {hint}")
+                hbox.addWidget(hint_label)
+            else:
+                # keep layout stable when no hint exists
+                hbox.addWidget(QLabel(""))
+
+            new_form.addRow(name + ":", container_h)
+            new_param_widgets[name] = widget
 
         # Replace the widget shown in the scroll area (frees old widgets)
         self.param_scroll.takeWidget()
         self.param_scroll.setWidget(new_widget)
         self.param_form_widget = new_widget
         self.param_form = new_form
+        # Build control map for InputHandler based on specs' optional 'control' entries.
+        control_map = {}
+        try:
+            for name, spec in specs.items():
+                try:
+                    if isinstance(spec, dict) and "control" in spec:
+                        ctrl = spec.get("control") or {}
+                        action = ctrl.get("action")
+                        mods = tuple(sorted(ctrl.get("modifiers", []))) if ctrl.get("modifiers") is not None else tuple()
+                        sensitivity = float(ctrl.get("sensitivity", 1.0))
+                        key = (action, mods)
+                        control_map.setdefault(key, []).append({"name": name, "sensitivity": sensitivity})
+                except Exception:
+                    continue
+        except Exception:
+            control_map = {}
+
+        # Provide control map to input handler if available
+        try:
+            if hasattr(self, "input_handler") and self.input_handler is not None:
+                self.input_handler.set_control_map(control_map)
+        except Exception:
+            pass
+
         self.param_widgets = new_param_widgets
+
+        # No legacy fallbacks: the view exposes only the dynamic param_widgets mapping.
+        # Consumers should read parameters from param_widgets or use the ViewModel API.
 
     # --------------------------
     # Config dialog (view-only)
@@ -627,11 +1299,14 @@ class MainWindow(QMainWindow):
             form.addRow("Default Save Folder:", save_h)
             browse_save.clicked.connect(self._browse_save)
 
-            # buttons
+            # buttons: Save, Cancel, and Reload (reload reads config from disk)
             buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+            reload_btn = QPushButton("Reload")
+            buttons.addButton(reload_btn, QDialogButtonBox.ActionRole)
             form.addRow(buttons)
             buttons.accepted.connect(self.accept)
             buttons.rejected.connect(self.reject)
+            reload_btn.clicked.connect(self._on_reload_clicked)
 
         def _browse_load(self):
             d = QFileDialog.getExistingDirectory(self, "Select Default Load Folder", self.load_edit.text() or "")
@@ -642,6 +1317,29 @@ class MainWindow(QMainWindow):
             d = QFileDialog.getExistingDirectory(self, "Select Default Save Folder", self.save_edit.text() or "")
             if d:
                 self.save_edit.setText(d)
+
+        def _on_reload_clicked(self):
+            """Reload configuration from disk via the parent ViewModel and refresh fields."""
+            try:
+                parent = self.parent()
+                if parent and hasattr(parent, "viewmodel") and parent.viewmodel:
+                    try:
+                        parent.viewmodel.reload_config()
+                    except Exception:
+                        pass
+                    try:
+                        cfg = parent.viewmodel.get_config()
+                        self.load_edit.setText(str(cfg.get("default_load_folder", "")))
+                        self.save_edit.setText(str(cfg.get("default_save_folder", "")))
+                        # also inform user in the main log
+                        try:
+                            parent.append_log("Configuration reloaded into dialog.")
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     def _on_edit_config_clicked(self):
         """Open the configuration editor dialog (view-only)."""
@@ -675,476 +1373,26 @@ class MainWindow(QMainWindow):
                     self.append_log("Configuration save failed.")
             except Exception as e:
                 self.append_log(f"Error saving configuration: {e}")
-    
-    # --------------------------
-    # Input Handler Integration
-    # --------------------------
-    def _connect_input_handler(self):
-        """Connect input_handler signals to view methods."""
-        if not hasattr(self, 'input_handler') or self.input_handler is None:
-            return
-        
-        try:
-            # Connect mouse events
-            self.input_handler.mouse_clicked.connect(self._on_plot_clicked)
-            self.input_handler.mouse_moved.connect(self._on_plot_mouse_moved)
-            # Debug: connect press/release/drag signals for logging
-            try:
-                self.input_handler.mouse_pressed.connect(self._on_mouse_pressed)
-                self.input_handler.mouse_released.connect(self._on_mouse_released)
-                self.input_handler.mouse_dragged.connect(self._on_mouse_dragged)
-            except Exception:
-                pass
-            
-            # Connect keyboard events
-            self.input_handler.key_pressed.connect(self._on_plot_key_pressed)
-            
-            # Connect wheel events
-            self.input_handler.wheel_scrolled.connect(self._on_plot_wheel_scrolled)
-            
-            self.append_log("Input handler connected successfully.")
-        except Exception as e:
-            self.append_log(f"Failed to connect input handler: {e}")
 
-    # --------------------------
-    # Debug mouse handlers
-    # --------------------------
-    def _btn_name(self, b):
-        try:
-            if b == Qt.LeftButton:
-                return "Left"
-            if b == Qt.RightButton:
-                return "Right"
-            if b == Qt.MidButton or b == Qt.MiddleButton:
-                return "Middle"
-        except Exception:
-            pass
-        return str(b)
-
-    def _on_mouse_pressed(self, x, y, button, items):
-        try:
-            items_text = ", ".join(items) if items else "None"
-            bname = self._btn_name(button)
-            self.append_log(f"Mouse pressed: btn={bname}, pos=({x:.3f}, {y:.3f}), hit={items_text}")
-        except Exception:
-            pass
-
-    def _on_mouse_released(self, x, y, button, items):
-        try:
-            items_text = ", ".join(items) if items else "None"
-            bname = self._btn_name(button)
-            self.append_log(f"Mouse released: btn={bname}, pos=({x:.3f}, {y:.3f}), hit={items_text}")
-        except Exception:
-            pass
-
-    def _on_mouse_dragged(self, dx, dy, dist):
-        try:
-            self.append_log(f"Mouse dragged: dx={dx:.4g}, dy={dy:.4g}, dist={dist:.4g}")
-        except Exception:
-            pass
-    
-    def _on_plot_clicked(self, x, y, button):
-        """
-        Handle plot click events.
-        
-        Args:
-            x: X coordinate in data space
-            y: Y coordinate in data space  
-            button: Mouse button used
-        """
-        try:
-            # Log the click
-            self.append_log(f"Plot clicked at ({x:.2f}, {y:.2f})")
-
-            # First, try to select a plotted curve near the click (fit/data)
-            try:
-                picked_curve = False
-                try:
-                    picked_curve = self._try_select_curve(x, y)
-                except Exception:
-                    picked_curve = False
-                if picked_curve:
-                    return
-            except Exception:
-                pass
-
-            # If no curve selected, try to select a parameter near the click if viewmodel is present.
-            # If selection succeeds we enter selection mode; otherwise clear any selection.
-            try:
-                picked = False
-                if self.viewmodel:
-                    picked = self._try_select_param(x, y, button)
-                if picked:
-                    # if a curve was previously selected, clear its highlight
-                    try:
-                        if getattr(self, '_selected_curve', None) is not None:
-                            try:
-                                self._highlight_curve(self._selected_curve, False)
-                            except Exception:
-                                pass
-                            self._selected_curve = None
-                    except Exception:
-                        pass
-                else:
-                    # clicking away: only clear selection if no curve is currently selected.
-                    # (Requirement: clicking empty space should NOT deselect a curve.)
-                    if getattr(self, '_selected_curve', None) is None:
-                        try:
-                            self._clear_selection()
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-            # Notify viewmodel of the click as well (viewmodel may need it)
-            if self.viewmodel and hasattr(self.viewmodel, 'handle_plot_click'):
-                self.viewmodel.handle_plot_click(x, y, button)
-        except Exception as e:
-            self.append_log(f"Error handling plot click: {e}")
-
-    def _try_select_param(self, x, y, button):
-        """Attempt to select a parameter for interactive input.
-
-        Selection criteria:
-          - parameter spec must include a 'drag' input action
-          - parameter must have a numeric 'value' to compare against click x
-          - click must be within a threshold of the parameter value (threshold ~ 2% of x-range)
-
-        Returns True if selection started; False otherwise.
-        """
+    def _on_curve_clicked(self, event, curve_id):
+        """Handle mouse click on a curve."""
         if not self.viewmodel:
-            return False
-        try:
-            specs = getattr(self.viewmodel, "get_parameters", lambda: {})() or {}
-            # compute x-range from data if available
-            xdata = getattr(self.viewmodel.state, "x_data", None)
-            try:
-                if xdata is not None and len(xdata) >= 2:
-                    xr = float(np.max(xdata) - np.min(xdata))
-                else:
-                    xr = 1.0
-            except Exception:
-                xr = 1.0
-            # threshold: 2% of x-range or a small absolute lower bound
-            threshold = max(0.02 * xr, 1e-3)
+            return
+        # Set this as the selected curve
+        self.viewmodel.set_selected_curve(curve_id)
 
-            closest = None
-            best_dist = None
-            for pname, pspec in specs.items():
-                try:
-                    if not isinstance(pspec, dict):
-                        continue
-                    inp = pspec.get("input") or pspec.get("input_hint")
-                    if not inp or not isinstance(inp, dict):
-                        continue
-                    # only consider parameters that declare 'drag'
-                    if "drag" not in inp:
-                        continue
-                    val = pspec.get("value")
-                    if val is None:
-                        continue
-                    # must be numeric
-                    try:
-                        vnum = float(val)
-                    except Exception:
-                        continue
-                    dist = abs(float(x) - vnum)
-                    if dist <= threshold and (best_dist is None or dist < best_dist):
-                        best_dist = dist
-                        closest = pname
-                except Exception:
-                    continue
+    def _on_curve_selected(self, curve_id):
+        """Highlight the selected curve visually."""
+        # Deselect previous
+        if self.selected_curve_id and self.selected_curve_id in self.curves:
+            curve = self.curves[self.selected_curve_id]
+            curve.setPen(pg.mkPen(FIT_COLOR, width=2))
+        self.selected_curve_id = curve_id
 
-            if closest is None:
-                return False
+        # Highlight new
+        if curve_id and curve_id in self.curves:
+            curve = self.curves[curve_id]
+            curve.setPen(pg.mkPen('red', width=4))
+        self.append_log(f"Curve selection changed → {curve_id or 'none'}")
 
-            # Ask ViewModel to begin selection for this parameter
-            try:
-                started = False
-                if hasattr(self.viewmodel, "begin_selection"):
-                    started = self.viewmodel.begin_selection(closest, x, y)
-                if not started:
-                    # As fallback, set a simple interactive drag flag in viewmodel state
-                    try:
-                        self.viewmodel.state._selected_param = closest
-                        self.viewmodel.state._interactive_drag_info = {"handlers": [], "last_x": float(x), "last_y": float(y)}
-                        started = True
-                    except Exception:
-                        started = False
-                if started:
-                    self._set_selection_active(closest)
-                    return True
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return False
 
-    def _try_select_curve(self, x, y):
-        """Attempt to select a plotted curve (fit line or data scatter) near (x,y).
-        Returns True if a curve was selected.
-        """
-        try:
-            x_arr, y_arr, yfit_arr = getattr(self, "_last_plot_arrays", (None, None, None))
-            # prefer fit curve if present
-            if yfit_arr is not None and x_arr is not None and len(x_arr) >= 2:
-                try:
-                    # nearest index in x
-                    idx = int(np.argmin(np.abs(x_arr - float(x))))
-                    fit_y = float(yfit_arr[idx])
-                    # compute a threshold from y-range
-                    try:
-                        yr = float(np.nanmax(y_arr) - np.nanmin(y_arr))
-                    except Exception:
-                        yr = max(abs(fit_y), 1.0)
-                    threshold = max(0.02 * yr, 1e-6)
-                    if abs(float(y) - fit_y) <= threshold:
-                        # select fit curve
-                        self._selected_curve = 'fit'
-                        # highlight selection
-                        try:
-                            self._highlight_curve('fit', True)
-                        except Exception:
-                            pass
-                        self._set_selection_active('fit')
-                        return True
-                except Exception:
-                    pass
-
-            # fallback: check scatter nearest point (Euclidean)
-            if y_arr is not None and x_arr is not None and len(x_arr) >= 1:
-                try:
-                    idx = int(np.argmin(np.abs(x_arr - float(x))))
-                    dx = float(x) - float(x_arr[idx])
-                    dy = float(y) - float(y_arr[idx])
-                    # use combined scale based on data ranges
-                    try:
-                        xr = float(np.nanmax(x_arr) - np.nanmin(x_arr))
-                        yr = float(np.nanmax(y_arr) - np.nanmin(y_arr))
-                    except Exception:
-                        xr = yr = 1.0
-                    # scaled distance
-                    dist = np.hypot(dx / max(xr, 1e-9), dy / max(yr, 1e-9))
-                    if dist <= 0.02:
-                        self._selected_curve = 'data'
-                        try:
-                            self._highlight_curve('data', True)
-                        except Exception:
-                            pass
-                        self._set_selection_active('data')
-                        return True
-                except Exception:
-                    pass
-
-        except Exception:
-            pass
-        return False
-
-    def _highlight_curve(self, name, enable=True):
-        """Visually highlight or un-highlight a named curve ('fit' or 'data')."""
-        try:
-            if name == 'fit':
-                item = getattr(self, 'fit_curve', None)
-                if item is None:
-                    return
-                # store original pen
-                try:
-                    if 'fit' not in self._curve_original_opts:
-                        self._curve_original_opts['fit'] = {'pen': item.opts.get('pen') if hasattr(item, 'opts') else None}
-                except Exception:
-                    pass
-                if enable:
-                    try:
-                        item.setPen(pg.mkPen('blue', width=4))
-                    except Exception:
-                        pass
-                else:
-                    # restore
-                    try:
-                        orig = self._curve_original_opts.get('fit', {}).get('pen')
-                        if orig is not None:
-                            item.setPen(orig)
-                        else:
-                            item.setPen(pg.mkPen(FIT_COLOR, width=2))
-                    except Exception:
-                        pass
-
-            elif name == 'data':
-                item = getattr(self, 'scatter', None)
-                if item is None:
-                    return
-                try:
-                    if 'data' not in self._curve_original_opts:
-                        self._curve_original_opts['data'] = {'size': getattr(item, 'size', None)}
-                except Exception:
-                    pass
-                if enable:
-                    try:
-                        # increase point size to indicate selection
-                        item.setSize(10)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        orig = self._curve_original_opts.get('data', {}).get('size')
-                        if orig is not None:
-                            item.setSize(orig)
-                        else:
-                            item.setSize(6)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    def _set_selection_active(self, pname):
-        """Mark UI as in selection mode for a parameter and disable ViewBox mouse interactions."""
-        try:
-            self.append_log(f"Selected: {pname}")
-            try:
-                vb = self.plot_widget.getViewBox()
-                if vb is not None:
-                    # disable mouse panning/zooming so drag/wheel go to parameter control
-                    vb.setMouseEnabled(False, False)
-                    # optionally change cursor (kept simple)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-    def _clear_selection(self):
-        """Clear interactive selection and restore normal UI (panning/zoom enabled)."""
-        try:
-            # instruct viewmodel to end selection if it has such API
-            try:
-                if self.viewmodel and hasattr(self.viewmodel, "end_selection"):
-                    self.viewmodel.end_selection()
-                else:
-                    # clear any state flags if fallback used
-                    if self.viewmodel:
-                        try:
-                            if hasattr(self.viewmodel.state, "_selected_param"):
-                                delattr(self.viewmodel.state, "_selected_param")
-                        except Exception:
-                            try:
-                                setattr(self.viewmodel.state, "_selected_param", None)
-                            except Exception:
-                                pass
-                            pass
-                        try:
-                            if hasattr(self.viewmodel.state, "_interactive_drag_info"):
-                                delattr(self.viewmodel.state, "_interactive_drag_info")
-                        except Exception:
-                            try:
-                                setattr(self.viewmodel.state, "_interactive_drag_info", None)
-                            except Exception:
-                                pass
-            except Exception:
-                pass
-
-            # re-enable viewbox interactions
-            try:
-                vb = self.plot_widget.getViewBox()
-                if vb is not None:
-                    vb.setMouseEnabled(True, True)
-            except Exception:
-                pass
-
-            # if a curve was selected, remove highlighting
-            try:
-                if getattr(self, '_selected_curve', None) is not None:
-                    try:
-                        self._highlight_curve(self._selected_curve, False)
-                    except Exception:
-                        pass
-                    self._selected_curve = None
-            except Exception:
-                pass
-
-            self.append_log("Selection cleared. UI interactions restored.")
-        except Exception:
-            pass
-
-    def _on_plot_key_pressed(self, key, modifiers):
-        """
-        Handle keyboard events on the plot.
-
-        Reserve Space to clear selection and restore UI.
-        """
-        try:
-            # Space = deselect / revert to normal UI
-            if key == Qt.Key_Space:
-                self._clear_selection()
-                # also forward a simple message to viewmodel if desired
-                try:
-                    if self.viewmodel and hasattr(self.viewmodel, "handle_key_press"):
-                        self.viewmodel.handle_key_press(key, modifiers)
-                except Exception:
-                    pass
-                return
-
-            # other keys: same as before
-            if key == Qt.Key_R:
-                self.append_log("Reset view (R key)")
-                try:
-                    self.plot_widget.getViewBox().autoRange()
-                except Exception:
-                    pass
-            else:
-                if self.viewmodel and hasattr(self.viewmodel, 'handle_key_press'):
-                    self.viewmodel.handle_key_press(key, modifiers)
-        except Exception as e:
-            self.append_log(f"Error handling key press: {e}")
-    
-    def _on_plot_mouse_moved(self, x, y, buttons=None):
-        """
-        Handle plot mouse move events.
-
-        Args:
-            x: X coordinate in data space
-            y: Y coordinate in data space
-            buttons: mouse button state (optional)
-        """
-        # Can be used for live cursor position display or dragging operations
-        # For now, pass to viewmodel if it has a handler (include buttons)
-        try:
-            if self.viewmodel and hasattr(self.viewmodel, 'handle_plot_mouse_move'):
-                # Some existing code paths may expect two args — call defensively
-                try:
-                    self.viewmodel.handle_plot_mouse_move(x, y, buttons)
-                except TypeError:
-                    # fallback to prior signature
-                    self.viewmodel.handle_plot_mouse_move(x, y)
-        except Exception:
-            pass
-    
-    def _on_plot_wheel_scrolled(self, delta, modifiers):
-        """
-        Handle mouse wheel events on the plot.
-        
-        Args:
-            delta: Wheel delta (positive = up, negative = down)
-            modifiers: Qt keyboard modifiers
-        """
-        try:
-            # Determine if modifiers are pressed
-            is_ctrl = bool(modifiers & Qt.ControlModifier)
-            is_shift = bool(modifiers & Qt.ShiftModifier)
-            is_alt = bool(modifiers & Qt.AltModifier)
-            
-            # Log for debugging
-            mods_str = []
-            if is_ctrl:
-                mods_str.append("Ctrl")
-            if is_shift:
-                mods_str.append("Shift")
-            if is_alt:
-                mods_str.append("Alt")
-            mods_text = "+".join(mods_str) if mods_str else "None"
-            
-            self.append_log(f"Wheel scrolled: delta={delta}, modifiers={mods_text}")
-            
-            # Pass to viewmodel for parameter adjustments
-            if self.viewmodel and hasattr(self.viewmodel, 'handle_wheel_scroll'):
-                self.viewmodel.handle_wheel_scroll(delta, modifiers)
-        except Exception as e:
-            self.append_log(f"Error handling wheel scroll: {e}")

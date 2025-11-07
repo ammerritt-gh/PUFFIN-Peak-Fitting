@@ -1,4 +1,4 @@
-import numpy as np
+﻿import numpy as np
 from scipy.special import wofz, voigt_profile
 from scipy.fft import fft, ifft
 from scipy.interpolate import interp1d
@@ -210,13 +210,6 @@ def convolute_gaussian_dho(x_target, phonon_energy, center, gauss_fwhm, lorentz_
 
 from typing import Any, Dict, Optional, List
 
-# Allowed input action keys that model parameter specs may provide.
-# Models should use these keys (case-sensitive): "drag", "wheel", "hotkey".
-# - "drag": means left-click + drag to update a parameter (value usually comes from x or y)
-# - "wheel": means mouse-wheel; action dict may include "modifiers": ["Ctrl","Shift","Alt"]
-# - "hotkey": means a keyboard shortcut; action dict should specify key name and action.
-ALLOWED_INPUT_ACTIONS = ["drag", "wheel", "hotkey"]
-
 class Parameter:
     """Represents a single parameter with metadata usable by the view.
 
@@ -233,16 +226,6 @@ class Parameter:
                    only a display/precision hint for the widget.
       step       : single-step increment for numeric controls (maps to
                    QDoubleSpinBox.setSingleStep / QSpinBox.setSingleStep).
-      input_hint : Optional[Any]
-         - If None: no interactive input advertised.
-         - If a string: treated as a human-readable hint only.
-         - If a dict: structured interactive spec. Top-level keys should be in ALLOWED_INPUT_ACTIONS.
-           Examples:
-             { "drag":  { "action": "set", "value_from": "x" } }
-             { "wheel": { "modifiers": ["Ctrl"], "action": "scale", "factor": 1.05 } }
-             { "hotkey": { "key": "F", "action": "trigger_fit" } }
-         The view and ViewModel agree on the action semantics: "set" sets parameter to coordinate,
-         "scale" multiplies numeric parameter by factor, "increment" adds a step, etc.
     """
     def __init__(self,
                  name: str,
@@ -254,7 +237,7 @@ class Parameter:
                  hint: str = "",
                  decimals: Optional[int] = None,
                  step: Optional[float] = None,
-                 input_hint: Optional[Any] = None):   # <-- note: can be str or structured dict
+                 control: Optional[Dict[str, Any]] = None):
         self.name = name
         self.value = value
         # ptype recommended to be one of: "float","int","str","bool","choice"
@@ -270,8 +253,9 @@ class Parameter:
         self.decimals = decimals
         # single-step increment (float for QDoubleSpinBox, int for QSpinBox)
         self.step = step
-        # short text describing interactive input (hotkeys/wheel/mouse)
-        self.input_hint = input_hint
+        # optional interactive control metadata describing how UI input maps to this param
+        # example: {"action": "wheel", "modifiers": [], "sensitivity": 0.05}
+        self.control = control
 
     def to_spec(self) -> Dict[str, Any]:
         """Export the parameter as a spec dict the view expects.
@@ -287,7 +271,8 @@ class Parameter:
           "hint"     -> help text for UI/tooltip
           "decimals" -> integer number of decimal places for float widgets
           "step"     -> numeric step increment for spin widgets
-          "input"    -> short text describing interactive input (hotkeys/wheel/mouse)
+
+        The view will use these keys to pick and configure widgets.
         """
         spec: Dict[str, Any] = {"value": self.value}
         if self.ptype:
@@ -306,20 +291,15 @@ class Parameter:
         if self.step is not None:
             # step is the widget increment (single step).
             spec["step"] = float(self.step)
-        if self.input_hint is not None:
-            # pass structured input metadata through under 'input' key.
-            # may be a str (hint) or a dict describing events/actions.
-            spec["input"] = self.input_hint
+        if getattr(self, "control", None) is not None:
+            # pass through control metadata (UI may map input events based on this)
+            spec["control"] = dict(self.control)
         return spec
 
 class BaseModelSpec:
     """Base container for model parameter specs and initialisation."""
     def __init__(self):
         self.params: Dict[str, Parameter] = {}
-        # Flag to indicate whether this model is a constructed element
-        # (a starting point that should not be addable to other elements).
-        # Default: False (basic element)
-        self.is_constructed: bool = False
 
     def add(self, param: Parameter):
         self.params[param.name] = param
@@ -371,64 +351,52 @@ class BaseModelSpec:
 class GaussianModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
+        # Interactive controls added so the InputHandler / View can map
+        # wheel and mouse actions to these parameters.
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
                            hint="Integrated area of the Gaussian peak", decimals=6, step=0.1,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
-        self.add(Parameter("Width", value=1.0, ptype="float", minimum=1e-6,
-                           hint="Gaussian FWHM", decimals=6, step=0.01))
+                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.05}))
+        # Ctrl + wheel adjusts the width (FWHM)
+        self.add(Parameter("Width", value=2, ptype="float", minimum=1e-6,
+                           hint="Gaussian FWHM", decimals=6, step=0.01,
+                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.01}))
+        # Click-drag (mouse_move / peak drag) should update the center.
+        # Keep the parameter named "Center" (capital C) to match evaluate()'s
+        # argument names, but provide a control hint for the UI.
         self.add(Parameter("Center", value=0.0, ptype="float",
                            hint="Peak center (x-axis)",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
+                           control={"action": "mouse_move", "modifiers": [], "sensitivity": 1.0}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
             pvals = self.get_param_values(params)
             Area = float(pvals.get("Area", 1.0))
-            Width = float(pvals.get("Width", 0.1))
+            Width = float(pvals.get("Width", 2.0))
             Center = float(pvals.get("Center", 0.0))
             return Gaussian(np.asarray(x, dtype=float), Area=Area, Width=Width, Center=Center)
-        except Exception:
-            return super().evaluate(x, params)
-
-
-class LorentzModelSpec(BaseModelSpec):
-    def __init__(self):
-        super().__init__()
-        self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Lorentzian peak", decimals=6, step=0.1,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
-        self.add(Parameter("Width", value=1.0, ptype="float", minimum=1e-6,
-                           hint="Lorentzian FWHM", decimals=6, step=0.01))
-        self.add(Parameter("Center", value=0.0, ptype="float",
-                           hint="Peak center (x-axis)",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
-
-    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
-        try:
-            pvals = self.get_param_values(params)
-            Area = float(pvals.get("Area", 1.0))
-            Width = float(pvals.get("Width", 0.1))
-            Center = float(pvals.get("Center", 0.0))
-            return Lorentzian(np.asarray(x, dtype=float), Area=Area, Width=Width, Center=Center)
         except Exception:
             return super().evaluate(x, params)
 
 class VoigtModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
+        # Interactive control bindings are included in the Parameter so the view/input
+        # layer can map events to parameter updates dynamically (no UI hard-coding).
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
                            hint="Integrated area of the Voigt peak", decimals=6, step=0.1,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
-        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0,
+                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.05}))
+        # Ctrl + wheel adjusts the gaussian contribution
+        self.add(Parameter("Gauss FWHM", value=1.14, ptype="float", minimum=0.0,
                            hint="Gaussian resolution FWHM", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0,
-                           hint="Lorentzian FWHM (HWHM*2)", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        # Use "drag" (left-click + drag) instead of simple click so clicks remain available for other UI parts.
-        self.add(Parameter("center", value=0.0, ptype="float",
+                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.01}))
+        # Shift + wheel adjusts the lorentzian contribution
+        self.add(Parameter("Lorentz FWHM", value=0.28, ptype="float", minimum=0.0,
+                           hint="Lorentzian FWHM", decimals=6, step=0.01,
+                           control={"action": "wheel", "modifiers": ["Shift"], "sensitivity": 0.01}))
+        # Mouse movement (no modifiers) controls center by default
+        self.add(Parameter("Center", value=0.0, ptype="float",
                            hint="Peak center",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
+                           control={"action": "mouse_move", "modifiers": [], "sensitivity": 1.0}))
 
     def initialize(self, data_x=None, data_y=None):
         # simple example: set center to x of max if data provided
@@ -437,7 +405,7 @@ class VoigtModelSpec(BaseModelSpec):
                 arrx = np.asarray(data_x)
                 arry = np.asarray(data_y)
                 idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
+                self.params["Center"].value = float(arrx[idx])
         except Exception:
             pass
 
@@ -445,224 +413,50 @@ class VoigtModelSpec(BaseModelSpec):
         try:
             pvals = self.get_param_values(params)
             Area = float(pvals.get("Area", 1.0))
-            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
-            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
-            center = float(pvals.get("center", 0.0))
+            gauss_fwhm = float(pvals.get("Gauss FWHM", 1.14))
+            lorentz_fwhm = float(pvals.get("Lorentz FWHM", 0.28))
+            center = float(pvals.get("Center", 0.0))
             return Voigt(np.asarray(x, dtype=float), Area=Area, gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm, center=center)
         except Exception:
             return super().evaluate(x, params)
 
-class DHOModelSpec(BaseModelSpec):
-    def __init__(self):
-        super().__init__()
-        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0,
-                           hint="Phonon energy (meV)", decimals=4, step=0.1,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6,
-                           hint="DHO damping parameter", decimals=4, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0,
-                           hint="Phonon amplitude (area-like)", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0,
-                           hint="Elastic (zero-energy) amplitude", decimals=6, step=0.01))
-        self.add(Parameter("BG", value=0.0, ptype="float",
-                           hint="Flat background"))
-        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1,
-                           hint="Temperature (K)", decimals=2, step=0.1))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectral center",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
 
-    def initialize(self, data_x=None, data_y=None):
-        # as example, pick center near max if available
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
-        except Exception:
-            pass
-
-    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
-        """Simple visible DHO-like curve (no instrument convolution here)."""
-        try:
-            arr = np.asarray(x, dtype=float)
-            pvals = self.get_param_values(params)
-            center_spec = float(pvals.get("center", 0.0))
-            phonon_energy = float(pvals.get("phonon_energy", 5.0))
-            damping = float(pvals.get("damping", 0.5))
-            phonon_amp = float(pvals.get("phonon_amplitude", 0.1))
-            elastic_amp = float(pvals.get("elastic_amplitude", 0.0))
-            BG = float(pvals.get("BG", 0.0))
-            T = float(pvals.get("T", 10.0))
-
-            x_shifted = arr - center_spec
-            stokes = Stokes_DHO(x_shifted, amplitude=phonon_amp, damping=damping, center=phonon_energy)
-            try:
-                astokes_amp = phonon_amp / np.exp(phonon_energy / (kB * T))
-            except Exception:
-                astokes_amp = phonon_amp
-            astokes = antiStokes_DHO(x_shifted, amplitude=astokes_amp, damping=damping, center=phonon_energy)
-            elastic = narrow_gaussian_delta(arr, center_spec, amplitude=elastic_amp, fwhm=0.1)
-            return stokes + astokes + elastic + BG
-        except Exception:
-            return super().evaluate(x, params)
 
 
 class LinearBackgroundModelSpec(BaseModelSpec):
-    """Simple linear background: y = slope * x + constant"""
+    """Simple linear background y = m*x + b
+
+    Parameters exposed to the view are:
+      - "Slope" (m)
+      - "Intercept" (b)
+    """
     def __init__(self):
         super().__init__()
-        # slope controlled by Ctrl+mouse wheel (scale)
-        self.add(Parameter("slope", value=0.0, ptype="float",
-                           hint="Linear slope (m)", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        # constant (intercept) controlled by mouse wheel
-        self.add(Parameter("constant", value=0.0, ptype="float",
-                           hint="Constant background (b)", decimals=6, step=0.1,
-                           input_hint={"wheel": {"action": "increment", "step": 0.1}}))
+        # slope (m)
+        self.add(Parameter("Slope", value=0.0, ptype="float", hint="Linear slope (m)", decimals=6, step=0.01,
+                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.01}))
+        # intercept (b)
+        self.add(Parameter("Intercept", value=0.0, ptype="float", hint="Vertical offset / intercept (b)", decimals=6, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.1}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
             pvals = self.get_param_values(params)
-            m = float(pvals.get("slope", 0.0))
-            b = float(pvals.get("constant", 0.0))
-            arr = np.asarray(x, dtype=float)
-            return m * arr + b
-        except Exception:
-            return super().evaluate(x, params)
-
-class DHOVoigtModelSpec(BaseModelSpec):
-    """Composite DHO convolved with Voigt resolution + elastic Voigt."""
-    def __init__(self):
-        super().__init__()
-        # This composite is a constructed element (starting point) and
-        # should not be addable to other models.
-        self.is_constructed = True
-        # include DHO params
-        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0, hint="Phonon energy (meV)",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6, hint="DHO damping",
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0, hint="Phonon amplitude",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        # Voigt resolution params
-        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0, hint="Gaussian FWHM of resolution",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0, hint="Lorentzian FWHM of resolution",
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        # elastic and BG
-        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0, hint="Elastic Voigt area",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
-        self.add(Parameter("BG", value=0.0, ptype="float", hint="Flat background",
-                           input_hint={"wheel": {"modifiers": ["Alt"], "action": "increment", "step": 0.01}}))
-        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1, hint="Temperature (K)",
-                           input_hint=None))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectrum center",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
-
-    def initialize(self, data_x=None, data_y=None):
-        # example: set center from data if available
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
-        except Exception:
-            pass
-
-    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
-        """Use the convolute_voigt_dho helper to produce a visible, realistic line."""
-        try:
-            arr = np.asarray(x, dtype=float)
-            pvals = self.get_param_values(params)
-            phonon_energy = float(pvals.get("phonon_energy", 5.0))
-            damping = float(pvals.get("damping", 0.5))
-            phonon_amplitude = float(pvals.get("phonon_amplitude", 0.1))
-            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
-            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
-            elastic_amplitude = float(pvals.get("elastic_amplitude", 0.0))
-            BG = float(pvals.get("BG", 0.0))
-            T = float(pvals.get("T", 10.0))
-            center = float(pvals.get("center", 0.0))
-
-            return convolute_voigt_dho(arr, phonon_energy=phonon_energy, center=center,
-                                       gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm,
-                                       damping=damping, phonon_amplitude=phonon_amplitude,
-                                       elastic_amplitude=elastic_amplitude, BG=BG, T=T, peak='all')
+            m = float(pvals.get("Slope", 0.0))
+            b = float(pvals.get("Intercept", 0.0))
+            xarr = np.asarray(x, dtype=float)
+            return m * xarr + b
         except Exception:
             return super().evaluate(x, params)
 
 # Factory / helper
-# Programmatic model registry -------------------------------------------------
-# Each entry: key (canonical), display name, aliases, factory, is_constructed
-MODEL_REGISTRY = [
-    {"key": "voigt", "display": "Voigt", "factory": VoigtModelSpec, "is_constructed": False},
-    {"key": "dho+voigt", "display": "DHO+Voigt", "factory": DHOVoigtModelSpec, "is_constructed": True},
-    {"key": "gaussian", "display": "Gaussian", "factory": GaussianModelSpec, "is_constructed": False},
-    {"key": "dho", "display": "DHO", "factory": DHOModelSpec, "is_constructed": False},
-    {"key": "lorentzian", "display": "Lorentzian", "factory": LorentzModelSpec, "is_constructed": False},
-    {"key": "linear", "display": "Linear", "factory": LinearBackgroundModelSpec, "is_constructed": False},
-]
-
-
-def _find_registry_entry(name: str):
-    """Return the registry entry matching name (case-insensitive) or None.
-
-    Matching rules (STRICT):
-      - exact match on canonical key (case-insensitive)
-      - exact match on display name (case-insensitive)
-
-    This intentionally avoids tolerant/alias matching so that the UI
-    and other callers must use the canonical names exposed by
-    get_available_model_names().
-    """
-    if not name:
-        return None
-    s = str(name).strip().lower()
-    # direct key or display match only
-    for e in MODEL_REGISTRY:
-        if e["key"].lower() == s or (e.get("display") or "").lower() == s:
-            return e
-    return None
-
-
-def canonical_model_key(name: str) -> str:
-    """Return the canonical registry key for a model name or the cleaned input.
-
-    This is useful for storing a normalized model identifier in state.
-    """
-    ent = _find_registry_entry(name)
-    if ent:
-        return ent["key"]
-    # fallback: cleaned lowercase
-    return (name or "").strip().lower()
-
-
 def get_model_spec(model_name: str) -> BaseModelSpec:
-    """Create and return a ModelSpec instance for the requested model name.
-
-    The lookup accepts canonical keys, display names, or common aliases.
-    """
-    ent = _find_registry_entry(model_name)
-    if ent is None:
-        return BaseModelSpec()
-    try:
-        return ent["factory"]()
-    except Exception:
-        return BaseModelSpec()
-
-
-def get_available_model_names(addable_only: bool = False) -> list:
-    """Return a list of human-friendly model display names.
-
-    If addable_only is True, filter out models marked as constructed (not addable).
-    """
-    names = []
-    for e in MODEL_REGISTRY:
-        if addable_only and e.get("is_constructed"):
-            continue
-        names.append(e.get("display", e.get("key")))
-    return names
+    name = (model_name or "").strip().lower()
+    if name in ("gauss", "gaussian", "gaussmodel", "gaussianmodel"):
+        return GaussianModelSpec()
+    if name in ("voigt", "voigtmodel"):
+        return VoigtModelSpec()
+    if name in ("linear", "linear background", "linearbackground", "linearbackgroundmodel", "linearbg", "background", "linear model"):
+        return LinearBackgroundModelSpec()
+    # default fallback
+    return BaseModelSpec()
