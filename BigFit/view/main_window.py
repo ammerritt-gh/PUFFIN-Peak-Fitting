@@ -1676,8 +1676,8 @@ class MainWindow(QMainWindow):
                 )
                 try:
                     group_box.setStyleSheet(style)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Failed to set style for group box '{label}': {e}")
 
                 form_layout = QFormLayout()
                 form_layout.setContentsMargins(6, 12, 6, 6)
