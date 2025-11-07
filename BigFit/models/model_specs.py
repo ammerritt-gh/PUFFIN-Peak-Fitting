@@ -253,8 +253,8 @@ class Parameter:
         self.decimals = decimals
         # single-step increment (float for QDoubleSpinBox, int for QSpinBox)
         self.step = step
-        # optional interactive control metadata describing how UI input maps to this param
-        # example: {"action": "wheel", "modifiers": [], "sensitivity": 0.05}
+    # optional interactive control metadata describing how UI input maps to this param
+    # example: {"action": "wheel", "modifiers": []}
         self.control = control
 
     def to_spec(self) -> Dict[str, Any]:
@@ -292,7 +292,11 @@ class Parameter:
             # step is the widget increment (single step).
             spec["step"] = float(self.step)
         if getattr(self, "control", None) is not None:
-            # pass through control metadata (UI may map input events based on this)
+            # pass through control metadata (UI may map input events based on this).
+            # Interactive step/increment is intentionally NOT stored here; the view
+            # layer derives the interactive increment from the parameter 'step'
+            # so that a single-step value controls both widget increments and
+            # interactive inputs.
             spec["control"] = dict(self.control)
         return spec
 
@@ -354,18 +358,18 @@ class GaussianModelSpec(BaseModelSpec):
         # Interactive controls added so the InputHandler / View can map
         # wheel and mouse actions to these parameters.
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Gaussian peak", decimals=6, step=0.1,
-                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.05}))
+                           hint="Integrated area of the Gaussian peak", decimals=6, step=1.0,
+                           control={"action": "wheel", "modifiers": []}))
         # Ctrl + wheel adjusts the width (FWHM)
         self.add(Parameter("Width", value=2, ptype="float", minimum=1e-6,
-                           hint="Gaussian FWHM", decimals=6, step=0.01,
-                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.01}))
+                           hint="Gaussian FWHM", decimals=6, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Control"]}))
         # Click-drag (mouse_move / peak drag) should update the center.
         # Keep the parameter named "Center" (capital C) to match evaluate()'s
         # argument names, but provide a control hint for the UI.
         self.add(Parameter("Center", value=0.0, ptype="float",
                            hint="Peak center (x-axis)",
-                           control={"action": "mouse_move", "modifiers": [], "sensitivity": 1.0}))
+                           control={"action": "mouse_move", "modifiers": []}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
@@ -383,20 +387,20 @@ class VoigtModelSpec(BaseModelSpec):
         # Interactive control bindings are included in the Parameter so the view/input
         # layer can map events to parameter updates dynamically (no UI hard-coding).
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Voigt peak", decimals=6, step=0.1,
-                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.05}))
+                           hint="Integrated area of the Voigt peak", decimals=6, step=1.0,
+                           control={"action": "wheel", "modifiers": []}))
         # Ctrl + wheel adjusts the gaussian contribution
         self.add(Parameter("Gauss FWHM", value=1.14, ptype="float", minimum=0.0,
-                           hint="Gaussian resolution FWHM", decimals=6, step=0.01,
-                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.01}))
+                           hint="Gaussian resolution FWHM", decimals=6, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Control"]}))
         # Shift + wheel adjusts the lorentzian contribution
         self.add(Parameter("Lorentz FWHM", value=0.28, ptype="float", minimum=0.0,
-                           hint="Lorentzian FWHM", decimals=6, step=0.01,
-                           control={"action": "wheel", "modifiers": ["Shift"], "sensitivity": 0.01}))
+                           hint="Lorentzian FWHM", decimals=6, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Shift"]}))
         # Mouse movement (no modifiers) controls center by default
         self.add(Parameter("Center", value=0.0, ptype="float",
                            hint="Peak center",
-                           control={"action": "mouse_move", "modifiers": [], "sensitivity": 1.0}))
+                           control={"action": "mouse_move", "modifiers": []}))
 
     def initialize(self, data_x=None, data_y=None):
         # simple example: set center to x of max if data provided
@@ -434,10 +438,10 @@ class LinearBackgroundModelSpec(BaseModelSpec):
         super().__init__()
         # slope (m)
         self.add(Parameter("Slope", value=0.0, ptype="float", hint="Linear slope (m)", decimals=6, step=0.01,
-                           control={"action": "wheel", "modifiers": [], "sensitivity": 0.01}))
+                           control={"action": "wheel", "modifiers": []}))
         # intercept (b)
         self.add(Parameter("Intercept", value=0.0, ptype="float", hint="Vertical offset / intercept (b)", decimals=6, step=0.1,
-                           control={"action": "wheel", "modifiers": ["Control"], "sensitivity": 0.1}))
+                           control={"action": "wheel", "modifiers": ["Control"]}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:

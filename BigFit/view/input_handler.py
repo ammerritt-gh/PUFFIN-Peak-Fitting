@@ -25,7 +25,7 @@ class InputHandler(QObject):
         self.selected_curve_id = None
 
         # control mapping for interactive parameter binding
-        # keys: (action:str, modifiers: tuple(sorted modifier names)) -> list of {name, sensitivity}
+        # keys: (action:str, modifiers: tuple(sorted modifier names)) -> list of {name, step}
         self.control_map = {}
         # last mouse data coordinate used for mouse_move controls
         self._last_mouse_data_x = None
@@ -38,7 +38,7 @@ class InputHandler(QObject):
 
     def set_control_map(self, control_map: dict):
         """Provide control mapping from the view. Expected shape:
-        { (action, tuple(modifiers)): [ { 'name': str, 'sensitivity': float, ... }, ... ] }
+        { (action, tuple(modifiers)): [ { 'name': str, 'step': float, ... }, ... ] }
         """
         out = {}
         for k, v in (control_map or {}).items():
@@ -228,7 +228,7 @@ class InputHandler(QObject):
             for entry in self.control_map.get(key, []):
                 try:
                     name = entry.get("name")
-                    sens = float(entry.get("sensitivity", 1.0))
+                    step_val = float(entry.get("step", 1.0))
                     cur = None
                     if name in current_specs and isinstance(current_specs[name], dict):
                         cur = current_specs[name].get("value")
@@ -242,7 +242,7 @@ class InputHandler(QObject):
                             cur = getattr(spec.params[name], "value", None)
                     if cur is None:
                         continue
-                    new_val = cur + sens * float(dx)
+                    new_val = cur + step_val * float(dx)
                     if name in current_specs and isinstance(current_specs[name], dict):
                         mn = current_specs[name].get("min", None)
                         mx = current_specs[name].get("max", None)
@@ -505,7 +505,7 @@ class InputHandler(QObject):
         for entry in self.control_map.get(key, []):
             try:
                 name = entry.get("name")
-                sens = float(entry.get("sensitivity", 1.0))
+                step_val = float(entry.get("step", 1.0))
                 cur = None
                 if name in current_specs and isinstance(current_specs[name], dict):
                     cur = current_specs[name].get("value")
@@ -519,7 +519,7 @@ class InputHandler(QObject):
                         cur = getattr(spec.params[name], "value", None)
                 if cur is None:
                     continue
-                new_val = cur + sens * float(delta_units)
+                new_val = cur + step_val * float(delta_units)
                 if name in current_specs and isinstance(current_specs[name], dict):
                     mn = current_specs[name].get("min", None)
                     mx = current_specs[name].get("max", None)

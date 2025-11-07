@@ -1260,9 +1260,16 @@ class MainWindow(QMainWindow):
                         ctrl = spec.get("control") or {}
                         action = ctrl.get("action")
                         mods = tuple(sorted(ctrl.get("modifiers", []))) if ctrl.get("modifiers") is not None else tuple()
-                        sensitivity = float(ctrl.get("sensitivity", 1.0))
+                        # Unified behaviour: derive interactive increment from the
+                        # parameter 'step' so a single wheel notch = spinbox single-step.
+                        # Always use the 'step' value from the spec; no legacy
+                        # fallback is consulted.
+                        try:
+                            step_val = float(spec.get("step", 1.0))
+                        except Exception:
+                            step_val = 1.0
                         key = (action, mods)
-                        control_map.setdefault(key, []).append({"name": name, "sensitivity": sensitivity})
+                        control_map.setdefault(key, []).append({"name": name, "step": step_val})
                 except Exception:
                     continue
         except Exception:
