@@ -182,6 +182,17 @@ class CustomViewBox(pg.ViewBox):
             self.excludeModeChanged.emit(bool(self.exclude_mode))
         except Exception:
             pass
+        # If exclusion mode is being turned off while a box is in progress,
+        # cancel and remove any temporary rectangle so it doesn't persist.
+        if not self.exclude_mode:
+            try:
+                # stop any active drawing
+                self._exclude_active = False
+                self._exclude_start = None
+                # remove any visible rect
+                self._remove_exclude_rect()
+            except Exception:
+                pass
 
     def keyPressEvent(self, ev):
         if ev.key() == QtCore.Qt.Key_Space:
