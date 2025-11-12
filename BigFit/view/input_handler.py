@@ -2,6 +2,7 @@
 # type: ignore
 from PySide6.QtCore import QObject, Qt, QPointF, QEvent
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
+import traceback
 import numpy as np
 from models import CompositeModelSpec
 
@@ -61,6 +62,31 @@ class InputHandler(QObject):
                 continue
         self.control_map = out
 
+    def _log_exception(self, context: str, exc: Exception = None):
+        """Emit a traceback-aware log message via the ViewModel if available,
+        otherwise print to stdout. This helps avoid silent failures during
+        interactive operations.
+        """
+        try:
+            msg = f"{context}: {exc}\n{traceback.format_exc()}"
+            if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+                try:
+                    self.viewmodel.log_message.emit(msg)
+                    return
+                except Exception:
+                    pass
+            # Fallback to printing if no ViewModel logging available
+            try:
+                print(msg)
+            except Exception:
+                pass
+        except Exception:
+            # Best-effort only; never raise from the logger itself
+            try:
+                print(f"Failed to log exception for context: {context}")
+            except Exception:
+                pass
+
     # -----------------------
     # ViewBox signal hookups
     # -----------------------
@@ -96,8 +122,16 @@ class InputHandler(QObject):
                 handled = self.on_wheel(obj, event)
                 if handled:
                     return True
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    if self.viewmodel is not None and hasattr(self.viewmodel, 'log_message'):
+                        self.viewmodel.log_message.emit(f"Wheel handling failed: {e}\n" + __import__('traceback').format_exc())
+                    else:
+                        print(f"Wheel handling failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                except Exception:
+                    pass
 
         if isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:
             return self.handle_key(event)
@@ -117,8 +151,16 @@ class InputHandler(QObject):
             try:
                 if hasattr(self.viewmodel, "log_message"):
                     self.viewmodel.log_message.emit("Peak selected but no curve is active — ignoring.")
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    if self.viewmodel is not None and hasattr(self.viewmodel, 'log_message'):
+                        self.viewmodel.log_message.emit(f"Logging peak-selection info failed: {e}\n" + __import__('traceback').format_exc())
+                    else:
+                        print(f"Logging peak-selection info failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                except Exception:
+                    pass
             return
 
         idx = self.find_nearest_peak(x)
@@ -128,8 +170,16 @@ class InputHandler(QObject):
             try:
                 if hasattr(self.viewmodel, "log_message"):
                     self.viewmodel.log_message.emit(f"Selected peak #{idx} at x={self.viewmodel.peaks[idx]:.3f}")
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    if self.viewmodel is not None and hasattr(self.viewmodel, 'log_message'):
+                        self.viewmodel.log_message.emit(f"Logging peak selection failed: {e}\n" + __import__('traceback').format_exc())
+                    else:
+                        print(f"Logging peak selection failed: {e}")
+                        import traceback
+                        traceback.print_exc()
+                except Exception:
+                    pass
 
     def on_peak_moved(self, peak_info):
         """User dragged a peak."""
@@ -194,23 +244,30 @@ class InputHandler(QObject):
             if idx is not None and hasattr(self.viewmodel, "toggle_point_exclusion_by_index"):
                 try:
                     self.viewmodel.toggle_point_exclusion_by_index(int(idx))
-                except Exception:
+                except Exception as e:
                     # fallback to the coordinate-based toggle
+                    self._log_exception("toggle_point_exclusion_by_index failed", e)
                     if hasattr(self.viewmodel, "toggle_point_exclusion"):
-                        self.viewmodel.toggle_point_exclusion(x, y)
+                        try:
+                            self.viewmodel.toggle_point_exclusion(x, y)
+                        except Exception as e2:
+                            self._log_exception("fallback toggle_point_exclusion failed", e2)
             else:
                 # fallback: call coordinate-based toggle as before
                 if hasattr(self.viewmodel, "toggle_point_exclusion"):
-                    self.viewmodel.toggle_point_exclusion(x, y)
-        except Exception:
-            pass
+                    try:
+                        self.viewmodel.toggle_point_exclusion(x, y)
+                    except Exception as e:
+                        self._log_exception("toggle_point_exclusion failed", e)
+        except Exception as e:
+            self._log_exception("toggle_point_exclusion overall failed", e)
 
         try:
             # Maintain the higher-level log for visual trace; ViewModel also logs index/result.
             if hasattr(self.viewmodel, "log_message"):
                 self.viewmodel.log_message.emit(f"Toggled exclusion at ({x:.2f}, {y:.2f})")
-        except Exception:
-            pass
+        except Exception as e:
+            self._log_exception("emit toggled exclusion log failed", e)
 
     def on_exclude_box(self, x0, y0, x1, y1):
         """Box-drag exclusion event."""
@@ -258,8 +315,8 @@ class InputHandler(QObject):
             try:
                 x, y = self.mouse_to_data(obj, event.pos())
                 self._last_mouse_data_x = x
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_exception("failed to update last mouse x", e)
             return False
 
         if self.control_map and self.viewmodel is not None:
@@ -341,8 +398,16 @@ class InputHandler(QObject):
                             self.viewmodel.log_message.emit(f"Interactive update: {updates}")
                         except Exception:
                             pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Log interactive update parsing errors for debugging
+                    try:
+                        if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+                            self.viewmodel.log_message.emit(f"Interactive update parse failed: {e}\n{traceback.format_exc()}")
+                        else:
+                            print(f"Interactive update parse failed: {e}")
+                            print(traceback.format_exc())
+                    except Exception:
+                        pass
                 return True
 
         return False
@@ -388,8 +453,15 @@ class InputHandler(QObject):
             if self.viewmodel is not None and hasattr(self.viewmodel, "run_fit"):
                 try:
                     self.viewmodel.run_fit()
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+                            self.viewmodel.log_message.emit(f"Interactive update failed: {e}\n{traceback.format_exc()}")
+                        else:
+                            print(f"Interactive update failed: {e}")
+                            print(traceback.format_exc())
+                    except Exception:
+                        pass
             return True
         elif key in (Qt.Key_E, Qt.Key_Q):
             step = 1 if key == Qt.Key_E else -1
@@ -439,14 +511,14 @@ class InputHandler(QObject):
             if notify_vm and hasattr(self.viewmodel, "set_selected_curve"):
                 try:
                     self.viewmodel.set_selected_curve(normalized_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._log_exception("notify set_selected_curve failed", e)
 
         if normalized_id is not None and self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
             try:
                 self.viewmodel.log_message.emit(f"Curve '{normalized_id}' selected.")
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_exception("emit curve selected log failed", e)
 
     def clear_selected_curve(self):
         """Clear selection and notify ViewModel."""
@@ -458,13 +530,13 @@ class InputHandler(QObject):
         if self.viewmodel is not None and hasattr(self.viewmodel, "clear_selected_curve"):
             try:
                 self.viewmodel.clear_selected_curve()
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_exception("clear_selected_curve notify failed", e)
         if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
             try:
                 self.viewmodel.log_message.emit("Curve deselected (spacebar).")
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_exception("emit deselect log failed", e)
 
     def _cycle_selected_component(self, step: int) -> bool:
         if step == 0:
@@ -761,7 +833,7 @@ class InputHandler(QObject):
                         self.viewmodel.log_message.emit(f"Interactive update: {updates}")
                     except Exception:
                         pass
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_exception("apply wheel updates failed", e)
             return True
         return False

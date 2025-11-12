@@ -14,6 +14,7 @@ import numpy as np
 import math
 import re
 from functools import partial
+import traceback
 
 from view.view_box import CustomViewBox
 from view.input_handler import InputHandler
@@ -88,10 +89,16 @@ class MainWindow(QMainWindow):
             # keep a backref so the ViewBox can delegate wheel handling when needed
             try:
                 setattr(self.viewbox, "_input_handler", self.input_handler)
+            except Exception as e:
+                try:
+                    self._log_exception("Failed to set viewbox input backref", e)
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                self._log_exception("Failed to install viewbox event filter", e)
             except Exception:
                 pass
-        except Exception:
-            pass
 
         # connect ViewBox interaction signals → ViewModel
         if self.viewmodel:
@@ -102,8 +109,11 @@ class MainWindow(QMainWindow):
                     self.viewbox.peakDeselected.connect(lambda: self.viewmodel.handle_action("set_selected_curve", curve_id=None))
                 else:
                     self.viewbox.peakDeselected.connect(lambda: self.viewmodel.set_selected_curve(None))
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    self._log_exception("Failed to connect peakDeselected handler", e)
+                except Exception:
+                    pass
             self.viewbox.peakMoved.connect(self._on_peak_moved)
             self.viewbox.excludePointClicked.connect(self._on_exclude_point)
             self.viewbox.excludeBoxDrawn.connect(self._on_exclude_box)
@@ -157,8 +167,11 @@ class MainWindow(QMainWindow):
                 axis = self.plot_widget.getAxis(ax)
                 axis.setPen(pg.mkPen(AXIS_COLOR))
                 axis.setTextPen(pg.mkPen(AXIS_COLOR))
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    self._log_exception("Failed to set axis colors", e)
+                except Exception:
+                    pass
 
         self._update_legend()
 
@@ -180,20 +193,29 @@ class MainWindow(QMainWindow):
             self.append_log(f"Peak click ignored — no peak near ({x:.3f}, {y:.3f}).")
             try:
                 self.viewbox.clear_selection()
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    self._log_exception("Failed to clear selection on viewbox", e)
+                except Exception:
+                    pass
             if current_curve is not None and self.viewmodel is not None:
                 try:
                     self.viewmodel.set_selected_curve(current_curve)
-                except Exception:
-                    pass
+                except Exception as e:
+                    try:
+                        self._log_exception("Failed to restore previous selected curve", e)
+                    except Exception:
+                        pass
             return
 
         if target_curve != self.selected_curve_id and self.viewmodel is not None:
             try:
                 self.viewmodel.set_selected_curve(target_curve)
-            except Exception:
-                pass
+            except Exception as e:
+                try:
+                    self._log_exception("Failed to set selected curve", e)
+                except Exception:
+                    pass
 
         # Ensure we have a target curve before responding to the peak click so drag works.
         if not self._ensure_curve_selection_for_peaks():
@@ -990,8 +1012,22 @@ class MainWindow(QMainWindow):
         def _on_model_selected(idx):
             name = self.model_selector.currentText()
             try:
-                if self.viewmodel and hasattr(self.viewmodel, "set_model"):
-                    self.viewmodel.set_model(name)
+                if self.viewmodel:
+                    # Prefer centralized dispatcher when available so model changes
+                    # flow through a single entrypoint. Fall back to direct call.
+                    if hasattr(self.viewmodel, "handle_action"):
+                        try:
+                            self.viewmodel.handle_action("set_model", model_name=name)
+                        except Exception:
+                            # fallback to direct API
+                            if hasattr(self.viewmodel, "set_model"):
+                                try:
+                                    self.viewmodel.set_model(name)
+                                except Exception:
+                                    raise
+                    else:
+                        if hasattr(self.viewmodel, "set_model"):
+                            self.viewmodel.set_model(name)
                 # refresh UI parameters for the selected model
                 self._refresh_parameters()
                 # ensure elements list reflects the newly selected model
@@ -1145,6 +1181,29 @@ class MainWindow(QMainWindow):
             # avoid raising from logging
             try:
                 print(msg)
+            except Exception:
+                pass
+
+    def _log_exception(self, context: str, exc: Exception):
+        """Emit a diagnostic message for an exception, preferring the ViewModel log.
+
+        context: short description of where the exception occurred.
+        exc: the caught exception instance.
+        """
+        try:
+            tb = traceback.format_exc()
+            msg = f"{context}: {exc}\n{tb}"
+            if getattr(self, 'viewmodel', None) is not None and hasattr(self.viewmodel, 'log_message'):
+                try:
+                    self.viewmodel.log_message.emit(msg)
+                except Exception:
+                    print(msg)
+            else:
+                print(msg)
+        except Exception:
+            # best-effort: avoid raising while logging
+            try:
+                print(f"{context}: {exc}")
             except Exception:
                 pass
 
