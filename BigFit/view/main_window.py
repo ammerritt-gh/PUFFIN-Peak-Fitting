@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QScrollArea, QSpinBox, QCheckBox, QListWidget, QListWidgetItem,
     QAbstractItemView, QGroupBox
 )
-from PySide6.QtCore import Qt, QPointF
+from PySide6.QtCore import Qt, QPointF, Signal
 from PySide6.QtGui import QColor, QBrush
 import pyqtgraph as pg
 import numpy as np
@@ -30,6 +30,9 @@ AXIS_COLOR = "black"    # axis and tick labels
 GRID_ALPHA = 0.5
 
 class MainWindow(QMainWindow):
+    # Emitted whenever the parameter panel is rebuilt/refreshed. Listeners
+    # can use this to re-wire per-widget signals (valueChanged, editingFinished, etc.).
+    parameters_updated = Signal()
     def __init__(self, viewmodel=None):
         super().__init__()
         self.setWindowTitle("PUMA Peak Fitter")
@@ -2100,6 +2103,17 @@ class MainWindow(QMainWindow):
                 print(f"[MainWindow] Failed to set control map: {e}")
         finally:
             self._building_params = False
+            # Notify listeners that the parameter widgets have been rebuilt
+            # so external code (e.g. main startup wiring) can connect signals.
+            try:
+                # emit only if the signal attribute exists
+                if hasattr(self, 'parameters_updated') and getattr(self, 'parameters_updated') is not None:
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     # --------------------------
     # Config dialog (view-only)
