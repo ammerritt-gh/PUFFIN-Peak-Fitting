@@ -8,6 +8,7 @@ from models import ModelState, CompositeModelSpec, get_model_spec, get_atomic_co
 from dataio.data_loader import select_and_load_files
 from dataio.data_saver import save_dataset
 import typing as _typing
+from .logging_helpers import log_exception, log_message
 
 
 class FitterViewModel(QObject):
@@ -35,7 +36,15 @@ class FitterViewModel(QObject):
             self._load_queue_from_config()
         except Exception as exc:
             # Failed to restore previous file queue; continue with empty queue.
-            self.log_message.emit(f"Could not restore previous file queue: {exc}")
+            log_exception("Could not restore previous file queue", exc, vm=self)
+
+    def _log_message(self, message: str) -> None:
+        """Emit a message via the shared logging helper."""
+        log_message(message, vm=self)
+
+    def _log_exception(self, context: str, exc: Exception) -> None:
+        """Emit an exception context via the shared logging helper."""
+        log_exception(context, exc, vm=self)
 
     # --------------------------
     # Data I/O
@@ -54,7 +63,7 @@ class FitterViewModel(QObject):
             except Exception as exc:
                 name = (info or {}).get("name") if isinstance(info, dict) else None
                 label = name or "dataset"
-                self.log_message.emit(f"Skipped {label}: {exc}")
+                log_exception(f"Skipped {label}", exc, vm=self)
                 continue
 
             dataset = {
@@ -74,7 +83,7 @@ class FitterViewModel(QObject):
             self._persist_last_loaded(last_info)
 
         plural = "file" if added == 1 else "files"
-        self.log_message.emit(f"Queued {added} {plural} for viewing.")
+        self._log_message(f"Queued {added} {plural} for viewing.")
         self._emit_file_queue()
 
         # If nothing is currently active, auto-activate the first queued dataset
@@ -277,7 +286,7 @@ class FitterViewModel(QObject):
             info = {}
         name = info.get("name")
         label = name or f"Dataset {idx + 1}"
-        self.log_message.emit(f"Loaded dataset: {label}")
+        self._log_message(f"Loaded dataset: {label}")
 
         try:
             self.parameters_updated.emit()
@@ -303,7 +312,7 @@ class FitterViewModel(QObject):
         info_obj = dataset.get("info") if isinstance(dataset, dict) else {}
         info = info_obj if isinstance(info_obj, dict) else {}
         name = info.get("name") or f"Dataset {idx + 1}"
-        self.log_message.emit(f"Removed dataset: {name}")
+        self._log_message(f"Removed dataset: {name}")
 
         if self._active_dataset_index == idx:
             self._active_dataset_index = None
@@ -312,7 +321,7 @@ class FitterViewModel(QObject):
                 self.activate_file(next_idx)
             else:
                 self.clear_loaded_files(emit_log=False)
-                self.log_message.emit("Dataset queue is now empty; reverted to default data.")
+                self._log_message("Dataset queue is now empty; reverted to default data.")
         else:
             if self._active_dataset_index is not None and idx < self._active_dataset_index:
                 self._active_dataset_index -= 1
@@ -337,13 +346,13 @@ class FitterViewModel(QObject):
         except Exception:
             pass
         if emit_log:
-            self.log_message.emit("Cleared queued datasets and restored initial synthetic data.")
+            self._log_message("Cleared queued datasets and restored initial synthetic data.")
 
     def save_data(self):
         """Save current data and fit to file."""
         y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
         save_dataset(self.state.x_data, self.state.y_data, y_fit=y_fit)
-        self.log_message.emit("Data saved successfully.")
+        self._log_message("Data saved successfully.")
 
     def clear_plot(self):
         """Reset to initial synthetic dataset and clear stored last-loaded file in config."""
@@ -362,12 +371,9 @@ class FitterViewModel(QObject):
             except Exception:
                 pass
 
-            self.log_message.emit("Cleared queued datasets and restored initial synthetic data.")
+            self._log_message("Cleared queued datasets and restored initial synthetic data.")
         except Exception as e:
-            try:
-                self.log_message.emit(f"Failed to clear plot: {e}")
-            except Exception:
-                pass
+            log_exception("Failed to clear plot", e, vm=self)
 
     # --------------------------
     # Configuration accessors (ViewModel handles logic/persistence)
@@ -399,10 +405,10 @@ class FitterViewModel(QObject):
             cfg.save()
             # force reload of singleton so other callers see changes
             _get_cfg(recreate=True)
-            self.log_message.emit("Configuration saved.")
+            self._log_message("Configuration saved.")
             return True
         except Exception as e:
-            self.log_message.emit(f"Failed to save configuration: {e}")
+            log_exception("Failed to save configuration", e, vm=self)
             return False
 
     def reload_config(self):
@@ -411,9 +417,9 @@ class FitterViewModel(QObject):
             # import here to avoid circular import at module import time
             from dataio import get_config
             cfg = get_config(recreate=True)
-            self.log_message.emit(f"Config reloaded from: {cfg.config_path}")
+            self._log_message(f"Config reloaded from: {cfg.config_path}")
         except Exception as e:
-            self.log_message.emit(f"Failed to reload config: {e}")
+            log_exception("Failed to reload config", e, vm=self)
         # refresh plot in case default folders or parameters changed
         try:
             self.update_plot()
@@ -433,10 +439,7 @@ class FitterViewModel(QObject):
             The result of the called action function, or None if the action is not recognized or an error occurs.
         """
         if not action:
-            try:
-                self.log_message.emit("handle_action: no action provided")
-            except Exception:
-                pass
+            self._log_message("handle_action: no action provided")
             return None
 
         a = str(action).strip()
@@ -491,14 +494,8 @@ class FitterViewModel(QObject):
                 except TypeError:
                     return getattr(self, a)()
         except Exception as e:
-            try:
-                self.log_message.emit(f"handle_action('{action}') failed: {e}")
-            except Exception:
-                pass
-        try:
-            self.log_message.emit(f"Unknown action requested: '{action}'")
-        except Exception:
-            pass
+            log_exception(f"handle_action('{action}') failed", e, vm=self)
+        self._log_message(f"Unknown action requested: '{action}'")
         return None
 
     # --------------------------
@@ -508,7 +505,7 @@ class FitterViewModel(QObject):
         """Start an asynchronous fit using FitWorker (non-blocking)."""
         # Prevent multiple concurrent fits
         if getattr(self, "_fit_worker", None) is not None:
-            self.log_message.emit("A fit is already running.")
+            self._log_message("A fit is already running.")
             return
 
         # basic data checks
@@ -520,7 +517,7 @@ class FitterViewModel(QObject):
         x = x_incl if x_incl is not None else getattr(self.state, "x_data", None)
         y = y_incl if y_incl is not None else getattr(self.state, "y_data", None)
         if x is None or y is None:
-            self.log_message.emit("No data available to fit.")
+            self._log_message("No data available to fit.")
             return
 
         err = err_incl if err_incl is not None else getattr(self.state, "errors", None)
@@ -533,13 +530,13 @@ class FitterViewModel(QObject):
                 model_spec = get_model_spec(getattr(self.state, "model_name", "voigt"))
                 setattr(self.state, "model_spec", model_spec)
             except Exception as e:
-                self.log_message.emit(f"Unable to obtain model specification: {e}")
+                log_exception("Unable to obtain model specification", e, vm=self)
                 return
 
         # ensure model_spec provides an evaluate function
         model_func = getattr(model_spec, "evaluate", None)
         if model_func is None:
-            self.log_message.emit("Selected model does not provide an evaluate(x, **params) function.")
+            self._log_message("Selected model does not provide an evaluate(x, **params) function.")
             return
 
         # build initial parameter value map and separate free (optimised) parameters
@@ -548,7 +545,7 @@ class FitterViewModel(QObject):
             # Determine which parameters are free (not fixed)
             free_keys = [k for k, v in getattr(model_spec, "params", {}).items() if not bool(getattr(v, "fixed", False))]
             if not free_keys:
-                self.log_message.emit("No free parameters to fit (all parameters are fixed).")
+                self._log_message("No free parameters to fit (all parameters are fixed).")
                 return
 
             # initial values for free params
@@ -558,7 +555,7 @@ class FitterViewModel(QObject):
             upper = [getattr(model_spec.params[k], "max", None) if getattr(model_spec.params[k], "max", None) is not None else np.inf for k in free_keys]
             bounds = (lower, upper)
         except Exception as e:
-            self.log_message.emit(f"Failed to build parameter/bounds list: {e}")
+            log_exception("Failed to build parameter/bounds list", e, vm=self)
             return
 
         # wrap evaluate(x, **params) into curve_fit-style f(x, *args)
@@ -585,14 +582,14 @@ class FitterViewModel(QObject):
         try:
             from worker.fit_worker import FitWorker
         except Exception as e:
-            self.log_message.emit(f"Failed to import FitWorker: {e}")
+            log_exception("Failed to import FitWorker", e, vm=self)
             return
 
         worker = FitWorker(x, y, wrapped_func, params, err, bounds)
         self._fit_worker = worker
 
         # connect progress updates
-        worker.progress.connect(lambda p: self.log_message.emit(f"Fit progress: {int(p*100)}%"))
+        worker.progress.connect(lambda p: self._log_message(f"Fit progress: {int(p*100)}%"))
 
         # finished handler
         def on_finished(result, y_fit):
@@ -670,9 +667,9 @@ class FitterViewModel(QObject):
                         full_errs = getattr(self.state, "errors", None)
                         self.plot_updated.emit(getattr(self.state, "x_data", x), getattr(self.state, "y_data", y), full_y_fit, full_errs)
 
-                    self.log_message.emit("Fit completed successfully.")
+                    self._log_message("Fit completed successfully.")
                 else:
-                    self.log_message.emit("Fit failed.")
+                    self._log_message("Fit failed.")
             finally:
                 # always clear the worker reference
                 try:
@@ -682,7 +679,7 @@ class FitterViewModel(QObject):
 
         worker.finished.connect(on_finished)
         worker.start()
-        self.log_message.emit("Fit started in background...")
+        self._log_message("Fit started in background...")
 
     def update_plot(self):
         """Update plot without running a fit."""
@@ -710,8 +707,10 @@ class FitterViewModel(QObject):
                     total += arr
                 except Exception as e:
                     # Non-fatal: if a component's output cannot be summed, skip it but show in plot.
-                    self.log_message.emit(
-                        f"Could not add component '{component.prefix}' to total fit: {e}"
+                    log_exception(
+                        f"Could not add component '{component.prefix}' to total fit",
+                        e,
+                        vm=self,
                     )
                 components_for_view.append(
                     {
