@@ -251,7 +251,11 @@ class FitterViewModel(QObject):
 
         if info:
             try:
-                self.state.file_info = info
+                try:
+                    setattr(self.state, "file_info", info)
+                except Exception:
+                    # fallback: ignore if state doesn't accept dynamic attributes
+                    pass
             except Exception:
                 pass
 
@@ -700,6 +704,36 @@ class FitterViewModel(QObject):
         except Exception:
             pass
 
+    def toggle_point_exclusion_by_index(self, idx: int):
+        """Toggle exclusion state by index (if supported by state). Logs the index and updates plot."""
+        try:
+            if hasattr(self.state, "excluded"):
+                try:
+                    if idx is None:
+                        self.log_message.emit("No index provided for toggle_point_exclusion_by_index.")
+                        return
+                    idx = int(idx)
+                    # ensure index in range
+                    xd = getattr(self.state, "x_data", None)
+                    if xd is None:
+                        self.log_message.emit("No data present to toggle exclusion.")
+                        return
+                    if idx < 0 or idx >= len(xd):
+                        self.log_message.emit(f"Index {idx} out of range for exclusion toggle.")
+                        return
+                    self.state.excluded[idx] = not bool(self.state.excluded[idx])
+                    self.log_message.emit(f"Toggled exclusion for point index: {idx}")
+                except Exception as e:
+                    self.log_message.emit(f"Failed to toggle exclusion by index: {e}")
+            else:
+                self.log_message.emit("State does not support exclusions by index.")
+        except Exception as e:
+            self.log_message.emit(f"Failed to toggle point exclusion by index: {e}")
+        try:
+            self.update_plot()
+        except Exception:
+            pass
+
     def toggle_box_exclusion(self, x0, y0, x1, y1):
         """Toggle exclusion for points inside the given box."""
         try:
@@ -865,18 +899,22 @@ class FitterViewModel(QObject):
             setattr(self.state, "model_name", model_name)
             setattr(self.state, "model_spec", model_spec)
             # clear any concrete state.model so get_parameters will reflect spec values
-            if hasattr(self.state, "model"):
-                try:
-                    delattr = lambda obj, name: obj.__delattr__(name)
-                    # try deleting attribute if possible (SimpleNamespace or similar)
+            # If a concrete model attribute exists on state, try to remove it so
+            # get_parameters() will prefer the model_spec values. Use attribute
+            # helpers to avoid static type-checker errors about unknown attributes.
+            try:
+                if hasattr(self.state, "model"):
                     try:
-                        del self.state.model
+                        delattr(self.state, "model")
                     except Exception:
                         # fallback: replace with a fresh simple namespace
-                        from types import SimpleNamespace
-                        self.state.model = SimpleNamespace()
-                except Exception:
-                    pass
+                        try:
+                            from types import SimpleNamespace
+                            setattr(self.state, "model", SimpleNamespace())
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             self.log_message.emit(f"Model switched to: {model_name}")
             # Notify View to refresh parameters/plot
             try:

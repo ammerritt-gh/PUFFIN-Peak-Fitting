@@ -144,9 +144,73 @@ class InputHandler(QObject):
         """Toggle exclusion of a single data point."""
         if self.viewmodel is None:
             return
-        if hasattr(self.viewmodel, "toggle_point_exclusion"):
-            self.viewmodel.toggle_point_exclusion(x, y)
-        self.viewmodel.log_message.emit(f"Toggled exclusion at ({x:.2f}, {y:.2f})")
+        # Prefer a pixel-space nearest-point test (robust across scales).
+        idx = None
+        try:
+            tol_px = None
+            try:
+                # prefer a configurable constant from view.constants
+                from view.constants import CURVE_SELECT_TOL_PIXELS
+                tol_px = int(getattr(CURVE_SELECT_TOL_PIXELS, "__int__", lambda: CURVE_SELECT_TOL_PIXELS)()) if False else CURVE_SELECT_TOL_PIXELS
+            except Exception:
+                tol_px = 8
+
+            if hasattr(self, "viewbox") and getattr(self, "viewbox", None) is not None:
+                vb = self.viewbox
+                try:
+                    from PySide6.QtCore import QPointF
+                    click_scene_pt = vb.mapViewToScene(QPointF(float(x), float(y)))
+                    click_scene = (float(click_scene_pt.x()), float(click_scene_pt.y()))
+                    # Try to use the raw data arrays on the ViewModel if available
+                    xd = getattr(self.viewmodel.state, "x_data", None)
+                    yd = getattr(self.viewmodel.state, "y_data", None)
+                    if xd is not None and yd is not None:
+                        xd = np.asarray(xd)
+                        yd = np.asarray(yd)
+                        best_i = None
+                        best_d2 = None
+                        for i, (xi, yi) in enumerate(zip(xd, yd)):
+                            try:
+                                pt = vb.mapViewToScene(QPointF(float(xi), float(yi)))
+                                dx = float(pt.x()) - click_scene[0]
+                                dy = float(pt.y()) - click_scene[1]
+                                d2 = dx * dx + dy * dy
+                                if best_d2 is None or d2 < best_d2:
+                                    best_d2 = d2
+                                    best_i = i
+                            except Exception:
+                                continue
+                        if best_i is not None and best_d2 is not None:
+                            if best_d2 <= (float(tol_px) * float(tol_px)):
+                                idx = int(best_i)
+                except Exception:
+                    idx = None
+
+        except Exception:
+            idx = None
+
+        try:
+            # If we found an index and the ViewModel supports toggling by index, call that.
+            if idx is not None and hasattr(self.viewmodel, "toggle_point_exclusion_by_index"):
+                try:
+                    self.viewmodel.toggle_point_exclusion_by_index(int(idx))
+                except Exception:
+                    # fallback to the coordinate-based toggle
+                    if hasattr(self.viewmodel, "toggle_point_exclusion"):
+                        self.viewmodel.toggle_point_exclusion(x, y)
+            else:
+                # fallback: call coordinate-based toggle as before
+                if hasattr(self.viewmodel, "toggle_point_exclusion"):
+                    self.viewmodel.toggle_point_exclusion(x, y)
+        except Exception:
+            pass
+
+        try:
+            # Maintain the higher-level log for visual trace; ViewModel also logs index/result.
+            if hasattr(self.viewmodel, "log_message"):
+                self.viewmodel.log_message.emit(f"Toggled exclusion at ({x:.2f}, {y:.2f})")
+        except Exception:
+            pass
 
     def on_exclude_box(self, x0, y0, x1, y1):
         """Box-drag exclusion event."""
