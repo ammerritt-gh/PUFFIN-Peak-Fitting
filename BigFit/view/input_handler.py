@@ -5,6 +5,7 @@ from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 import traceback
 import numpy as np
 from models import CompositeModelSpec
+from viewmodel.logging_helpers import log_exception
 
 
 class InputHandler(QObject):
@@ -63,27 +64,15 @@ class InputHandler(QObject):
         self.control_map = out
 
     def _log_exception(self, context: str, exc: Exception = None):
-        """Emit a traceback-aware log message via the ViewModel if available,
-        otherwise print to stdout. This helps avoid silent failures during
-        interactive operations.
-        """
+        """Helper that routes exception logs through the shared logger."""
         try:
-            msg = f"{context}: {exc}\n{traceback.format_exc()}"
-            if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
-                try:
-                    self.viewmodel.log_message.emit(msg)
-                    return
-                except Exception:
-                    pass
-            # Fallback to printing if no ViewModel logging available
-            try:
-                print(msg)
-            except Exception:
-                pass
+            log_exception(context, exc, vm=self.viewmodel)
         except Exception:
-            # Best-effort only; never raise from the logger itself
+            # Last resort to avoid raising from the logger itself
             try:
-                print(f"Failed to log exception for context: {context}")
+                import traceback
+
+                print(f"{context}: {exc}\n{traceback.format_exc()}")
             except Exception:
                 pass
 
@@ -123,15 +112,7 @@ class InputHandler(QObject):
                 if handled:
                     return True
             except Exception as e:
-                try:
-                    if self.viewmodel is not None and hasattr(self.viewmodel, 'log_message'):
-                        self.viewmodel.log_message.emit(f"Wheel handling failed: {e}\n" + __import__('traceback').format_exc())
-                    else:
-                        print(f"Wheel handling failed: {e}")
-                        import traceback
-                        traceback.print_exc()
-                except Exception:
-                    pass
+                self._log_exception("Wheel handling failed", e)
 
         if isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:
             return self.handle_key(event)
@@ -148,19 +129,11 @@ class InputHandler(QObject):
         # Only allow peak selection if a curve is explicitly selected
         if self.selected_curve_id is None:
             # ignore selection and keep UI/plot behavior unchanged
-            try:
-                if hasattr(self.viewmodel, "log_message"):
-                    self.viewmodel.log_message.emit("Peak selected but no curve is active — ignoring.")
-            except Exception as e:
+            if hasattr(self.viewmodel, "log_message"):
                 try:
-                    if self.viewmodel is not None and hasattr(self.viewmodel, 'log_message'):
-                        self.viewmodel.log_message.emit(f"Logging peak-selection info failed: {e}\n" + __import__('traceback').format_exc())
-                    else:
-                        print(f"Logging peak-selection info failed: {e}")
-                        import traceback
-                        traceback.print_exc()
-                except Exception:
-                    pass
+                    self.viewmodel.log_message.emit("Peak selected but no curve is active — ignoring.")
+                except Exception as e:
+                    self._log_exception("Logging peak-selection info failed", e)
             return
 
         idx = self.find_nearest_peak(x)
@@ -171,15 +144,7 @@ class InputHandler(QObject):
                 if hasattr(self.viewmodel, "log_message"):
                     self.viewmodel.log_message.emit(f"Selected peak #{idx} at x={self.viewmodel.peaks[idx]:.3f}")
             except Exception as e:
-                try:
-                    if self.viewmodel is not None and hasattr(self.viewmodel, 'log_message'):
-                        self.viewmodel.log_message.emit(f"Logging peak selection failed: {e}\n" + __import__('traceback').format_exc())
-                    else:
-                        print(f"Logging peak selection failed: {e}")
-                        import traceback
-                        traceback.print_exc()
-                except Exception:
-                    pass
+                self._log_exception("Logging peak selection failed", e)
 
     def on_peak_moved(self, peak_info):
         """User dragged a peak."""
