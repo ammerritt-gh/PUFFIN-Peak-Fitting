@@ -627,11 +627,11 @@ class GaussianModelSpec(BaseModelSpec):
         # Interactive controls added so the InputHandler / View can map
         # wheel and mouse actions to these parameters.
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Gaussian peak", decimals=6, step=1.0,
+                           hint="Integrated area of the Gaussian peak", decimals=3, step=1.0,
                            control={"action": "wheel", "modifiers": []}))
         # Ctrl + wheel adjusts the width (FWHM)
         self.add(Parameter("Width", value=2, ptype="float", minimum=1e-6,
-                           hint="Gaussian FWHM", decimals=6, step=0.1,
+                           hint="Gaussian FWHM", decimals=3, step=0.1,
                            control={"action": "wheel", "modifiers": ["Control"]}))
         # Click-drag (mouse_move / peak drag) should update the center.
         # Keep the parameter named "Center" (capital C) to match evaluate()'s
@@ -656,19 +656,19 @@ class VoigtModelSpec(BaseModelSpec):
         # Interactive control bindings are included in the Parameter so the view/input
         # layer can map events to parameter updates dynamically (no UI hard-coding).
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Voigt peak", decimals=6, step=1.0,
+                           hint="Integrated area of the Voigt peak", decimals=3, step=1.0,
                            control={"action": "wheel", "modifiers": []}))
         # Ctrl + wheel adjusts the gaussian contribution
-        self.add(Parameter("Gauss FWHM", value=1.14, ptype="float", minimum=0.0,
-                           hint="Gaussian resolution FWHM", decimals=6, step=0.1,
+        self.add(Parameter("Gauss FWHM", value=1.14, ptype="float", minimum=1E-6,
+                           hint="Gaussian resolution FWHM", decimals=3, step=0.1,
                            control={"action": "wheel", "modifiers": ["Control"]}))
         # Shift + wheel adjusts the lorentzian contribution
-        self.add(Parameter("Lorentz FWHM", value=0.28, ptype="float", minimum=0.0,
-                           hint="Lorentzian FWHM", decimals=6, step=0.1,
+        self.add(Parameter("Lorentz FWHM", value=0.28, ptype="float", minimum=1E-6,
+                           hint="Lorentzian FWHM", decimals=3, step=0.1,
                            control={"action": "wheel", "modifiers": ["Shift"]}))
         # Mouse movement (no modifiers) controls center by default
         self.add(Parameter("Center", value=0.0, ptype="float",
-                           hint="Peak center",
+                           hint="Peak center", decimals=3,
                            control={"action": "mouse_move", "modifiers": []}))
 
     # def initialize(self, data_x=None, data_y=None):
