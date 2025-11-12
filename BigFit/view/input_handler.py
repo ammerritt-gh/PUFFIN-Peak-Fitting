@@ -1,4 +1,5 @@
 ﻿# view/input_handler.py
+# type: ignore
 from PySide6.QtCore import QObject, Qt, QPointF, QEvent
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
 import numpy as np

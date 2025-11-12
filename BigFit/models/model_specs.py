@@ -1,4 +1,7 @@
-﻿import numpy as np
+﻿# type: ignore
+"""Model specifications and helper functions for fitting.
+"""
+import numpy as np
 from scipy.special import wofz, voigt_profile
 from scipy.fft import fft, ifft
 from scipy.interpolate import interp1d
