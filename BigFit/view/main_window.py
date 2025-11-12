@@ -96,7 +96,14 @@ class MainWindow(QMainWindow):
         # connect ViewBox interaction signals → ViewModel
         if self.viewmodel:
             self.viewbox.peakSelected.connect(self._on_peak_selected)
-            self.viewbox.peakDeselected.connect(lambda: self.viewmodel.set_selected_curve(None))
+            # use centralized handle_action when available for deselect
+            try:
+                if hasattr(self.viewmodel, "handle_action"):
+                    self.viewbox.peakDeselected.connect(lambda: self.viewmodel.handle_action("set_selected_curve", curve_id=None))
+                else:
+                    self.viewbox.peakDeselected.connect(lambda: self.viewmodel.set_selected_curve(None))
+            except Exception:
+                pass
             self.viewbox.peakMoved.connect(self._on_peak_moved)
             self.viewbox.excludePointClicked.connect(self._on_exclude_point)
             self.viewbox.excludeBoxDrawn.connect(self._on_exclude_box)
@@ -284,10 +291,35 @@ class MainWindow(QMainWindow):
 
         # Connect UI → ViewModel
         if self.viewmodel:
-            load_btn.clicked.connect(self.viewmodel.load_data)
-            save_btn.clicked.connect(self.viewmodel.save_data)
-            fit_btn.clicked.connect(self.viewmodel.run_fit)
-            update_btn.clicked.connect(self.viewmodel.update_plot)
+            # Prefer centralized dispatcher when available, fall back to direct methods
+            try:
+                if hasattr(self.viewmodel, "handle_action"):
+                    load_btn.clicked.connect(lambda: self.viewmodel.handle_action("load_data"))
+                    save_btn.clicked.connect(lambda: self.viewmodel.handle_action("save_data"))
+                    fit_btn.clicked.connect(lambda: self.viewmodel.handle_action("run_fit"))
+                    update_btn.clicked.connect(lambda: self.viewmodel.handle_action("update_plot"))
+                else:
+                    load_btn.clicked.connect(self.viewmodel.load_data)
+                    save_btn.clicked.connect(self.viewmodel.save_data)
+                    fit_btn.clicked.connect(self.viewmodel.run_fit)
+                    update_btn.clicked.connect(self.viewmodel.update_plot)
+            except Exception:
+                try:
+                    load_btn.clicked.connect(self.viewmodel.load_data)
+                except Exception:
+                    pass
+                try:
+                    save_btn.clicked.connect(self.viewmodel.save_data)
+                except Exception:
+                    pass
+                try:
+                    fit_btn.clicked.connect(self.viewmodel.run_fit)
+                except Exception:
+                    pass
+                try:
+                    update_btn.clicked.connect(self.viewmodel.update_plot)
+                except Exception:
+                    pass
             # The file-list Clear button handles clearing queued datasets (see below)
             config_btn.clicked.connect(self._on_edit_config_clicked)
             # Exclude mode button toggles the CustomViewBox exclude_mode
@@ -317,7 +349,13 @@ class MainWindow(QMainWindow):
                     self.append_log(f"Failed to toggle exclude mode: {e}")
 
             exclude_btn.toggled.connect(_on_exclude_toggled)
-            include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
+            try:
+                if hasattr(self.viewmodel, "handle_action"):
+                    include_all_btn.clicked.connect(lambda: self.viewmodel.handle_action("clear_exclusions"))
+                else:
+                    include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
+            except Exception:
+                include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
 
             try:
                 self.viewmodel.files_updated.connect(self._on_files_updated)
@@ -406,7 +444,13 @@ class MainWindow(QMainWindow):
         if not self.viewmodel or row is None or row < 0:
             return
         try:
-            self.viewmodel.activate_file(row)
+            if hasattr(self.viewmodel, "handle_action"):
+                try:
+                    self.viewmodel.handle_action("activate_file", index=int(row))
+                except Exception:
+                    self.viewmodel.activate_file(row)
+            else:
+                self.viewmodel.activate_file(row)
         except Exception as e:
             self.append_log(f"Failed to load dataset: {e}")
 
@@ -417,7 +461,13 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
         try:
-            self.viewmodel.remove_file_at(row)
+            if hasattr(self.viewmodel, "handle_action"):
+                try:
+                    self.viewmodel.handle_action("remove_file_at", index=int(row))
+                except Exception:
+                    self.viewmodel.remove_file_at(row)
+            else:
+                self.viewmodel.remove_file_at(row)
         except Exception as e:
             self.append_log(f"Failed to remove dataset: {e}")
 
@@ -425,10 +475,20 @@ class MainWindow(QMainWindow):
         if not self.viewmodel:
             return
         try:
-            if hasattr(self.viewmodel, "clear_plot"):
-                self.viewmodel.clear_plot()
+            if hasattr(self.viewmodel, "handle_action"):
+                try:
+                    # prefer clear_plot which also clears config
+                    self.viewmodel.handle_action("clear_plot")
+                except Exception:
+                    try:
+                        getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
+                    except Exception:
+                        pass
             else:
-                getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
+                if hasattr(self.viewmodel, "clear_plot"):
+                    self.viewmodel.clear_plot()
+                else:
+                    getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
         except Exception as e:
             self.append_log(f"Failed to clear datasets: {e}")
 
