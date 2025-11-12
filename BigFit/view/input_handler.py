@@ -328,7 +328,14 @@ class InputHandler(QObject):
 
             if updates:
                 try:
-                    self.viewmodel.apply_parameters(updates)
+                    if hasattr(self.viewmodel, "handle_action"):
+                        try:
+                            self.viewmodel.handle_action("apply_parameters", params=updates)
+                        except Exception:
+                            # fallback
+                            self.viewmodel.apply_parameters(updates)
+                    else:
+                        self.viewmodel.apply_parameters(updates)
                     if hasattr(self.viewmodel, "log_message"):
                         try:
                             self.viewmodel.log_message.emit(f"Interactive update: {updates}")
@@ -736,7 +743,13 @@ class InputHandler(QObject):
 
         if updates:
             try:
-                self.viewmodel.apply_parameters(updates)
+                if hasattr(self.viewmodel, "handle_action"):
+                    try:
+                        self.viewmodel.handle_action("apply_parameters", params=updates)
+                    except Exception:
+                        self.viewmodel.apply_parameters(updates)
+                else:
+                    self.viewmodel.apply_parameters(updates)
                 # accept/consume the Qt event so the ViewBox does not perform zoom
                 try:
                     event.accept()
