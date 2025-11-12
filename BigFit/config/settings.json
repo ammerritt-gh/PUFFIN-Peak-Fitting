@@ -1,14 +1,9 @@
 {
-  "last_loaded_file": "C:/Users/AMM/Documents/GitHub/2025-ILL-IN8-FMO-Data-Processing/Data Parsing/Combined_Output/H101_T1p5K_B0p0T_combined.dat",
+  "last_loaded_file": null,
   "default_load_folder": "C:/Users/AMM/Documents/GitHub/2025-ILL-IN8-FMO-Data-Processing/Data Parsing/Combined_Output",
   "default_save_folder": "C:\\Users\\AMM",
   "config_folder": "C:\\Users\\AMM\\Documents\\GitHub\\BigFit\\BigFit\\config",
   "config_filename": "settings.json",
-  "queued_files": [
-    {
-      "path": "C:/Users/AMM/Documents/GitHub/2025-ILL-IN8-FMO-Data-Processing/Data Parsing/Combined_Output/H101_T1p5K_B0p0T_combined.dat",
-      "name": "H101_T1p5K_B0p0T_combined.dat"
-    }
-  ],
-  "queued_active": 0
+  "queued_files": [],
+  "queued_active": null
 }
