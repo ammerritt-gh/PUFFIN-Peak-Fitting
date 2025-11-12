@@ -233,22 +233,27 @@ class ModelState:
                 except Exception:
                     pass
 
-        # 2) concrete model instance on state (callable or has evaluate())
+        # 2) concrete model instance on state (prefer evaluate() if present)
         if mdl is not None:
-            if callable(mdl):
-                try:
-                    return mdl(self.x_data, params)
-                except Exception:
-                    try:
-                        return mdl(self.x_data)
-                    except Exception:
-                        pass
+            # Prefer an 'evaluate' method on a model instance. Some models are
+            # implemented as simple callables (functions) while others are
+            # objects exposing an 'evaluate' method. Check for 'evaluate'
+            # first so static checkers (which may treat callables as
+            # FunctionType) do not flag attribute access on functions.
             if hasattr(mdl, "evaluate") and callable(getattr(mdl, "evaluate")):
                 try:
                     return mdl.evaluate(self.x_data, params)
                 except Exception:
                     try:
                         return mdl.evaluate(self.x_data)
+                    except Exception:
+                        pass
+            if callable(mdl):
+                try:
+                    return mdl(self.x_data, params)
+                except Exception:
+                    try:
+                        return mdl(self.x_data)
                     except Exception:
                         pass
 

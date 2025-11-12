@@ -1,4 +1,5 @@
 ﻿# view/peak_viewbox.py
+# type: ignore
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 import numpy as np

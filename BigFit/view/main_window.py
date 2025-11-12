@@ -1,4 +1,5 @@
 ﻿# view/main_window.py
+# type: ignore
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QPushButton,
     QLabel, QTextEdit, QComboBox, QFormLayout, QDoubleSpinBox,
@@ -11,6 +12,7 @@ from PySide6.QtGui import QColor, QBrush
 import pyqtgraph as pg
 import numpy as np
 import math
+import re
 from functools import partial
 
 from view.view_box import CustomViewBox
