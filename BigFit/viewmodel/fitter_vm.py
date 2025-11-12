@@ -420,6 +420,87 @@ class FitterViewModel(QObject):
         except Exception:
             pass
 
+    def handle_action(self, action: str, **kwargs):
+        """
+        Central dispatcher for view-driven actions.
+
+        Examples:
+            handle_action('run_fit')
+            handle_action('toggle_point_exclusion', x=1.2, y=3.4)
+            handle_action('apply_parameters', params={...})
+
+        Returns:
+            The result of the called action function, or None if the action is not recognized or an error occurs.
+        """
+        if not action:
+            try:
+                self.log_message.emit("handle_action: no action provided")
+            except Exception:
+                pass
+            return None
+
+        a = str(action).strip()
+        # helper to safely attempt calling functions that expect an integer index
+        def _call_with_index(keys, func):
+            for k in keys:
+                if k in kwargs and kwargs.get(k) is not None:
+                    v = kwargs.get(k)
+                    # prefer to pass the raw value; the target methods already
+                    # perform their own int(...) conversions and validations.
+                    try:
+                        return func(v)
+                    except Exception:
+                        return None
+            return None
+
+        # mapping of common action names to callables
+        mapping = {
+            "run_fit": self.run_fit,
+            "update_plot": self.update_plot,
+            "load_data": self.load_data,
+            "save_data": self.save_data,
+            "clear_plot": self.clear_plot,
+            "toggle_point_exclusion": lambda: self.toggle_point_exclusion(kwargs.get("x"), kwargs.get("y"), tol=kwargs.get("tol", 0.05)),
+            "toggle_point_exclusion_by_index": lambda: _call_with_index(("idx", "index"), self.toggle_point_exclusion_by_index),
+            "toggle_box_exclusion": lambda: self.toggle_box_exclusion(kwargs.get("x0"), kwargs.get("y0"), kwargs.get("x1"), kwargs.get("y1")),
+            "clear_exclusions": self.clear_exclusions,
+            "apply_parameters": lambda: self.apply_parameters(kwargs.get("params") or kwargs.get("updates") or {}),
+            "set_selected_curve": lambda: self.set_selected_curve(kwargs.get("curve_id") or kwargs.get("curve")),
+            "clear_selected_curve": self.clear_selected_curve,
+            "on_peak_moved": lambda: self.on_peak_moved(kwargs.get("info") or kwargs.get("peak_info") or {}),
+            "on_peak_selected": lambda: self.on_peak_selected(kwargs.get("x"), kwargs.get("y")),
+            "activate_file": lambda: _call_with_index(("index", "idx"), self.activate_file),
+            "remove_file_at": lambda: _call_with_index(("index", "idx"), self.remove_file_at),
+        }
+
+        try:
+            if a in mapping:
+                func = mapping[a]
+                try:
+                    return func()
+                except TypeError:
+                    # fallback: try passing kwargs directly
+                    try:
+                        return func(**kwargs)
+                    except Exception:
+                        return None
+            # dynamic dispatch: try to call a same-named method on self
+            if hasattr(self, a) and callable(getattr(self, a)):
+                try:
+                    return getattr(self, a)(**kwargs)
+                except TypeError:
+                    return getattr(self, a)()
+        except Exception as e:
+            try:
+                self.log_message.emit(f"handle_action('{action}') failed: {e}")
+            except Exception:
+                pass
+        try:
+            self.log_message.emit(f"Unknown action requested: '{action}'")
+        except Exception:
+            pass
+        return None
+
     # --------------------------
     # Fit + Plot logic
     # --------------------------
