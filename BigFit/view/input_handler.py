@@ -136,50 +136,24 @@ class InputHandler(QObject):
         if self.viewmodel is None or self.dragging_peak is None:
             return
         new_x = float(peak_info.get("center", 0.0))
-        # update local peak store (ViewModel or example harness may expose .peaks)
-        try:
-            self.viewmodel.peaks[self.dragging_peak] = new_x
-        except Exception:
-            pass
+        self.viewmodel.peaks[self.dragging_peak] = new_x
+        if hasattr(self.viewmodel, "update_plot"):
+            self.viewmodel.update_plot()
 
-        # Prefer centralized dispatch if available so peak movement is handled
-        # consistently by the ViewModel. Fallback to update_plot if needed.
-        handled = False
-        if hasattr(self.viewmodel, "handle_action"):
-            try:
-                self.viewmodel.handle_action("on_peak_moved", info=peak_info)
-                handled = True
-            except Exception:
-                handled = False
-        if not handled and hasattr(self.viewmodel, "update_plot"):
-            try:
-                self.viewmodel.update_plot()
-            except Exception:
     def on_exclude_point(self, x, y):
         """Toggle exclusion of a single data point."""
         if self.viewmodel is None:
             return
-
-        idx = self._find_nearest_data_index(x, y)
-        self._toggle_exclusion(idx, x, y)
-
-        try:
-            # Maintain the higher-level log for visual trace; ViewModel also logs index/result.
-            if hasattr(self.viewmodel, "log_message"):
-                self.viewmodel.log_message.emit(f"Toggled exclusion at ({x:.2f}, {y:.2f})")
-        except Exception:
-            pass
-
-    def _find_nearest_data_index(self, x, y):
-        """Helper to find the nearest data index to (x, y) in scene coordinates."""
+        # Prefer a pixel-space nearest-point test (robust across scales).
         idx = None
         try:
-            tol_px = 8
+            tol_px = None
             try:
+                # prefer a configurable constant from view.constants
                 from view.constants import CURVE_SELECT_TOL_PIXELS
-                tol_px = CURVE_SELECT_TOL_PIXELS
+                tol_px = int(getattr(CURVE_SELECT_TOL_PIXELS, "__int__", lambda: CURVE_SELECT_TOL_PIXELS)()) if False else CURVE_SELECT_TOL_PIXELS
             except Exception:
-                pass
+                tol_px = 8
 
             if hasattr(self, "viewbox") and getattr(self, "viewbox", None) is not None:
                 vb = self.viewbox
@@ -187,6 +161,7 @@ class InputHandler(QObject):
                     from PySide6.QtCore import QPointF
                     click_scene_pt = vb.mapViewToScene(QPointF(float(x), float(y)))
                     click_scene = (float(click_scene_pt.x()), float(click_scene_pt.y()))
+                    # Try to use the raw data arrays on the ViewModel if available
                     xd = getattr(self.viewmodel.state, "x_data", None)
                     yd = getattr(self.viewmodel.state, "y_data", None)
                     if xd is not None and yd is not None:
@@ -210,41 +185,30 @@ class InputHandler(QObject):
                                 idx = int(best_i)
                 except Exception:
                     idx = None
+
         except Exception:
             idx = None
-        return idx
 
-    def _toggle_exclusion(self, idx, x, y):
-        """Helper to toggle exclusion by index or coordinate, with simplified fallback."""
         try:
-            if idx is not None:
-                # Try index-based exclusion first
-                if hasattr(self.viewmodel, "handle_action"):
-                    try:
-                        self.viewmodel.handle_action("toggle_point_exclusion_by_index", idx=int(idx))
-                        return
-                    except Exception:
-                        pass
-                if hasattr(self.viewmodel, "toggle_point_exclusion_by_index"):
-                    try:
-                        self.viewmodel.toggle_point_exclusion_by_index(int(idx))
-                        return
-                    except Exception:
-                        pass
-            # Fallback to coordinate-based exclusion
-            if hasattr(self.viewmodel, "handle_action"):
+            # If we found an index and the ViewModel supports toggling by index, call that.
+            if idx is not None and hasattr(self.viewmodel, "toggle_point_exclusion_by_index"):
                 try:
-                    self.viewmodel.handle_action("toggle_point_exclusion", x=x, y=y)
-                    return
+                    self.viewmodel.toggle_point_exclusion_by_index(int(idx))
                 except Exception:
-                    pass
-            if hasattr(self.viewmodel, "toggle_point_exclusion"):
-                try:
+                    # fallback to the coordinate-based toggle
+                    if hasattr(self.viewmodel, "toggle_point_exclusion"):
+                        self.viewmodel.toggle_point_exclusion(x, y)
+            else:
+                # fallback: call coordinate-based toggle as before
+                if hasattr(self.viewmodel, "toggle_point_exclusion"):
                     self.viewmodel.toggle_point_exclusion(x, y)
-                except Exception:
-                    pass
         except Exception:
             pass
+
+        try:
+            # Maintain the higher-level log for visual trace; ViewModel also logs index/result.
+            if hasattr(self.viewmodel, "log_message"):
+                self.viewmodel.log_message.emit(f"Toggled exclusion at ({x:.2f}, {y:.2f})")
         except Exception:
             pass
 
@@ -252,28 +216,9 @@ class InputHandler(QObject):
         """Box-drag exclusion event."""
         if self.viewmodel is None:
             return
-        if hasattr(self.viewmodel, "handle_action"):
-            try:
-                self.viewmodel.handle_action("toggle_box_exclusion", x0=x0, y0=y0, x1=x1, y1=y1)
-            except Exception:
-                # fallback
-                try:
-                    if hasattr(self.viewmodel, "toggle_box_exclusion"):
-                        self.viewmodel.toggle_box_exclusion(x0, y0, x1, y1)
-                except Exception:
-                    pass
-        else:
-            if hasattr(self.viewmodel, "toggle_box_exclusion"):
-                try:
-                    self.viewmodel.toggle_box_exclusion(x0, y0, x1, y1)
-                except Exception:
-                    pass
-
-        try:
-            if hasattr(self.viewmodel, "log_message"):
-                self.viewmodel.log_message.emit(f"Exclusion box: ({x0:.2f},{y0:.2f}) → ({x1:.2f},{y1:.2f})")
-        except Exception:
-            pass
+        if hasattr(self.viewmodel, "toggle_box_exclusion"):
+            self.viewmodel.toggle_box_exclusion(x0, y0, x1, y1)
+        self.viewmodel.log_message.emit(f"Exclusion box: ({x0:.2f},{y0:.2f}) → ({x1:.2f},{y1:.2f})")
 
     # -----------------------
     # Mouse event (fallbacks)
@@ -378,30 +323,17 @@ class InputHandler(QObject):
                         if mx is not None:
                             new_val = min(new_val, mx)
                     updates[name] = new_val
+                except Exception:
+                    continue
+
             if updates:
                 try:
-                    if hasattr(self.viewmodel, "handle_action"):
-                        try:
-                            self.viewmodel.handle_action("apply_parameters", params=updates)
-                        except Exception:
-                            try:
-                                if hasattr(self.viewmodel, "apply_parameters"):
-                                    self.viewmodel.apply_parameters(updates)
-                            except Exception:
-                                pass
-                    elif hasattr(self.viewmodel, "apply_parameters"):
-                        try:
-                            self.viewmodel.apply_parameters(updates)
-                        except Exception:
-                            pass
+                    self.viewmodel.apply_parameters(updates)
                     if hasattr(self.viewmodel, "log_message"):
                         try:
                             self.viewmodel.log_message.emit(f"Interactive update: {updates}")
                         except Exception:
                             pass
-                except Exception:
-                    pass
-                return True
                 except Exception:
                     pass
                 return True
@@ -446,23 +378,11 @@ class InputHandler(QObject):
             self.clear_selected_curve()
             return True
         elif key == Qt.Key_F:
-            if self.viewmodel is not None:
-                if hasattr(self.viewmodel, "handle_action"):
-                    try:
-                        self.viewmodel.handle_action("run_fit")
-                    except Exception:
-                        # fallback
-                        try:
-                            if hasattr(self.viewmodel, "run_fit"):
-                                self.viewmodel.run_fit()
-                        except Exception:
-                            pass
-                else:
-                    try:
-                        if hasattr(self.viewmodel, "run_fit"):
-                            self.viewmodel.run_fit()
-                    except Exception:
-                        pass
+            if self.viewmodel is not None and hasattr(self.viewmodel, "run_fit"):
+                try:
+                    self.viewmodel.run_fit()
+                except Exception:
+                    pass
             return True
         elif key in (Qt.Key_E, Qt.Key_Q):
             step = 1 if key == Qt.Key_E else -1
@@ -811,22 +731,12 @@ class InputHandler(QObject):
                     if mx is not None:
                         new_val = min(new_val, mx)
                 updates[name] = new_val
+            except Exception:
+                continue
+
         if updates:
             try:
-                if hasattr(self.viewmodel, "handle_action"):
-                    try:
-                        self.viewmodel.handle_action("apply_parameters", params=updates)
-                    except Exception:
-                        try:
-                            if hasattr(self.viewmodel, "apply_parameters"):
-                                self.viewmodel.apply_parameters(updates)
-                        except Exception:
-                            pass
-                elif hasattr(self.viewmodel, "apply_parameters"):
-                    try:
-                        self.viewmodel.apply_parameters(updates)
-                    except Exception:
-                        pass
+                self.viewmodel.apply_parameters(updates)
                 # accept/consume the Qt event so the ViewBox does not perform zoom
                 try:
                     event.accept()
@@ -839,9 +749,6 @@ class InputHandler(QObject):
                     except Exception:
                         pass
             except Exception:
-                pass
-            return True
-        return False
                 pass
             return True
         return False
