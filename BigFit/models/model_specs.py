@@ -671,16 +671,16 @@ class VoigtModelSpec(BaseModelSpec):
                            hint="Peak center",
                            control={"action": "mouse_move", "modifiers": []}))
 
-    def initialize(self, data_x=None, data_y=None):
-        # simple example: set center to x of max if data provided
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["Center"].value = float(arrx[idx])
-        except Exception:
-            pass
+    # def initialize(self, data_x=None, data_y=None):
+    #     # simple example: set center to x of max if data provided
+    #     try:
+    #         if data_x is not None and data_y is not None:
+    #             arrx = np.asarray(data_x)
+    #             arry = np.asarray(data_y)
+    #             idx = int(np.nanargmax(arry))
+    #             self.params["Center"].value = float(arrx[idx])
+    #     except Exception:
+    #         pass
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
