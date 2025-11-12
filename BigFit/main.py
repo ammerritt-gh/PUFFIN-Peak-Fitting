@@ -5,6 +5,7 @@ from models import ModelState
 from view.main_window import MainWindow
 from viewmodel.fitter_vm import FitterViewModel
 import os
+import traceback
 
 
 def main():
@@ -27,8 +28,11 @@ def main():
     try:
         if not getattr(window, "_auto_apply_param", False):
             viewmodel.parameters_updated.connect(window._refresh_parameters)
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            viewmodel.log_message.emit(f"Failed to connect parameters_updated: {e}\n{traceback.format_exc()}")
+        except Exception:
+            print(f"Failed to connect parameters_updated: {e}")
 
     # --- Dynamic parameter handling (replace legacy gauss_spin / lorentz_spin / temp_spin) ---
     def read_all_params():
@@ -52,7 +56,20 @@ def main():
 
     def on_param_changed(_=None):
         params = read_all_params()
-        viewmodel.apply_parameters(params)
+        # Prefer centralized dispatcher when available, fall back to direct call
+        try:
+            if hasattr(viewmodel, "handle_action"):
+                try:
+                    viewmodel.handle_action("apply_parameters", params=params)
+                except Exception:
+                    viewmodel.apply_parameters(params)
+            else:
+                viewmodel.apply_parameters(params)
+        except Exception as e:
+            try:
+                viewmodel.log_message.emit(f"Failed to apply initial parameters: {e}\n{traceback.format_exc()}")
+            except Exception:
+                print(f"Failed to apply initial parameters: {e}")
 
     def connect_param_signals():
         # Disconnecting previous connections is tricky; keep it simple: try to connect,
@@ -68,7 +85,10 @@ def main():
                 elif isinstance(widget, QLineEdit):
                     widget.editingFinished.connect(on_param_changed)
             except Exception:
-                pass
+                try:
+                    viewmodel.log_message.emit(f"Failed to connect param signal for '{name}': {widget}")
+                except Exception:
+                    print(f"Failed to connect param signal for '{name}'")
 
     # connect initially (if any params already present)
     # If the MainWindow provides its own per-widget auto-apply handler, skip
@@ -80,14 +100,20 @@ def main():
     if not hasattr(window, "_auto_apply_param"):
         try:
             window.parameters_updated.connect(connect_param_signals)
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                viewmodel.log_message.emit(f"Failed to hook parameters_updated -> connect_param_signals: {e}\n{traceback.format_exc()}")
+            except Exception:
+                print(f"Failed to hook parameters_updated -> connect_param_signals: {e}")
 
     # Apply initial parameters to ViewModel
     try:
         on_param_changed()
-    except Exception:
-        pass
+    except Exception as e:
+        try:
+            viewmodel.log_message.emit(f"Failed during initial parameter application: {e}\n{traceback.format_exc()}")
+        except Exception:
+            print(f"Failed during initial parameter application: {e}")
 
     # Attempt to restore the last-loaded dataset from the config (if present).
     # This keeps the app state persistent between runs.
@@ -126,9 +152,11 @@ def main():
                     viewmodel.log_message.emit(f"Failed to restore last dataset: {e}")
                 except Exception:
                     pass
-    except Exception:
-        # ignore config/load failures — app should continue normally
-        pass
+    except Exception as e:
+        try:
+            viewmodel.log_message.emit(f"Config/restore failed: {e}\n{traceback.format_exc()}")
+        except Exception:
+            print(f"Config/restore failed: {e}")
 
     window.show()
     sys.exit(app.exec())
