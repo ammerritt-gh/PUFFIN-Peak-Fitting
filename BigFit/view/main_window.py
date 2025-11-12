@@ -455,7 +455,7 @@ class MainWindow(QMainWindow):
             self.append_log(f"Failed to load dataset: {e}")
 
     def _on_remove_file_clicked(self):
-        if not self.viewmodel:
+        if not self.viewmodel or not hasattr(self.viewmodel, "handle_action"):
             return
         row = self.file_list.currentRow() if hasattr(self, "file_list") else -1
         if row < 0:
@@ -570,8 +570,17 @@ class MainWindow(QMainWindow):
                 component_name = dialog.selected_component
                 initial_params = dialog.initial_params or {}
                 if component_name:
+                    added = False
                     try:
-                        added = self.viewmodel.add_component_to_model(component_name, initial_params)
+                        if hasattr(self.viewmodel, "handle_action"):
+                            try:
+                                res = self.viewmodel.handle_action("add_component_to_model", component_name=component_name, initial_params=initial_params)
+                                added = bool(res)
+                            except Exception:
+                                # fallback to direct method
+                                added = self.viewmodel.add_component_to_model(component_name, initial_params)
+                        else:
+                            added = self.viewmodel.add_component_to_model(component_name, initial_params)
                     except Exception as e:
                         self.append_log(f"Failed to add component: {e}")
                         added = False
@@ -620,21 +629,42 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-            # prefer ViewModel removal APIs
-            if self.viewmodel and hasattr(self.viewmodel, 'remove_component_at'):
-                try:
-                    self.viewmodel.remove_component_at(row - 1)
-                    self._refresh_element_list()
-                    return
-                except Exception:
-                    pass
-            if self.viewmodel and hasattr(self.viewmodel, 'remove_last_component'):
-                try:
-                    self.viewmodel.remove_last_component()
-                    self._refresh_element_list()
-                    return
-                except Exception:
-                    pass
+            # prefer ViewModel removal APIs (go through dispatcher when present)
+            try:
+                if self.viewmodel:
+                    # try remove at index first
+                    if hasattr(self.viewmodel, "handle_action"):
+                        try:
+                            res = self.viewmodel.handle_action("remove_component_at", index=int(row - 1))
+                            if res:
+                                self._refresh_element_list()
+                                return
+                        except Exception:
+                            pass
+                        try:
+                            res = self.viewmodel.handle_action("remove_last_component")
+                            if res:
+                                self._refresh_element_list()
+                                return
+                        except Exception:
+                            pass
+                    else:
+                        if hasattr(self.viewmodel, 'remove_component_at'):
+                            try:
+                                self.viewmodel.remove_component_at(row - 1)
+                                self._refresh_element_list()
+                                return
+                            except Exception:
+                                pass
+                        if hasattr(self.viewmodel, 'remove_last_component'):
+                            try:
+                                self.viewmodel.remove_last_component()
+                                self._refresh_element_list()
+                                return
+                            except Exception:
+                                pass
+            except Exception:
+                pass
 
             # fallback: remove from UI only
             item = self.element_list.item(row)
@@ -696,17 +726,50 @@ class MainWindow(QMainWindow):
                             prefixes.append(prefix)
                 if not prefixes:
                     return
-                if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
-                    self.viewmodel.reorder_components_by_prefix(prefixes)
-                elif hasattr(self.viewmodel, 'reorder_component') and end == start:
-                    # fallback best-effort: compute positions relative to list excluding model
-                    old_index = start - 1
-                    new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
-                    if new_index >= len(prefixes):
-                        new_index = len(prefixes) - 1
-                    if new_index != old_index:
-                        self.viewmodel.reorder_component(old_index, new_index)
-                else:
+                # Prefer routing reorders through the centralized dispatcher
+                try:
+                    if hasattr(self.viewmodel, "handle_action"):
+                        try:
+                            res = self.viewmodel.handle_action("reorder_components_by_prefix", prefix_order=prefixes)
+                            if not res and end == start:
+                                # best-effort fallback: try single-item reorder
+                                old_index = start - 1
+                                new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
+                                if new_index >= len(prefixes):
+                                    new_index = len(prefixes) - 1
+                                if new_index != old_index:
+                                    self.viewmodel.handle_action("reorder_component", old_index=old_index, new_index=new_index)
+                        except Exception:
+                            # final fallback: try direct methods
+                            if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
+                                try:
+                                    self.viewmodel.reorder_components_by_prefix(prefixes)
+                                except Exception:
+                                    pass
+                            elif hasattr(self.viewmodel, 'reorder_component') and end == start:
+                                old_index = start - 1
+                                new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
+                                if new_index >= len(prefixes):
+                                    new_index = len(prefixes) - 1
+                                if new_index != old_index:
+                                    try:
+                                        self.viewmodel.reorder_component(old_index, new_index)
+                                    except Exception:
+                                        pass
+                    else:
+                        if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
+                            self.viewmodel.reorder_components_by_prefix(prefixes)
+                        elif hasattr(self.viewmodel, 'reorder_component') and end == start:
+                            # fallback best-effort: compute positions relative to list excluding model
+                            old_index = start - 1
+                            new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
+                            if new_index >= len(prefixes):
+                                new_index = len(prefixes) - 1
+                            if new_index != old_index:
+                                self.viewmodel.reorder_component(old_index, new_index)
+                        else:
+                            self._refresh_element_list()
+                except Exception:
                     self._refresh_element_list()
             except Exception as e:
                 try:
@@ -1539,11 +1602,30 @@ class MainWindow(QMainWindow):
 
         # Send params dict to ViewModel; ViewModel handles validation/usage
         try:
-            # ViewModel.apply_parameters should accept a dict of {name: value}
-            self.viewmodel.apply_parameters(params)
-            self.append_log("Parameters applied.")
+            # Prefer routing through the centralized dispatcher when available
+            if hasattr(self.viewmodel, "handle_action"):
+                try:
+                    self.viewmodel.handle_action("apply_parameters", params=params)
+                    self.append_log("Parameters applied.")
+                except Exception:
+                    # fallback to direct method when dispatcher fails
+                    try:
+                        self.viewmodel.apply_parameters(params)
+                        self.append_log("Parameters applied.")
+                    except Exception as e:
+                        self.append_log(f"Failed to apply parameters: {e}")
+            else:
+                # direct call for older ViewModel implementations
+                try:
+                    self.viewmodel.apply_parameters(params)
+                    self.append_log("Parameters applied.")
+                except Exception as e:
+                    self.append_log(f"Failed to apply parameters: {e}")
         except Exception as e:
-            self.append_log(f"Failed to apply parameters: {e}")
+            try:
+                self.append_log(f"Failed to apply parameters: {e}")
+            except Exception:
+                pass
 
     # --------------------------
     # Dynamic parameter helpers
@@ -1626,8 +1708,24 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
-            self.viewmodel.apply_parameters({name: value})
-            self._param_last_values[name] = value
+            # Prefer centralized dispatcher
+            if hasattr(self.viewmodel, "handle_action"):
+                try:
+                    self.viewmodel.handle_action("apply_parameters", params={name: value})
+                    self._param_last_values[name] = value
+                except Exception:
+                    # fallback
+                    try:
+                        self.viewmodel.apply_parameters({name: value})
+                        self._param_last_values[name] = value
+                    except Exception as exc:
+                        self.append_log(f"Failed to update parameter '{name}': {exc}")
+            else:
+                try:
+                    self.viewmodel.apply_parameters({name: value})
+                    self._param_last_values[name] = value
+                except Exception as exc:
+                    self.append_log(f"Failed to update parameter '{name}': {exc}")
         except Exception as exc:
             self.append_log(f"Failed to update parameter '{name}': {exc}")
 
