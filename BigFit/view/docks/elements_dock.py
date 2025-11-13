@@ -80,7 +80,7 @@ class ElementsDock(QDockWidget):
         Populate the element list from descriptors.
 
         Args:
-            descriptors: List of element descriptor dicts with 'prefix', 'label', 'color', etc.
+            descriptors: List of element descriptor dicts with 'prefix', 'label', 'color', 'tooltip', etc.
         """
         try:
             self.element_list.blockSignals(True)
@@ -101,10 +101,38 @@ class ElementsDock(QDockWidget):
                             item.setForeground(QBrush(QColor(color)))
                         except Exception:
                             pass
-                    try:
-                        item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
-                    except Exception:
-                        pass
+                    
+                    # Handle special model entry
+                    is_model = (prefix == 'model')
+                    if is_model:
+                        try:
+                            f = item.font()
+                            f.setBold(True)
+                            item.setFont(f)
+                        except Exception:
+                            pass
+                        try:
+                            item.setBackground(QBrush(QColor("#f2f2f7")))
+                            item.setToolTip("Active model (non-removable)")
+                        except Exception:
+                            pass
+                        try:
+                            item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                        except Exception:
+                            pass
+                    
+                    # Add tooltip if provided
+                    if 'tooltip' in desc:
+                        try:
+                            item.setToolTip(desc['tooltip'])
+                        except Exception:
+                            pass
+                    
                     self.element_list.addItem(item)
 
             self.element_list.blockSignals(False)
