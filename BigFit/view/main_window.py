@@ -19,7 +19,6 @@ import traceback
 from view.view_box import CustomViewBox
 from view.input_handler import InputHandler
 from view.constants import CURVE_SELECT_TOL_PIXELS
-from view.docks import ControlsDock, ParametersDock, ElementsDock, LogDock
 from models import CompositeModelSpec
 
 # -- color palette (change these) --
@@ -38,6 +37,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("PUMA Peak Fitter")
         self.viewmodel = viewmodel
+        self.param_widgets = {}   # name -> widget
+        self._param_last_values = {}
+        self._building_params = False
         self.curves = {}  # curve_id -> PlotDataItem
         self.selected_curve_id = None
         # internal: ensure we connect scene click handler only once
@@ -54,16 +56,20 @@ class MainWindow(QMainWindow):
         self._init_plot()
 
         # --- Docks ---
-        self._init_docks()
+        self._init_left_dock()
+        # create the bottom (log) dock before the right dock so logging is available
+        self._init_bottom_dock()
+        self._init_right_dock()
+        # Elements dock (separate dock placed under Parameters)
+        try:
+            self._init_elements_dock()
+        except Exception:
+            pass
+
+        for dock in [self.left_dock, self.right_dock, self.bottom_dock]:
+            dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
 
         self.resize(1400, 800)
-
-    @property
-    def param_widgets(self):
-        """Provide backward compatibility access to parameter widgets."""
-        if hasattr(self, 'parameters_dock'):
-            return self.parameters_dock.param_widgets
-        return {}
 
     # --------------------------
     # Plot setup
@@ -246,327 +252,220 @@ class MainWindow(QMainWindow):
     # --------------------------
     # Docks
     # --------------------------
-    def _init_docks(self):
-        """Initialize all dock widgets using the new modular dock classes."""
-        # Create dock instances
-        self.controls_dock = ControlsDock(self)
-        self.log_dock = LogDock(self)
-        self.parameters_dock = ParametersDock(self)
-        self.elements_dock = ElementsDock(self)
-        
-        # Add docks to main window
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.controls_dock)
-        self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.parameters_dock)
-        
-        # Place elements dock in bottom area, split horizontally with log
-        try:
-            self.addDockWidget(Qt.BottomDockWidgetArea, self.elements_dock)
-            self.splitDockWidget(self.log_dock, self.elements_dock, Qt.Horizontal)
-        except Exception:
-            try:
-                # fallback: add to the right column and stack under Parameters
-                self.addDockWidget(Qt.RightDockWidgetArea, self.elements_dock)
-                self.splitDockWidget(self.parameters_dock, self.elements_dock, Qt.Vertical)
-            except Exception:
-                pass
-        
-        try:
-            self.elements_dock.setMinimumWidth(260)
-        except Exception:
-            pass
-        
-        # Set dock features
-        for dock in [self.controls_dock, self.parameters_dock, self.log_dock]:
-            dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        
-        # Create convenience aliases for backward compatibility
-        self.left_dock = self.controls_dock
-        self.right_dock = self.parameters_dock
-        self.bottom_dock = self.log_dock
-        
-        # Wire up controls dock signals
-        if self.viewmodel:
-            self._connect_controls_dock()
-            self._connect_parameters_dock()
-            self._connect_elements_dock()
-        
-        # Initialize state
-        self._update_file_action_state()
-    
-    def _connect_controls_dock(self):
-        """Connect signals from the controls dock to viewmodel handlers."""
-        # Prefer centralized dispatcher when available, fall back to direct methods
-        try:
-            if hasattr(self.viewmodel, "handle_action"):
-                self.controls_dock.load_data_clicked.connect(lambda: self.viewmodel.handle_action("load_data"))
-                self.controls_dock.save_data_clicked.connect(lambda: self.viewmodel.handle_action("save_data"))
-                self.controls_dock.run_fit_clicked.connect(lambda: self.viewmodel.handle_action("run_fit"))
-                self.controls_dock.update_plot_clicked.connect(lambda: self.viewmodel.handle_action("update_plot"))
-            else:
-                self.controls_dock.load_data_clicked.connect(self.viewmodel.load_data)
-                self.controls_dock.save_data_clicked.connect(self.viewmodel.save_data)
-                self.controls_dock.run_fit_clicked.connect(self.viewmodel.run_fit)
-                self.controls_dock.update_plot_clicked.connect(self.viewmodel.update_plot)
-        except Exception:
-            pass
-        
-        self.controls_dock.edit_config_clicked.connect(self._on_edit_config_clicked)
-        self.controls_dock.exclude_toggled.connect(self._on_exclude_toggled)
-        
-        try:
-            if hasattr(self.viewmodel, "handle_action"):
-                self.controls_dock.include_all_clicked.connect(lambda: self.viewmodel.handle_action("clear_exclusions"))
-            else:
-                self.controls_dock.include_all_clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
-        except Exception:
-            pass
-        
-        # Wire the exclude button to the viewbox
+    def _init_left_dock(self):
+        self.left_dock = QDockWidget("Controls", self)
+        left_widget = QWidget()
+        layout = QVBoxLayout(left_widget)
+
+        load_btn = QPushButton("Load Data")
+        save_btn = QPushButton("Save Data")
+        fit_btn = QPushButton("Run Fit")
+        update_btn = QPushButton("Update Plot")
+        config_btn = QPushButton("Edit Config")
+
+        layout.addWidget(QLabel("Data Controls"))
+        layout.addWidget(load_btn)
+        layout.addWidget(save_btn)
+        layout.addWidget(fit_btn)
+        layout.addWidget(config_btn)
+        layout.addWidget(update_btn)
+        # Exclude toggle (click to enable box/point exclusion)
+        exclude_btn = QPushButton("Exclude")
+        exclude_btn.setCheckable(True)
+        layout.addWidget(exclude_btn)
+        # keep a reference for external updates (e.g. hotkey toggles)
+        self.exclude_btn = exclude_btn
+        # wire the button to the viewbox so clicking updates exclude mode
         try:
             if hasattr(self, "viewbox") and self.viewbox is not None:
-                self.controls_dock.exclude_btn.toggled.connect(self.viewbox.set_exclude_mode)
+                exclude_btn.toggled.connect(self.viewbox.set_exclude_mode)
                 # Keep the button state synced when the viewbox mode is changed
                 if hasattr(self.viewbox, "excludeModeChanged"):
                     try:
-                        self.viewbox.excludeModeChanged.connect(self.controls_dock.exclude_btn.setChecked)
+                        self.viewbox.excludeModeChanged.connect(exclude_btn.setChecked)
                     except Exception:
                         pass
         except Exception:
             pass
-        
-        # File list signals
-        try:
-            self.viewmodel.files_updated.connect(self.controls_dock.update_files)
-        except Exception:
-            pass
-        self.controls_dock.file_selected.connect(self._on_file_selected)
-        self.controls_dock.remove_file_clicked.connect(self._on_remove_file_clicked)
-        self.controls_dock.clear_files_clicked.connect(self._on_clear_files_clicked)
-        
-        try:
-            self.viewmodel.notify_file_queue()
-        except Exception:
-            pass
-    
-    def _connect_parameters_dock(self):
-        """Connect signals from the parameters dock to viewmodel handlers."""
-        # Set initial model selection
-        try:
-            if self.viewmodel:
-                initial = getattr(self.viewmodel.state, "model_name", None)
-                if initial:
-                    self.parameters_dock.set_model_selector(initial)
-        except Exception:
-            pass
-        
-        # Connect model change signal
-        self.parameters_dock.model_changed.connect(self._on_model_changed)
-        self.parameters_dock.apply_clicked.connect(self._on_apply_clicked)
-        self.parameters_dock.refresh_clicked.connect(self._refresh_parameters)
-        self.parameters_dock.parameter_changed.connect(self._on_parameter_changed)
-        
-        # Expose param_widgets for backward compatibility
-        @property
-        def param_widgets_property(self):
-            return self.parameters_dock.param_widgets
-        
-        # Initial populate
-        self._refresh_parameters()
-        
-        # Update elements list whenever parameters change
-        try:
-            self.viewmodel.parameters_updated.connect(self._refresh_element_list)
-        except Exception:
-            pass
-        
-        # Connect the parameters_updated signal from the dock to the main window signal
-        self.parameters_dock.parameters_updated.connect(self.parameters_updated.emit)
-    
-    def _connect_elements_dock(self):
-        """Connect signals from the elements dock to viewmodel handlers."""
-        self.elements_dock.element_selected.connect(self._on_element_selected)
-        self.elements_dock.element_add_clicked.connect(self._on_element_added_clicked)
-        self.elements_dock.element_remove_clicked.connect(self._on_element_remove_clicked)
-        self.elements_dock.element_rows_moved.connect(self._on_element_rows_moved)
-        
-        # Populate initial contents
+
+        # Include All button placed directly under the Exclude toggle for convenience
+        include_all_btn = QPushButton("Include All")
+        layout.addWidget(include_all_btn)
+
+        layout.addWidget(QLabel("Loaded Files"))
+        self.file_list = QListWidget()
+        self.file_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        layout.addWidget(self.file_list)
+
+        file_btn_row = QHBoxLayout()
+        remove_btn = QPushButton("Remove Selected")
+        clear_list_btn = QPushButton("Clear List")
+        file_btn_row.addWidget(remove_btn)
+        file_btn_row.addWidget(clear_list_btn)
+        layout.addLayout(file_btn_row)
+
+        self.file_remove_btn = remove_btn
+        self.file_clear_btn = clear_list_btn
+        # keep a backref to the include-all button placed above
+        self.include_all_btn = include_all_btn
+
+        layout.addStretch(1)
+
+        self.left_dock.setWidget(left_widget)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.left_dock)
+
+        # Connect UI → ViewModel
+        if self.viewmodel:
+            # Prefer centralized dispatcher when available, fall back to direct methods
+            try:
+                if hasattr(self.viewmodel, "handle_action"):
+                    load_btn.clicked.connect(lambda: self.viewmodel.handle_action("load_data"))
+                    save_btn.clicked.connect(lambda: self.viewmodel.handle_action("save_data"))
+                    fit_btn.clicked.connect(lambda: self.viewmodel.handle_action("run_fit"))
+                    update_btn.clicked.connect(lambda: self.viewmodel.handle_action("update_plot"))
+                else:
+                    load_btn.clicked.connect(self.viewmodel.load_data)
+                    save_btn.clicked.connect(self.viewmodel.save_data)
+                    fit_btn.clicked.connect(self.viewmodel.run_fit)
+                    update_btn.clicked.connect(self.viewmodel.update_plot)
+            except Exception:
+                try:
+                    load_btn.clicked.connect(self.viewmodel.load_data)
+                except Exception:
+                    pass
+                try:
+                    save_btn.clicked.connect(self.viewmodel.save_data)
+                except Exception:
+                    pass
+                try:
+                    fit_btn.clicked.connect(self.viewmodel.run_fit)
+                except Exception:
+                    pass
+                try:
+                    update_btn.clicked.connect(self.viewmodel.update_plot)
+                except Exception:
+                    pass
+            # The file-list Clear button handles clearing queued datasets (see below)
+            config_btn.clicked.connect(self._on_edit_config_clicked)
+            # Exclude mode button toggles the CustomViewBox exclude_mode
+            def _on_exclude_toggled(checked):
+                # Toggle exclude mode in the ViewBox and log the change.
+                # IMPORTANT: do not touch or reapply any model parameters here —
+                # that responsibility belongs to the Apply/Run Fit controls in the
+                # parameter panel and ViewModel. Removing parameter snapshot/reapply
+                # prevents accidental fit redraws when toggling exclusion mode.
+                try:
+                    # Setting exclude mode on the viewbox updates interaction only
+                    if hasattr(self, 'viewbox') and self.viewbox is not None:
+                        self.viewbox.set_exclude_mode(bool(checked))
+
+                    # Keep input handler selection state unchanged (no notify)
+                    try:
+                        if hasattr(self, 'input_handler'):
+                            self.input_handler.selected_curve_id = getattr(self.input_handler, 'selected_curve_id', None)
+                    except Exception:
+                        pass
+
+                    if checked:
+                        self.append_log("Exclude mode enabled.")
+                    else:
+                        self.append_log("Exclude mode disabled.")
+                except Exception as e:
+                    self.append_log(f"Failed to toggle exclude mode: {e}")
+
+            exclude_btn.toggled.connect(_on_exclude_toggled)
+            try:
+                if hasattr(self.viewmodel, "handle_action"):
+                    include_all_btn.clicked.connect(lambda: self.viewmodel.handle_action("clear_exclusions"))
+                else:
+                    include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
+            except Exception:
+                include_all_btn.clicked.connect(lambda: getattr(self.viewmodel, 'clear_exclusions', lambda: None)())
+
+            try:
+                self.viewmodel.files_updated.connect(self._on_files_updated)
+            except Exception:
+                pass
+            self.file_list.currentRowChanged.connect(self._on_file_selected)
+            remove_btn.clicked.connect(self._on_remove_file_clicked)
+            clear_list_btn.clicked.connect(self._on_clear_files_clicked)
+            # Element list wiring (connect if element widgets exist in a separate dock)
+            if hasattr(self, 'element_list'):
+                try:
+                    self.element_list.currentRowChanged.connect(self._on_element_selected)
+                except Exception:
+                    pass
+            if hasattr(self, 'element_add_btn'):
+                try:
+                    self.element_add_btn.clicked.connect(self._on_element_added_clicked)
+                except Exception:
+                    pass
+            if hasattr(self, 'element_remove_btn'):
+                try:
+                    self.element_remove_btn.clicked.connect(self._on_element_remove_clicked)
+                except Exception:
+                    pass
+            try:
+                self.viewmodel.notify_file_queue()
+            except Exception:
+                pass
+            try:
+                self._refresh_element_list()
+            except Exception:
+                pass
+        else:
+            self._update_file_action_state()
+
+        # ensure element list is populated even when no ViewModel present
         try:
             self._refresh_element_list()
         except Exception:
             pass
 
-    # --------------------------
-    # Dock event handlers
-    # --------------------------
-    def _on_exclude_toggled(self, checked):
-        """Toggle exclude mode in the ViewBox and log the change."""
-        try:
-            # Setting exclude mode on the viewbox updates interaction only
-            if hasattr(self, 'viewbox') and self.viewbox is not None:
-                self.viewbox.set_exclude_mode(bool(checked))
+        self._update_file_action_state()
 
-            # Keep input handler selection state unchanged (no notify)
-            try:
-                if hasattr(self, 'input_handler'):
-                    self.input_handler.selected_curve_id = getattr(self.input_handler, 'selected_curve_id', None)
-            except Exception:
-                pass
-
-            if checked:
-                self.append_log("Exclude mode enabled.")
-            else:
-                self.append_log("Exclude mode disabled.")
-        except Exception as e:
-            self.append_log(f"Failed to toggle exclude mode: {e}")
-
-    def _on_model_changed(self, model_name):
-        """Handle model selection change from parameters dock."""
-        try:
-            if self.viewmodel:
-                # Prefer centralized dispatcher when available
-                if hasattr(self.viewmodel, "handle_action"):
-                    try:
-                        self.viewmodel.handle_action("set_model", model_name=model_name)
-                    except Exception:
-                        if hasattr(self.viewmodel, "set_model"):
-                            self.viewmodel.set_model(model_name)
-                else:
-                    if hasattr(self.viewmodel, "set_model"):
-                        self.viewmodel.set_model(model_name)
-            # refresh UI parameters for the selected model
-            self._refresh_parameters()
-            # ensure elements list reflects the newly selected model
-            try:
-                self._refresh_element_list()
-            except Exception:
-                pass
-        except Exception as e:
-            self.append_log(f"Failed to switch model: {e}")
-
-    def _on_parameter_changed(self, name, value):
-        """Handle parameter value change from parameters dock."""
-        if not self.viewmodel:
+    def _on_files_updated(self, files):
+        if not hasattr(self, "file_list"):
             return
-        try:
-            # Prefer centralized dispatcher
-            if hasattr(self.viewmodel, "handle_action"):
-                try:
-                    self.viewmodel.handle_action("apply_parameters", params={name: value})
-                except Exception:
-                    try:
-                        self.viewmodel.apply_parameters({name: value})
-                    except Exception as exc:
-                        self.append_log(f"Failed to update parameter '{name}': {exc}")
-            else:
-                try:
-                    self.viewmodel.apply_parameters({name: value})
-                except Exception as exc:
-                    self.append_log(f"Failed to update parameter '{name}': {exc}")
-        except Exception as exc:
-            self.append_log(f"Failed to update parameter '{name}': {exc}")
 
-    def _update_file_action_state(self):
-        """Update the enabled state of file action buttons in controls dock."""
-        # This method is now handled internally by ControlsDock.update_files()
-        # Keep this stub for backward compatibility
-        pass
+        entries = files or []
+        active_row = -1
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
 
-    def _refresh_element_list(self):
-        """Populate the element list from the ViewModel/state."""
-        try:
-            if not hasattr(self, 'elements_dock'):
-                return
-            descriptors = []
-            if self.viewmodel and hasattr(self.viewmodel, 'get_component_descriptors'):
-                try:
-                    descriptors = self.viewmodel.get_component_descriptors() or []
-                except Exception:
-                    descriptors = []
-            
-            # Use the dock's refresh method
-            self.elements_dock.refresh_element_list(descriptors)
-            
-            # If no descriptors, populate with fallback logic
-            if not descriptors and self.viewmodel and hasattr(self.viewmodel, 'state') and hasattr(self.viewmodel.state, 'model_spec'):
-                # Fallback: infer prefixes from parameter names when descriptors unavailable
-                spec = self.viewmodel.state.model_spec
-                params = getattr(spec, 'params', {}) or {}
-                prefixes = {}
-                for k in params.keys():
-                    if '_' in k:
-                        p = k.split('_', 1)[0] + '_'
-                        prefixes[p] = prefixes.get(p, 0) + 1
-                fallback_descriptors = []
-                for p in sorted(prefixes.keys()):
-                    name = p.rstrip('_')
-                    fallback_descriptors.append({'prefix': p, 'label': name})
-                self.elements_dock.refresh_element_list(fallback_descriptors)
-            
-            # Prepend an entry representing the active/current model
-            try:
-                model_label = None
-                if self.viewmodel and hasattr(self.viewmodel, 'state'):
-                    model_label = getattr(self.viewmodel.state, 'model_name', None)
-                if not model_label:
-                    model_label = 'Model'
-                
-                # Check if model entry already exists
-                first = self.elements_dock.get_item(0)
-                first_has_model_id = False
-                if first is not None:
-                    try:
-                        fd = first.data(Qt.UserRole)
-                        if isinstance(fd, dict) and fd.get('id') == 'model':
-                            first_has_model_id = True
-                    except Exception:
-                        pass
-                
-                if first is None or not first_has_model_id:
-                    model_item = QListWidgetItem(str(model_label))
-                    model_item.setData(Qt.UserRole, {'id': 'model', 'name': model_label})
-                    # make it visually distinct
-                    try:
-                        f = model_item.font()
-                        f.setBold(True)
-                        model_item.setFont(f)
-                    except Exception:
-                        pass
-                    try:
-                        model_item.setBackground(QBrush(QColor("#f2f2f7")))
-                        model_item.setToolTip("Active model (non-removable)")
-                    except Exception:
-                        pass
-                    self.elements_dock.element_list.insertItem(0, model_item)
-                    try:
-                        model_item.setFlags(model_item.flags() & ~Qt.ItemIsDragEnabled)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            
-            # If nothing detected, ensure we have at least one entry
-            if self.elements_dock.get_element_count() == 0:
-                try:
-                    name = None
-                    if self.viewmodel and hasattr(self.viewmodel, 'state'):
-                        name = getattr(self.viewmodel.state, 'model_name', None)
-                    if not name:
-                        name = "Model"
-                    item = QListWidgetItem(str(name))
-                    item.setData(Qt.UserRole, {'id': 'model', 'name': name})
-                    try:
-                        item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
-                    except Exception:
-                        pass
-                    self.elements_dock.element_list.addItem(item)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        for entry in entries:
+            entry_dict = entry if isinstance(entry, dict) else {}
+            name = entry_dict.get("name")
+            if not name:
+                idx = entry_dict.get("index")
+                name = f"Dataset {idx + 1}" if idx is not None else "Dataset"
+
+            item = QListWidgetItem(name)
+            info_obj = entry_dict.get("info")
+            info = info_obj if isinstance(info_obj, dict) else {}
+            path = entry_dict.get("path")
+            if not path and info:
+                path = info.get("path")
+            if path:
+                item.setToolTip(str(path))
+            if entry_dict.get("active"):
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+
+            item.setData(Qt.UserRole, entry)
+            self.file_list.addItem(item)
+            if entry_dict.get("active"):
+                active_row = self.file_list.count() - 1
+
+        if active_row >= 0:
+            self.file_list.setCurrentRow(active_row)
+
+        self.file_list.blockSignals(False)
+        self._update_file_action_state()
 
     def _on_file_selected(self, row):
-        """Handle file selection from controls dock."""
+        self._update_file_action_state()
         if not self.viewmodel or row is None or row < 0:
             return
         try:
@@ -581,10 +480,9 @@ class MainWindow(QMainWindow):
             self.append_log(f"Failed to load dataset: {e}")
 
     def _on_remove_file_clicked(self):
-        """Handle remove file button click from controls dock."""
-        if not self.viewmodel:
+        if not self.viewmodel or not hasattr(self.viewmodel, "handle_action"):
             return
-        row = self.controls_dock.get_current_file_row()
+        row = self.file_list.currentRow() if hasattr(self, "file_list") else -1
         if row < 0:
             return
         try:
@@ -599,7 +497,6 @@ class MainWindow(QMainWindow):
             self.append_log(f"Failed to remove dataset: {e}")
 
     def _on_clear_files_clicked(self):
-        """Handle clear files button click from controls dock."""
         if not self.viewmodel:
             return
         try:
@@ -886,6 +783,222 @@ class MainWindow(QMainWindow):
                                         pass
                     else:
                         if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
+                            self.viewmodel.reorder_components_by_prefix(prefixes)
+                        elif hasattr(self.viewmodel, 'reorder_component') and end == start:
+                            # fallback best-effort: compute positions relative to list excluding model
+                            old_index = start - 1
+                            new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
+                            if new_index >= len(prefixes):
+                                new_index = len(prefixes) - 1
+                            if new_index != old_index:
+                                self.viewmodel.reorder_component(old_index, new_index)
+                        else:
+                            self._refresh_element_list()
+                except Exception:
+                    self._refresh_element_list()
+            except Exception as e:
+                try:
+                    self.append_log(f"Failed to reorder elements: {e}")
+                except Exception:
+                    pass
+
+    def _refresh_element_list(self):
+        """Populate the element list from the ViewModel/state when possible.
+        This is tolerant of non-composite specs and will try to infer prefixes
+        from parameter names as a fallback.
+        """
+        try:
+            if not hasattr(self, 'element_list'):
+                return
+            self.element_list.blockSignals(True)
+            self.element_list.clear()
+            descriptors = []
+            if self.viewmodel and hasattr(self.viewmodel, 'get_component_descriptors'):
+                try:
+                    descriptors = self.viewmodel.get_component_descriptors() or []
+                except Exception:
+                    descriptors = []
+
+            if descriptors:
+                for desc in descriptors:
+                    prefix = desc.get('prefix') or ''
+                    label = desc.get('label') or prefix.rstrip('_') or 'element'
+                    item = QListWidgetItem(label)
+                    data = {'id': prefix, 'name': label}
+                    if 'color' in desc:
+                        data['color'] = desc['color']
+                    item.setData(Qt.UserRole, data)
+                    color = desc.get('color')
+                    if color:
+                        try:
+                            item.setForeground(QBrush(QColor(color)))
+                        except Exception:
+                            pass
+                    try:
+                        item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
+                    self.element_list.addItem(item)
+            elif self.viewmodel and hasattr(self.viewmodel, 'state') and hasattr(self.viewmodel.state, 'model_spec'):
+                # Fallback: infer prefixes from parameter names when descriptors unavailable
+                spec = self.viewmodel.state.model_spec
+                params = getattr(spec, 'params', {}) or {}
+                prefixes = {}
+                for k in params.keys():
+                    if '_' in k:
+                        p = k.split('_', 1)[0] + '_'
+                        prefixes[p] = prefixes.get(p, 0) + 1
+                for p in sorted(prefixes.keys()):
+                    name = p.rstrip('_')
+                    item = QListWidgetItem(name)
+                    item.setData(Qt.UserRole, {'id': p, 'name': name})
+                    try:
+                        item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
+                    self.element_list.addItem(item)
+            # Prepend an entry representing the active/current model so it's always visible
+            try:
+                model_label = None
+                if self.viewmodel and hasattr(self.viewmodel, 'state'):
+                    model_label = getattr(self.viewmodel.state, 'model_name', None)
+                if not model_label:
+                    model_label = 'Model'
+                # Avoid duplicate if a component uses the same id
+                first = self.element_list.item(0)
+                # Safely determine whether the first item is the injected 'model'
+                first_has_model_id = False
+                if first is not None:
+                    try:
+                        fd = first.data(Qt.UserRole)
+                        if isinstance(fd, dict) and fd.get('id') == 'model':
+                            first_has_model_id = True
+                    except Exception:
+                        first_has_model_id = False
+                if first is None or not first_has_model_id:
+                    model_item = QListWidgetItem(str(model_label))
+                    model_item.setData(Qt.UserRole, {'id': 'model', 'name': model_label})
+                    # make it visually distinct (bold + subtle background)
+                    try:
+                        f = model_item.font()
+                        f.setBold(True)
+                        model_item.setFont(f)
+                    except Exception:
+                        pass
+                    try:
+                        model_item.setBackground(QBrush(QColor("#f2f2f7")))
+                        model_item.setToolTip("Active model (non-removable)")
+                    except Exception:
+                        pass
+                    self.element_list.insertItem(0, model_item)
+                    try:
+                        model_item.setFlags(model_item.flags() & ~Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # If nothing detected (no composite components or inferred prefixes),
+            # ensure we include the active/current model as a single element so
+            # the UI always shows at least one selectable entry.
+            if self.element_list.count() == 0:
+                try:
+                    name = None
+                    if self.viewmodel and hasattr(self.viewmodel, 'state'):
+                        name = getattr(self.viewmodel.state, 'model_name', None)
+                    if not name:
+                        name = "Model"
+                    # attempt to annotate with a center value if available
+                    tooltip = None
+                    try:
+                        mdl = getattr(self.viewmodel.state, 'model', None) if self.viewmodel and hasattr(self.viewmodel, 'state') else None
+                        if mdl is not None:
+                            center_val = None
+                            if hasattr(mdl, 'center'):
+                                center_val = getattr(mdl, 'center')
+                            elif hasattr(mdl, 'Center'):
+                                center_val = getattr(mdl, 'Center')
+                            if center_val is not None:
+                                tooltip = f"center={center_val}"
+                    except Exception:
+                        tooltip = None
+
+                    item = QListWidgetItem(str(name))
+                    item.setData(Qt.UserRole, {'id': 'model', 'name': name})
+                    if tooltip:
+                        item.setToolTip(tooltip)
+                    try:
+                        item.setFlags(item.flags() & ~Qt.ItemIsDragEnabled)
+                    except Exception:
+                        pass
+                    self.element_list.addItem(item)
+                except Exception:
+                    pass
+
+            self.element_list.blockSignals(False)
+        except Exception:
+            try:
+                self.element_list.blockSignals(False)
+            except Exception:
+                pass
+
+    def _update_file_action_state(self):
+        if not hasattr(self, "file_list"):
+            return
+        has_files = self.file_list.count() > 0
+        has_selection = self.file_list.currentRow() >= 0
+        if hasattr(self, "file_remove_btn"):
+            self.file_remove_btn.setEnabled(has_selection)
+        if hasattr(self, "file_clear_btn"):
+            # Allow Clear List to be used even when the visible list is empty.
+            # This helps when a file is loaded but for some reason doesn't appear
+            # in the list — the user can still force-clear queued/loaded state.
+            self.file_clear_btn.setEnabled(True)
+
+    def _init_right_dock(self):
+        # Replaced static parameter controls with a dynamic, scrollable form.
+        self.right_dock = QDockWidget("Parameters", self)
+        container = QWidget()
+        vlayout = QVBoxLayout(container)
+
+        # Model selector placed at the top of the parameters panel
+        self.model_selector = QComboBox()
+        # Populate model selector dynamically from discovered model specs where possible.
+        try:
+            # lazy import to avoid circular imports at module import time
+            from models import get_available_model_names
+            import re
+
+            def _pretty(name: str) -> str:
+                # remove trailing 'ModelSpec' and split CamelCase into words
+                s = re.sub(r"ModelSpec$", "", name)
+                s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
+                pretty = s.strip()
+                if pretty.lower() == "composite":
+                    return "Custom Model"
+                return pretty
+
+            spec_class_names = get_available_model_names()
+            display_names = [_pretty(n) for n in spec_class_names]
+            # ensure we have at least the historical defaults as fallback
+            if display_names:
+                self.model_selector.addItems(display_names)
+            else:
+                self.model_selector.addItems(["Voigt", "Gaussian"])
+        except Exception:
+            # Fall back to the original static list if discovery fails
+            self.model_selector.addItems(["Voigt", "Gaussian"])
+        vlayout.addWidget(QLabel("Model:"))
+        vlayout.addWidget(self.model_selector)
+
+        # Chi-squared display (placed above the parameter list)
+        self.chi_label = QLabel("Chi-squared: N/A")
+        try:
+            f = self.chi_label.font()
+            f.setPointSize(max(8, f.pointSize() - 1))
+            self.chi_label.setFont(f)
+        except Exception:
+            pass
+        vlayout.addWidget(self.chi_label)
 
         # set initial selection from viewmodel/state if available
         try:
@@ -971,11 +1084,100 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-    def append_log(self, msg: str):
-        """Append a message to the log dock."""
+    def _init_elements_dock(self):
+        """Create a separate dock on the right to host model elements (peaks).
+        This sits beneath the Parameters dock and holds the element list and
+        add/remove buttons.
+        """
+        self.elements_dock = QDockWidget("Elements", self)
+        container = QWidget()
+        vlayout = QVBoxLayout(container)
+
+        # light-weight element list
+        self.element_list = QListWidget()
+        self.element_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.element_list.setDragEnabled(True)
+        self.element_list.setAcceptDrops(True)
+        self.element_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.element_list.setDefaultDropAction(Qt.MoveAction)
+        vlayout.addWidget(self.element_list)
+
+        # add / remove row
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("Add Element")
+        remove_btn = QPushButton("Remove Element")
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(remove_btn)
+        vlayout.addLayout(btn_row)
+
+        # keep references for other methods
+        self.element_add_btn = add_btn
+        self.element_remove_btn = remove_btn
+
+        self.elements_dock.setWidget(container)
+        # Prefer placing the Elements dock to the right of the Log (bottom)
+        # dock so it appears at the lower-right corner of the UI. If the
+        # bottom dock is not present, fall back to placing it in the right
+        # column under Parameters (previous behavior).
         try:
-            if hasattr(self, "log_dock") and self.log_dock is not None:
-                self.log_dock.append_log(msg)
+            # attempt to add into the bottom area first
+            self.addDockWidget(Qt.BottomDockWidgetArea, self.elements_dock)
+            if hasattr(self, 'bottom_dock'):
+                # split horizontally so the elements dock sits to the right of the Log
+                self.splitDockWidget(self.bottom_dock, self.elements_dock, Qt.Horizontal)
+        except Exception:
+            try:
+                # fallback: add to the right column and stack under Parameters
+                self.addDockWidget(Qt.RightDockWidgetArea, self.elements_dock)
+                if hasattr(self, 'right_dock'):
+                    self.splitDockWidget(self.right_dock, self.elements_dock, Qt.Vertical)
+            except Exception:
+                pass
+        try:
+            self.elements_dock.setMinimumWidth(260)
+        except Exception:
+            pass
+
+        # Wire UI handlers
+        try:
+            self.element_list.currentRowChanged.connect(self._on_element_selected)
+        except Exception:
+            pass
+        try:
+            self.element_list.model().rowsMoved.connect(self._on_element_rows_moved)
+        except Exception:
+            pass
+        try:
+            add_btn.clicked.connect(self._on_element_added_clicked)
+        except Exception:
+            pass
+        try:
+            remove_btn.clicked.connect(self._on_element_remove_clicked)
+        except Exception:
+            pass
+
+        # Populate initial contents
+        try:
+            self._refresh_element_list()
+        except Exception:
+            pass
+
+    def _init_bottom_dock(self):
+        self.bottom_dock = QDockWidget("Log", self)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.append("System initialized.")
+        self.bottom_dock.setWidget(self.log_text)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.bottom_dock)
+
+    # --------------------------
+    # View-only public methods
+    # --------------------------
+    def append_log(self, msg: str):
+        # Safely append to the log widget if present; otherwise fall back to stdout.
+        try:
+            if hasattr(self, "log_text") and self.log_text is not None:
+                self.log_text.append(msg)
             else:
                 print(msg)
         except Exception:
