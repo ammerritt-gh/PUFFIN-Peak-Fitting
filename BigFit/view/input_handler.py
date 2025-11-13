@@ -166,7 +166,7 @@ class InputHandler(QObject):
             try:
                 # prefer a configurable constant from view.constants
                 from view.constants import CURVE_SELECT_TOL_PIXELS
-                tol_px = int(getattr(CURVE_SELECT_TOL_PIXELS, "__int__", lambda: CURVE_SELECT_TOL_PIXELS)()) if False else CURVE_SELECT_TOL_PIXELS
+                tol_px = CURVE_SELECT_TOL_PIXELS
             except Exception:
                 tol_px = 8
 
