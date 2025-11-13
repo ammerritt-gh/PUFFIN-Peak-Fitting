@@ -300,6 +300,7 @@ class ModelState:
             "y": self.y_data.tolist(),
             "parameters": {k: v.value for k, v in self.model_spec.params.items()},
             "fixed": {k: bool(getattr(v, 'fixed', False)) for k, v in self.model_spec.params.items()},
+            "link_groups": {k: getattr(v, 'link_group', None) for k, v in self.model_spec.params.items()},
             "excluded": np.asarray(self.excluded).astype(bool).tolist(),
         }
 
@@ -341,6 +342,17 @@ class ModelState:
                 if k in self.model_spec.params:
                     try:
                         self.model_spec.params[k].fixed = bool(fv)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # restore link_group if present
+        link_map = snap.get("link_groups", {})
+        try:
+            for k, lg in link_map.items():
+                if k in self.model_spec.params:
+                    try:
+                        self.model_spec.params[k].link_group = int(lg) if lg else None
                     except Exception:
                         pass
         except Exception:

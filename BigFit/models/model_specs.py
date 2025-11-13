@@ -243,6 +243,7 @@ def _clone_parameter(param: "Parameter", new_name: str, value: Any) -> "Paramete
         step=getattr(param, "step", None),
         control=getattr(param, "control", None),
         fixed=getattr(param, "fixed", False),
+        link_group=getattr(param, "link_group", None),
     )
 
 
@@ -274,6 +275,9 @@ class Parameter:
                    only a display/precision hint for the widget.
       step       : single-step increment for numeric controls (maps to
                    QDoubleSpinBox.setSingleStep / QSpinBox.setSingleStep).
+      link_group : integer indicating which parameters are linked together (optional)
+                   Parameters with the same non-zero link_group number share values
+                   and are fit as a single parameter. 0 or None = not linked.
     """
     def __init__(self,
                  name: str,
@@ -286,7 +290,8 @@ class Parameter:
                  decimals: Optional[int] = None,
                  step: Optional[float] = None,
                  control: Optional[Dict[str, Any]] = None,
-                 fixed: Optional[bool] = False):
+                 fixed: Optional[bool] = False,
+                 link_group: Optional[int] = None):
         self.name = name
         self.value = value
         # ptype recommended to be one of: "float","int","str","bool","choice"
@@ -307,6 +312,8 @@ class Parameter:
         self.control = control
         # whether this parameter should be held fixed during fitting
         self.fixed = bool(fixed)
+        # link group for parameter linking (0 or None = not linked)
+        self.link_group = int(link_group) if link_group else None
 
     def to_spec(self) -> Dict[str, Any]:
         """Export the parameter as a spec dict the view expects.
@@ -322,6 +329,7 @@ class Parameter:
           "hint"     -> help text for UI/tooltip
           "decimals" -> integer number of decimal places for float widgets
           "step"     -> numeric step increment for spin widgets
+          "link_group" -> integer indicating linked parameters (0 or None = not linked)
 
         The view will use these keys to pick and configure widgets.
         """
@@ -354,6 +362,12 @@ class Parameter:
             spec["fixed"] = bool(getattr(self, "fixed", False))
         except Exception:
             spec["fixed"] = False
+        # expose link_group to the UI for parameter linking
+        try:
+            link_val = getattr(self, "link_group", None)
+            spec["link_group"] = int(link_val) if link_val else None
+        except Exception:
+            spec["link_group"] = None
         return spec
 
 class BaseModelSpec:

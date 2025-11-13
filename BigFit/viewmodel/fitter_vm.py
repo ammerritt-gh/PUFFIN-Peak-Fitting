@@ -548,11 +548,45 @@ class FitterViewModel(QObject):
                 self._log_message("No free parameters to fit (all parameters are fixed).")
                 return
 
-            # initial values for free params
-            params = {k: full_values.get(k) for k in free_keys}
-            # bounds for free params (ordered to match free_keys)
-            lower = [getattr(model_spec.params[k], "min", None) if getattr(model_spec.params[k], "min", None) is not None else -np.inf for k in free_keys]
-            upper = [getattr(model_spec.params[k], "max", None) if getattr(model_spec.params[k], "max", None) is not None else np.inf for k in free_keys]
+            # Build link_group mapping: for linked parameters, only fit one representative
+            link_groups = {}  # link_group -> [param_names]
+            link_representatives = {}  # param_name -> representative_name (for linked params)
+            
+            for k in free_keys:
+                try:
+                    lg = getattr(model_spec.params[k], "link_group", None)
+                    if lg and lg > 0:
+                        if lg not in link_groups:
+                            link_groups[lg] = []
+                        link_groups[lg].append(k)
+                except Exception:
+                    pass
+            
+            # For each link group, choose the first parameter as the representative
+            for lg, param_names in link_groups.items():
+                if len(param_names) > 1:
+                    representative = param_names[0]
+                    for pname in param_names:
+                        link_representatives[pname] = representative
+            
+            # Build unique free parameter list (only one param per link group)
+            unique_free_keys = []
+            seen_representatives = set()
+            for k in free_keys:
+                rep = link_representatives.get(k, k)
+                if rep not in seen_representatives:
+                    unique_free_keys.append(rep)
+                    seen_representatives.add(rep)
+            
+            if not unique_free_keys:
+                self._log_message("No free parameters to fit (all parameters are fixed or linked).")
+                return
+
+            # initial values for unique free params
+            params = {k: full_values.get(k) for k in unique_free_keys}
+            # bounds for unique free params (ordered to match unique_free_keys)
+            lower = [getattr(model_spec.params[k], "min", None) if getattr(model_spec.params[k], "min", None) is not None else -np.inf for k in unique_free_keys]
+            upper = [getattr(model_spec.params[k], "max", None) if getattr(model_spec.params[k], "max", None) is not None else np.inf for k in unique_free_keys]
             bounds = (lower, upper)
         except Exception as e:
             log_exception("Failed to build parameter/bounds list", e, vm=self)
@@ -567,6 +601,10 @@ class FitterViewModel(QObject):
             try:
                 for k, val in zip(param_keys, args):
                     p[k] = val
+                    # If this parameter is a representative for linked params, propagate value
+                    for orig_k, rep_k in link_representatives.items():
+                        if rep_k == k:
+                            p[orig_k] = val
             except Exception:
                 pass
             # IMPORTANT: some ModelSpec.evaluate implementations expect a single 'params' dict
@@ -599,6 +637,7 @@ class FitterViewModel(QObject):
                     self.state.fit_result = result
 
                     # Apply fit result back into model_spec.params where possible so UI will reflect fitted values
+                    # Also propagate values to linked parameters
                     try:
                         spec = getattr(self.state, "model_spec", None)
                         if spec is not None:
@@ -608,6 +647,17 @@ class FitterViewModel(QObject):
                                         spec.set_param_value(k, v)
                                     elif hasattr(spec, "params") and k in spec.params:
                                         spec.params[k].value = v
+                                    
+                                    # Propagate to linked parameters
+                                    for orig_k, rep_k in link_representatives.items():
+                                        if rep_k == k and orig_k != k:
+                                            try:
+                                                if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                                    spec.set_param_value(orig_k, v)
+                                                elif hasattr(spec, "params") and orig_k in spec.params:
+                                                    spec.params[orig_k].value = v
+                                            except Exception:
+                                                pass
                                 except Exception:
                                     pass
                     except Exception:
@@ -620,6 +670,13 @@ class FitterViewModel(QObject):
                             for k, v in result.items():
                                 try:
                                     setattr(mdl, k, v)
+                                    # Propagate to linked parameters
+                                    for orig_k, rep_k in link_representatives.items():
+                                        if rep_k == k and orig_k != k:
+                                            try:
+                                                setattr(mdl, orig_k, v)
+                                            except Exception:
+                                                pass
                                 except Exception:
                                     pass
                     except Exception:
@@ -1173,15 +1230,24 @@ class FitterViewModel(QObject):
             setattr(self.state, "model", mdl)
 
         is_composite = isinstance(model_spec, CompositeModelSpec)
-        # split fixed toggles (keys ending with '__fixed') from value updates
+        # split fixed toggles (keys ending with '__fixed'), link groups (keys ending with '__link'), 
+        # and value updates
         fixed_suffix = "__fixed"
+        link_suffix = "__link"
         fixed_updates = {}
+        link_updates = {}
         value_updates = {}
         for k, v in params.items():
             try:
                 if isinstance(k, str) and k.endswith(fixed_suffix):
                     base = k[: -len(fixed_suffix)]
                     fixed_updates[base] = bool(v)
+                elif isinstance(k, str) and k.endswith(link_suffix):
+                    base = k[: -len(link_suffix)]
+                    try:
+                        link_updates[base] = int(v) if v else None
+                    except Exception:
+                        link_updates[base] = None
                 else:
                     value_updates[k] = v
             except Exception:
@@ -1189,7 +1255,32 @@ class FitterViewModel(QObject):
                 value_updates[k] = v
 
         applied = []
-        # First apply fixed-state updates so UI and fit logic see changes immediately
+        # First apply link_group updates
+        for base, link_val in link_updates.items():
+            try:
+                if model_spec is not None and base in model_spec.params:
+                    try:
+                        model_spec.params[base].link_group = link_val
+                    except Exception:
+                        pass
+                    # If composite, also propagate link_group back to the underlying component param
+                    try:
+                        if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, 'get_link'):
+                            link = model_spec.get_link(base)
+                            if link and isinstance(link, tuple) and len(link) >= 2:
+                                component, pname = link
+                                try:
+                                    if pname in getattr(component.spec, 'params', {}):
+                                        component.spec.params[pname].link_group = link_val
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+                applied.append(f"{base}{link_suffix}")
+            except Exception:
+                pass
+        
+        # Apply fixed-state updates so UI and fit logic see changes immediately
         for base, fv in fixed_updates.items():
             try:
                 if model_spec is not None and base in model_spec.params:
@@ -1220,6 +1311,19 @@ class FitterViewModel(QObject):
                 pass
 
         # Now apply value updates (regular parameter assignments)
+        # Build a map of link_group -> [param_names] to propagate values to linked params
+        link_groups = {}
+        if model_spec is not None and hasattr(model_spec, "params"):
+            for pname, param in model_spec.params.items():
+                try:
+                    lg = getattr(param, "link_group", None)
+                    if lg and lg > 0:
+                        if lg not in link_groups:
+                            link_groups[lg] = []
+                        link_groups[lg].append(pname)
+                except Exception:
+                    pass
+        
         for k, v in value_updates.items():
             try:
                 # prefer to set attribute on the actual model object
@@ -1248,6 +1352,27 @@ class FitterViewModel(QObject):
                             except Exception:
                                 pass
                         applied.append(k)
+                
+                # If this parameter is linked, propagate value to all linked parameters
+                if model_spec is not None and k in model_spec.params:
+                    try:
+                        lg = getattr(model_spec.params[k], "link_group", None)
+                        if lg and lg > 0 and lg in link_groups:
+                            linked_params = link_groups[lg]
+                            for linked_name in linked_params:
+                                if linked_name != k:  # Don't apply to self
+                                    try:
+                                        setattr(mdl, linked_name, v)
+                                        if is_composite and hasattr(model_spec, "set_param_value"):
+                                            model_spec.set_param_value(linked_name, v)
+                                        else:
+                                            model_spec.params[linked_name].value = v
+                                        if linked_name not in applied:
+                                            applied.append(linked_name)
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
             except Exception:
                 # ignore per-parameter failures
                 pass
