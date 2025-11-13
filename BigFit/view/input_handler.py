@@ -421,9 +421,9 @@ class InputHandler(QObject):
                 except Exception as e:
                     try:
                         if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
-                            self.viewmodel.log_message.emit(f"Interactive update failed: {e}\n{traceback.format_exc()}")
+                            self.viewmodel.log_message.emit(f"Fit execution failed: {e}\n{traceback.format_exc()}")
                         else:
-                            print(f"Interactive update failed: {e}")
+                            print(f"Fit execution failed: {e}")
                             print(traceback.format_exc())
                     except Exception:
                         pass
