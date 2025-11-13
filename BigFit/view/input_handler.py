@@ -1,178 +1,804 @@
-"""
-Input handler module for plot interactions.
-
-This module centralizes mouse and keyboard event handling for interactive plot
-manipulation, extracted from PySide_Fitter_PyQtGraph.py patterns.
-"""
-from PySide6.QtCore import QObject, Signal, Qt
-from PySide6.QtGui import QKeyEvent, QWheelEvent
-import pyqtgraph as pg
+﻿# view/input_handler.py
+# type: ignore
+from PySide6.QtCore import QObject, Qt, QPointF, QEvent
+from PySide6.QtGui import QKeyEvent, QMouseEvent, QWheelEvent
+import traceback
+import numpy as np
+from models import CompositeModelSpec
+from viewmodel.logging_helpers import log_exception
 
 
 class InputHandler(QObject):
     """
-    Handles user input events for plot interactions.
-    
-    Signals:
-        mouse_clicked: Emitted when plot is clicked with (x, y, button)
-        mouse_moved: Emitted when mouse moves with (x, y, buttons) in data coordinates
-        key_pressed: Emitted when key is pressed with (key_code, modifiers)
-        wheel_scrolled: Emitted when wheel scrolled with (delta, modifiers)
+    Handles all interactive user input for the main plot:
+    - Peak dragging and exclusion events (from ViewBox signals)
+    - Optional fallback to raw Qt eventFilter handling
+    - Curve selection and deselection via mouse + spacebar
     """
-    
-    mouse_clicked = Signal(float, float, object)  # x, y, button
-    mouse_moved = Signal(float, float, object)  # x, y in data coordinates, buttons
-    key_pressed = Signal(int, object)  # key code, modifiers
-    wheel_scrolled = Signal(int, object)  # delta, modifiers
-    
-    def __init__(self, plot_widget):
+
+    def __init__(self, viewbox=None, viewmodel=None, parent=None):
+        super().__init__(parent)
+        self.viewmodel = viewmodel
+        self.viewbox = viewbox
+
+        # dragging state
+        self.dragging_peak = None
+        self.drag_offset = 0.0
+
+        # curve selection state (stores the curve ID or None)
+        self.selected_curve_id = None
+        self.selected_component_prefix = None
+
+        # control mapping for interactive parameter binding
+        # keys: (action:str, modifiers: tuple(sorted modifier names)) -> list of {name, step}
+        self.control_map = {}
+        # last mouse data coordinate used for mouse_move controls
+        self._last_mouse_data_x = None
+
+        if self.viewbox is not None:
+            self._connect_viewbox()
+
+    def set_viewmodel(self, vm):
+        self.viewmodel = vm
+
+    def set_control_map(self, control_map: dict):
+        """Provide control mapping from the view. Expected shape:
+        { (action, tuple(modifiers)): [ { 'name': str, 'step': float, ... }, ... ] }
         """
-        Initialize input handler.
-        
-        Args:
-            plot_widget: PyQtGraph PlotWidget to handle events for
-        """
-        super().__init__()
-        self.plot_widget = plot_widget
-        self._dragging = False
-        self._drag_start = None
-        
-        # Connect to plot events
-        self._connect_events()
-    
-    def _connect_events(self):
-        """Connect to plot widget events."""
-        try:
-            # Mouse events
-            self.plot_widget.scene().sigMouseClicked.connect(self._on_mouse_click)
-            self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_move)
-            
-            # Keyboard events - override plot widget methods
-            self.plot_widget.keyPressEvent = self._on_key_press
-            self.plot_widget.keyReleaseEvent = self._on_key_release
-            
-            # Install event filter for wheel events
-            self.plot_widget.viewport().installEventFilter(self)
-        except Exception as e:
-            print(f"Warning: Failed to connect some events: {e}")
-    
-    def _on_mouse_click(self, event):
-        """Handle mouse click events."""
-        try:
-            pos = event.scenePos()
-            vb = self.plot_widget.getViewBox()
-            if vb is None or not vb.sceneBoundingRect().contains(pos):
-                return
-            
-            # Map to data coordinates
-            mousePoint = vb.mapSceneToView(pos)
-            x = float(mousePoint.x())
-            y = float(mousePoint.y())
-            
-            # Get button
+        out = {}
+        for k, v in (control_map or {}).items():
             try:
-                button = event.button()
-            except:
-                button = None
-            
-            # Emit signal
-            self.mouse_clicked.emit(x, y, button)
-            
-        except Exception as e:
-            print(f"Mouse click error: {e}")
-    
-    def _on_mouse_move(self, event):
-        """Handle mouse move events."""
-        try:
-            # Get position from event
-            try:
-                pos = event.scenePos() if hasattr(event, 'scenePos') else event
-            except:
-                pos = event
-            
-            vb = self.plot_widget.getViewBox()
-            if vb is None:
-                return
-            
-            # Map to data coordinates
-            mousePoint = vb.mapSceneToView(pos)
-            x = float(mousePoint.x())
-            y = float(mousePoint.y())
-            
-            # Determine button state if available on the event
-            buttons = 0
-            try:
-                # QGraphicsSceneMouseEvent has buttons()
-                if hasattr(event, "buttons"):
-                    buttons = event.buttons()
+                # accept keys as (action, modifiers) or as a simple action string
+                if isinstance(k, (list, tuple)) and len(k) >= 2:
+                    action = k[0]
+                    mods = tuple(sorted([str(m) for m in k[1]]))
+                elif isinstance(k, (list, tuple)) and len(k) == 1:
+                    action = k[0]
+                    mods = tuple()
+                else:
+                    action = k
+                    mods = tuple()
+                out[(action, mods)] = list(v)
             except Exception:
-                buttons = 0
-            
-            # Emit signal (x, y, buttons)
-            self.mouse_moved.emit(x, y, buttons)
-            
-        except Exception as e:
-            print(f"Mouse move error: {e}")
-    
-    def _on_key_press(self, event):
-        """Handle key press events."""
+                continue
+        self.control_map = out
+
+    def _log_exception(self, context: str, exc: Exception = None):
+        """Helper that routes exception logs through the shared logger."""
         try:
-            key = event.key()
-            modifiers = event.modifiers()
-            
-            # Emit signal
-            self.key_pressed.emit(key, modifiers)
-            
-        except Exception as e:
-            print(f"Key press error: {e}")
-        
-        # Call parent implementation
-        try:
-            return pg.PlotWidget.keyPressEvent(self.plot_widget, event)
-        except:
-            pass
-    
-    def _on_key_release(self, event):
-        """Handle key release events."""
-        # Call parent implementation
-        try:
-            return pg.PlotWidget.keyReleaseEvent(self.plot_widget, event)
-        except:
-            pass
-    
+            log_exception(context, exc, vm=self.viewmodel)
+        except Exception:
+            # Last resort to avoid raising from the logger itself
+            try:
+                import traceback
+
+                print(f"{context}: {exc}\n{traceback.format_exc()}")
+            except Exception:
+                pass
+
+    # -----------------------
+    # ViewBox signal hookups
+    # -----------------------
+    def _connect_viewbox(self):
+        """Connect all custom ViewBox signals to local handlers."""
+        vb = self.viewbox
+        if hasattr(vb, "peakSelected"):
+            vb.peakSelected.connect(self.on_peak_selected)
+        if hasattr(vb, "peakMoved"):
+            vb.peakMoved.connect(self.on_peak_moved)
+        if hasattr(vb, "excludePointClicked"):
+            vb.excludePointClicked.connect(self.on_exclude_point)
+        if hasattr(vb, "excludeBoxDrawn"):
+            vb.excludeBoxDrawn.connect(self.on_exclude_box)
+
+    # -----------------------
+    # Event Filter (fallback)
+    # -----------------------
     def eventFilter(self, obj, event):
-        """Filter events, especially for wheel events."""
-        try:
-            if isinstance(event, QWheelEvent):
-                delta = event.angleDelta().y()
-                modifiers = event.modifiers()
-                
-                # Emit signal
-                self.wheel_scrolled.emit(delta, modifiers)
-                
-        except Exception as e:
-            print(f"Event filter error: {e}")
-        
-        # Call parent implementation
+        """Fallback for when ViewBox signals are unavailable."""
+        if isinstance(event, QMouseEvent):
+            # Use QEvent enums for the event.type() comparisons
+            if event.type() == QEvent.MouseButtonPress:
+                return self.on_mouse_press(obj, event)
+            elif event.type() == QEvent.MouseMove:
+                return self.on_mouse_move(obj, event)
+            elif event.type() == QEvent.MouseButtonRelease:
+                return self.on_mouse_release(obj, event)
+
+        # Wheel events (map to parameter adjustments)
+        if isinstance(event, QWheelEvent) or event.type() == QEvent.Wheel:
+            try:
+                handled = self.on_wheel(obj, event)
+                if handled:
+                    return True
+            except Exception as e:
+                self._log_exception("Wheel handling failed", e)
+
+        if isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:
+            return self.handle_key(event)
+
         return super().eventFilter(obj, event)
-    
-    def map_to_data_coords(self, scene_x, scene_y):
-        """
-        Map scene coordinates to data coordinates.
-        
-        Args:
-            scene_x: X coordinate in scene
-            scene_y: Y coordinate in scene
-            
-        Returns:
-            tuple: (x, y) in data coordinates, or (None, None) if mapping fails
-        """
+
+    # -----------------------
+    # ViewBox event handlers
+    # -----------------------
+    def on_peak_selected(self, x, y):
+        """User clicked near a peak → select or start drag."""
+        if self.viewmodel is None:
+            return
+        # Only allow peak selection if a curve is explicitly selected
+        if self.selected_curve_id is None:
+            # ignore selection and keep UI/plot behavior unchanged
+            if hasattr(self.viewmodel, "log_message"):
+                try:
+                    self.viewmodel.log_message.emit("Peak selected but no curve is active — ignoring.")
+                except Exception as e:
+                    self._log_exception("Logging peak-selection info failed", e)
+            return
+
+        idx = self.find_nearest_peak(x)
+        if idx is not None:
+            self.dragging_peak = idx
+            self.drag_offset = self.viewmodel.peaks[idx] - x
+            try:
+                if hasattr(self.viewmodel, "log_message"):
+                    self.viewmodel.log_message.emit(f"Selected peak #{idx} at x={self.viewmodel.peaks[idx]:.3f}")
+            except Exception as e:
+                self._log_exception("Logging peak selection failed", e)
+
+    def on_peak_moved(self, peak_info):
+        """User dragged a peak."""
+        if self.viewmodel is None or self.dragging_peak is None:
+            return
+        new_x = float(peak_info.get("center", 0.0))
+        self.viewmodel.peaks[self.dragging_peak] = new_x
+        if hasattr(self.viewmodel, "update_plot"):
+            self.viewmodel.update_plot()
+
+    def on_exclude_point(self, x, y):
+        """Toggle exclusion of a single data point."""
+        if self.viewmodel is None:
+            return
+        # Prefer a pixel-space nearest-point test (robust across scales).
+        idx = None
         try:
-            vb = self.plot_widget.getViewBox()
-            if vb is None:
-                return None, None
-            
-            mousePoint = vb.mapSceneToView(pg.Point(scene_x, scene_y))
-            return float(mousePoint.x()), float(mousePoint.y())
-        except:
-            return None, None
+            tol_px = None
+            try:
+                # prefer a configurable constant from view.constants
+                from view.constants import CURVE_SELECT_TOL_PIXELS
+                tol_px = CURVE_SELECT_TOL_PIXELS
+            except Exception:
+                tol_px = 8
+
+            if hasattr(self, "viewbox") and getattr(self, "viewbox", None) is not None:
+                vb = self.viewbox
+                try:
+                    from PySide6.QtCore import QPointF
+                    click_scene_pt = vb.mapViewToScene(QPointF(float(x), float(y)))
+                    click_scene = (float(click_scene_pt.x()), float(click_scene_pt.y()))
+                    # Try to use the raw data arrays on the ViewModel if available
+                    xd = getattr(self.viewmodel.state, "x_data", None)
+                    yd = getattr(self.viewmodel.state, "y_data", None)
+                    if xd is not None and yd is not None:
+                        xd = np.asarray(xd)
+                        yd = np.asarray(yd)
+                        best_i = None
+                        best_d2 = None
+                        for i, (xi, yi) in enumerate(zip(xd, yd)):
+                            try:
+                                pt = vb.mapViewToScene(QPointF(float(xi), float(yi)))
+                                dx = float(pt.x()) - click_scene[0]
+                                dy = float(pt.y()) - click_scene[1]
+                                d2 = dx * dx + dy * dy
+                                if best_d2 is None or d2 < best_d2:
+                                    best_d2 = d2
+                                    best_i = i
+                            except Exception:
+                                continue
+                        if best_i is not None and best_d2 is not None:
+                            if best_d2 <= (float(tol_px) * float(tol_px)):
+                                idx = int(best_i)
+                except Exception:
+                    idx = None
+
+        except Exception:
+            idx = None
+
+        try:
+            # If we found an index and the ViewModel supports toggling by index, call that.
+            if idx is not None and hasattr(self.viewmodel, "toggle_point_exclusion_by_index"):
+                try:
+                    self.viewmodel.toggle_point_exclusion_by_index(int(idx))
+                except Exception as e:
+                    # fallback to the coordinate-based toggle
+                    self._log_exception("toggle_point_exclusion_by_index failed", e)
+                    if hasattr(self.viewmodel, "toggle_point_exclusion"):
+                        try:
+                            self.viewmodel.toggle_point_exclusion(x, y)
+                        except Exception as e2:
+                            self._log_exception("fallback toggle_point_exclusion failed", e2)
+            else:
+                # fallback: call coordinate-based toggle as before
+                if hasattr(self.viewmodel, "toggle_point_exclusion"):
+                    try:
+                        self.viewmodel.toggle_point_exclusion(x, y)
+                    except Exception as e:
+                        self._log_exception("toggle_point_exclusion failed", e)
+        except Exception as e:
+            self._log_exception("toggle_point_exclusion overall failed", e)
+
+        try:
+            # Maintain the higher-level log for visual trace; ViewModel also logs index/result.
+            if hasattr(self.viewmodel, "log_message"):
+                self.viewmodel.log_message.emit(f"Toggled exclusion at ({x:.2f}, {y:.2f})")
+        except Exception as e:
+            self._log_exception("emit toggled exclusion log failed", e)
+
+    def on_exclude_box(self, x0, y0, x1, y1):
+        """Box-drag exclusion event."""
+        if self.viewmodel is None:
+            return
+        if hasattr(self.viewmodel, "toggle_box_exclusion"):
+            self.viewmodel.toggle_box_exclusion(x0, y0, x1, y1)
+        self.viewmodel.log_message.emit(f"Exclusion box: ({x0:.2f},{y0:.2f}) → ({x1:.2f},{y1:.2f})")
+
+    # -----------------------
+    # Mouse event (fallbacks)
+    # -----------------------
+    def on_mouse_press(self, obj, event):
+        if event.button() == Qt.LeftButton:
+            x, y = self.mouse_to_data(obj, event.pos())
+
+            # Try selecting a curve
+            curve_id = self.detect_curve_at(obj, x, y)
+            if curve_id is not None:
+                self.set_selected_curve(curve_id)
+                return True
+
+            # Otherwise, check for a nearby peak
+            peak_idx = self.find_nearest_peak(x)
+            if peak_idx is not None:
+                self.dragging_peak = peak_idx
+                self.drag_offset = self.viewmodel.peaks[peak_idx] - x
+                return True
+        return False
+
+    def on_mouse_move(self, obj, event):
+        if self.dragging_peak is not None:
+            x, y = self.mouse_to_data(obj, event.pos())
+            new_x = x + self.drag_offset
+            self.viewmodel.peaks[self.dragging_peak] = new_x
+            if hasattr(self.viewmodel, "update_plot"):
+                self.viewmodel.update_plot()
+            return True
+
+        # If no peak drag is active, map mouse movement to parameter controls if configured.
+        # Only do interactive parameter mapping when a curve is selected to avoid
+        # interfering with normal pan/zoom behavior.
+        if self.selected_curve_id is None:
+            # keep last mouse x in sync so first move after selection initializes correctly
+            try:
+                x, y = self.mouse_to_data(obj, event.pos())
+                self._last_mouse_data_x = x
+            except Exception as e:
+                self._log_exception("failed to update last mouse x", e)
+            return False
+
+        if self.control_map and self.viewmodel is not None:
+            x, y = self.mouse_to_data(obj, event.pos())
+            try:
+                mods = event.modifiers()
+            except Exception:
+                mods = Qt.NoModifier
+            mod_names = self._modifiers_to_names(mods)
+            key = ("mouse_move", mod_names)
+            if key not in self.control_map:
+                key = ("mouse_move", tuple())
+                if key not in self.control_map:
+                    # update last mouse x and return
+                    self._last_mouse_data_x = x
+                    return False
+
+            last_x = self._last_mouse_data_x
+            self._last_mouse_data_x = x
+            if last_x is None:
+                return False
+
+            dx = x - last_x
+            if abs(dx) == 0:
+                return False
+
+            updates = {}
+            try:
+                current_specs = self.viewmodel.get_parameters()
+            except Exception:
+                current_specs = {}
+
+            for entry in self.control_map.get(key, []):
+                try:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_component = entry.get("component")
+                    if entry_component and entry_component != self.selected_component_prefix:
+                        continue
+                    name = entry.get("name")
+                    step_val = float(entry.get("step", 1.0))
+                    cur = None
+                    if name in current_specs and isinstance(current_specs[name], dict):
+                        cur = current_specs[name].get("value")
+                    if cur is None:
+                        mdl = getattr(self.viewmodel.state, "model", None)
+                        if mdl is not None and hasattr(mdl, name):
+                            cur = getattr(mdl, name)
+                    if cur is None:
+                        spec = getattr(self.viewmodel.state, "model_spec", None)
+                        if spec is not None and name in getattr(spec, "params", {}):
+                            cur = getattr(spec.params[name], "value", None)
+                    if cur is None:
+                        continue
+                    new_val = cur + step_val * float(dx)
+                    if name in current_specs and isinstance(current_specs[name], dict):
+                        mn = current_specs[name].get("min", None)
+                        mx = current_specs[name].get("max", None)
+                        if mn is not None:
+                            new_val = max(new_val, mn)
+                        if mx is not None:
+                            new_val = min(new_val, mx)
+                    updates[name] = new_val
+                except Exception:
+                    continue
+
+            if updates:
+                try:
+                    if hasattr(self.viewmodel, "handle_action"):
+                        try:
+                            self.viewmodel.handle_action("apply_parameters", params=updates)
+                        except Exception:
+                            # fallback
+                            self.viewmodel.apply_parameters(updates)
+                    else:
+                        self.viewmodel.apply_parameters(updates)
+                    if hasattr(self.viewmodel, "log_message"):
+                        try:
+                            self.viewmodel.log_message.emit(f"Interactive update: {updates}")
+                        except Exception:
+                            pass
+                except Exception as e:
+                    # Log interactive update parsing errors for debugging
+                    try:
+                        if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+                            self.viewmodel.log_message.emit(f"Interactive update parse failed: {e}\n{traceback.format_exc()}")
+                        else:
+                            print(f"Interactive update parse failed: {e}")
+                            print(traceback.format_exc())
+                    except Exception:
+                        pass
+                return True
+
+        return False
+
+    def on_mouse_release(self, obj, event):
+        if event.button() == Qt.LeftButton and self.dragging_peak is not None:
+            self.dragging_peak = None
+            return True
+        return False
+
+    # -----------------------
+    # Keyboard
+    # -----------------------
+    def handle_key(self, event):
+        key = event.key()
+
+        # Log the key press in a readable format
+        key_text = event.text() or ""
+        key_name = Qt.Key(key).name if hasattr(Qt.Key(key), "name") else str(key)
+        if hasattr(self.viewmodel, "log_message"):
+            self.viewmodel.log_message.emit(
+                f"KeyPress: key={key} ({key_name}), text='{key_text}'"
+            )
+        else:
+            print(f"KeyPress: key={key} ({key_name}), text='{key_text}'")
+
+        if Qt.Key_0 <= key <= Qt.Key_9:
+            if self._handle_numeric_hotkey(key):
+                return True
+
+        if key == Qt.Key_Plus:
+            self.viewmodel.log_message.emit("Increase parameter (placeholder)")
+            return True
+        elif key == Qt.Key_Minus:
+            self.viewmodel.log_message.emit("Decrease parameter (placeholder)")
+            return True
+        elif key == Qt.Key_Space:
+            if self.viewbox is not None:
+                self.viewbox.clear_selection()
+            self.clear_selected_curve()
+            return True
+        elif key == Qt.Key_F:
+            if self.viewmodel is not None and hasattr(self.viewmodel, "run_fit"):
+                try:
+                    self.viewmodel.run_fit()
+                except Exception as e:
+                    try:
+                        if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+                            self.viewmodel.log_message.emit(f"Fit execution failed: {e}\n{traceback.format_exc()}")
+                        else:
+                            print(f"Fit execution failed: {e}")
+                            print(traceback.format_exc())
+                    except Exception:
+                        pass
+            return True
+        elif key in (Qt.Key_E, Qt.Key_Q):
+            step = 1 if key == Qt.Key_E else -1
+            if self._cycle_selected_component(step):
+                return True
+        elif key == Qt.Key_D:
+            # Toggle exclude mode on the ViewBox
+            try:
+                if self.viewbox is not None and hasattr(self.viewbox, "set_exclude_mode"):
+                    current = getattr(self.viewbox, "exclude_mode", False)
+                    new = not bool(current)
+                    try:
+                        self.viewbox.set_exclude_mode(new)
+                    except Exception:
+                        pass
+                    # notify via ViewModel log if available
+                    try:
+                        if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+                            self.viewmodel.log_message.emit(f"Exclude mode {'enabled' if new else 'disabled'} (hotkey)")
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                pass
+        return False
+
+    # -----------------------
+    # Selection management
+    # -----------------------
+    def set_selected_curve(self, curve_id, notify_vm: bool = True):
+        """Set selected curve ID locally. If notify_vm is True, also inform the ViewModel.
+
+        When called from the ViewModel (e.g. external selection change), pass notify_vm=False
+        to avoid cycles.
+        """
+        normalized_id = curve_id
+        if curve_id == "fit" and self._composite_has_components():
+            normalized_id = None
+
+        prefix = None
+        if normalized_id and str(normalized_id).startswith("component:"):
+            prefix = str(normalized_id).split(":", 1)[1]
+        self.selected_component_prefix = prefix
+
+        if self.selected_curve_id != normalized_id:
+            self.selected_curve_id = normalized_id
+            if notify_vm and hasattr(self.viewmodel, "set_selected_curve"):
+                try:
+                    self.viewmodel.set_selected_curve(normalized_id)
+                except Exception as e:
+                    self._log_exception("notify set_selected_curve failed", e)
+
+        if normalized_id is not None and self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+            try:
+                self.viewmodel.log_message.emit(f"Curve '{normalized_id}' selected.")
+            except Exception as e:
+                self._log_exception("emit curve selected log failed", e)
+
+    def clear_selected_curve(self):
+        """Clear selection and notify ViewModel."""
+        # Always clear local state and instruct the ViewModel to clear its selection.
+        # This ensures deselect works even if selection was set directly on the ViewModel
+        # (e.g. via MainWindow._on_curve_clicked) and InputHandler.selected_curve_id is stale.
+        self.selected_curve_id = None
+        self.selected_component_prefix = None
+        if self.viewmodel is not None and hasattr(self.viewmodel, "clear_selected_curve"):
+            try:
+                self.viewmodel.clear_selected_curve()
+            except Exception as e:
+                self._log_exception("clear_selected_curve notify failed", e)
+        if self.viewmodel is not None and hasattr(self.viewmodel, "log_message"):
+            try:
+                self.viewmodel.log_message.emit("Curve deselected (spacebar).")
+            except Exception as e:
+                self._log_exception("emit deselect log failed", e)
+
+    def _cycle_selected_component(self, step: int) -> bool:
+        if step == 0:
+            return False
+        if self.viewmodel is None:
+            return False
+
+        descriptors = []
+        try:
+            if hasattr(self.viewmodel, "get_component_descriptors"):
+                descriptors = self.viewmodel.get_component_descriptors() or []
+        except Exception:
+            descriptors = []
+
+        curve_order = []
+        for desc in descriptors:
+            prefix = desc.get("prefix")
+            if not prefix:
+                continue
+            curve_order.append(f"component:{prefix}")
+
+        if not curve_order:
+            try:
+                existing = list(getattr(self.viewmodel, "curves", {}).keys())
+            except Exception:
+                existing = []
+            curve_order = [cid for cid in existing if cid]
+            if not curve_order:
+                return False
+
+        current = self.selected_curve_id if self.selected_curve_id in curve_order else None
+        if current is None:
+            target = curve_order[0] if step > 0 else curve_order[-1]
+        else:
+            idx = curve_order.index(current)
+            target = curve_order[(idx + step) % len(curve_order)]
+
+        self.set_selected_curve(target)
+        return True
+
+    # -----------------------
+    # Utility helpers
+    # -----------------------
+    def mouse_to_data(self, plot_widget, pos):
+        """Convert mouse QPoint to plot data coordinates."""
+        vb = plot_widget.getViewBox()
+        mouse_point = vb.mapSceneToView(pos)
+        return mouse_point.x(), mouse_point.y()
+
+    def find_nearest_peak(self, x, threshold=0.1):
+        """Find nearest peak (for dragging)."""
+        if self.viewmodel is None or not hasattr(self.viewmodel, "peaks"):
+            return None
+        peaks = np.array(self.viewmodel.peaks)
+        if len(peaks) == 0:
+            return None
+        idx = np.argmin(np.abs(peaks - x))
+        if abs(peaks[idx] - x) <= threshold:
+            return idx
+        return None
+
+    # Use shared constant default for selection tolerance so it's easy to tune
+    from view.constants import CURVE_SELECT_TOL_PIXELS
+
+    def detect_curve_at(self, plot_widget, x, y, tol_pixels: int = CURVE_SELECT_TOL_PIXELS):
+        """
+        Attempt to detect which curve (if any) was clicked at data coords (x, y).
+
+        Uses a pixel-space distance test (scene coordinates) so selection is
+        independent of data scaling. Returns a curve_id or None.
+
+        tol_pixels: maximum distance in screen pixels for a click to count as
+                    "on the curve" (default 8 px).
+        """
+        if self.viewmodel is None or not hasattr(self.viewmodel, "curves"):
+            return None
+
+        composite_has_components = self._composite_has_components()
+
+        try:
+            vb = plot_widget.getViewBox()
+        except Exception:
+            vb = None
+
+        # Map the clicked data coord to scene (pixel) coords if possible.
+        click_scene = None
+        if vb is not None:
+            try:
+                from PySide6.QtCore import QPointF
+
+                click_scene_pt = vb.mapViewToScene(QPointF(float(x), float(y)))
+                click_scene = (float(click_scene_pt.x()), float(click_scene_pt.y()))
+            except Exception:
+                click_scene = None
+
+        # Fallback: if we couldn't map to scene coords, use a conservative
+        # data-space distance test (small tolerance) so we don't select
+        # everything. This happens rarely but keeps behavior safe.
+        if click_scene is None:
+            for cid, (cx, cy) in self.viewmodel.curves.items():
+                if composite_has_components and cid == "fit":
+                    continue
+                cx = np.asarray(cx)
+                cy = np.asarray(cy)
+                if len(cx) == 0:
+                    continue
+                dist = np.min(np.sqrt((cx - x) ** 2 + (cy - y) ** 2))
+                if dist < 1e-6:  # extremely small fallback
+                    return cid
+            return None
+
+        # Otherwise compute pixel distances. This is a bit more expensive
+        # (maps curve points to scene coords) but remains fast for typical
+        # plotted arrays. We return the first curve within tol_pixels.
+        tpx = float(tol_pixels)
+        from PySide6.QtCore import QPointF
+
+        for cid, (cx, cy) in self.viewmodel.curves.items():
+            if composite_has_components and cid == "fit":
+                continue
+            cx = np.asarray(cx)
+            cy = np.asarray(cy)
+            if len(cx) == 0:
+                continue
+            try:
+                # Map each data point to scene coords and compute min distance
+                # to the click. We'll bail out early if any point is close enough.
+                for xi, yi in zip(cx, cy):
+                    pt = vb.mapViewToScene(QPointF(float(xi), float(yi)))
+                    dx = float(pt.x()) - click_scene[0]
+                    dy = float(pt.y()) - click_scene[1]
+                    if (dx * dx + dy * dy) <= (tpx * tpx):
+                        return cid
+            except Exception:
+                # If mapping fails for this curve, skip it.
+                continue
+        return None
+
+    # -----------------------
+    # Wheel / mouse-move control handlers
+    # -----------------------
+    def _modifiers_to_names(self, mods) -> tuple:
+        names = []
+        try:
+            if mods & Qt.ControlModifier:
+                names.append("Control")
+            if mods & Qt.ShiftModifier:
+                names.append("Shift")
+            if mods & Qt.AltModifier:
+                names.append("Alt")
+        except Exception:
+            pass
+        return tuple(sorted(names))
+
+    def _handle_numeric_hotkey(self, key) -> bool:
+        """Support number-key shortcuts for selecting components."""
+        try:
+            descriptors = []
+            if self.viewmodel and hasattr(self.viewmodel, "get_component_descriptors"):
+                descriptors = self.viewmodel.get_component_descriptors() or []
+        except Exception:
+            descriptors = []
+
+        composite_has_components = self._composite_has_components()
+
+        if not descriptors:
+            if key == Qt.Key_0:
+                self.clear_selected_curve()
+                return True
+            if key == Qt.Key_1 and not composite_has_components:
+                self.set_selected_curve("fit")
+                return True
+            return False
+
+        if key == Qt.Key_0:
+            self.clear_selected_curve()
+            return True
+
+        index = key - Qt.Key_1
+        if index < 0 or index >= len(descriptors):
+            return False
+
+        prefix = descriptors[index].get("prefix") if isinstance(descriptors[index], dict) else None
+        if not prefix:
+            return False
+        curve_id = f"component:{prefix}"
+        self.set_selected_curve(curve_id)
+        return True
+
+    def _is_composite_active(self) -> bool:
+        try:
+            if self.viewmodel is None or not hasattr(self.viewmodel, "state"):
+                return False
+            spec = getattr(self.viewmodel.state, "model_spec", None)
+            return isinstance(spec, CompositeModelSpec)
+        except Exception:
+            return False
+
+    def _composite_has_components(self) -> bool:
+        if not self._is_composite_active():
+            return False
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "get_component_descriptors"):
+                descriptors = self.viewmodel.get_component_descriptors() or []
+                return bool(descriptors)
+        except Exception:
+            return False
+        return False
+
+    def on_wheel(self, obj, event):
+        """Handle wheel events and map to parameter changes based on control_map."""
+        # Only intercept wheel for parameter control when a curve is selected
+        if self.selected_curve_id is None:
+            return False
+        if not self.control_map or self.viewmodel is None:
+            return False
+        try:
+            mods = event.modifiers()
+        except Exception:
+            mods = Qt.NoModifier
+        mod_names = self._modifiers_to_names(mods)
+
+        key = ("wheel", mod_names)
+        if key not in self.control_map:
+            key = ("wheel", tuple())
+            if key not in self.control_map:
+                return False
+
+        try:
+            delta_units = event.angleDelta().y() / 120.0
+        except Exception:
+            try:
+                delta_units = event.delta() / 120.0
+            except Exception:
+                delta_units = 0.0
+
+        updates = {}
+        try:
+            current_specs = self.viewmodel.get_parameters()
+        except Exception:
+            current_specs = {}
+
+        for entry in self.control_map.get(key, []):
+            try:
+                if not isinstance(entry, dict):
+                    continue
+                entry_component = entry.get("component")
+                if entry_component and entry_component != self.selected_component_prefix:
+                    continue
+                name = entry.get("name")
+                step_val = float(entry.get("step", 1.0))
+                cur = None
+                if name in current_specs and isinstance(current_specs[name], dict):
+                    cur = current_specs[name].get("value")
+                if cur is None:
+                    mdl = getattr(self.viewmodel.state, "model", None)
+                    if mdl is not None and hasattr(mdl, name):
+                        cur = getattr(mdl, name)
+                if cur is None:
+                    spec = getattr(self.viewmodel.state, "model_spec", None)
+                    if spec is not None and name in getattr(spec, "params", {}):
+                        cur = getattr(spec.params[name], "value", None)
+                if cur is None:
+                    continue
+                new_val = cur + step_val * float(delta_units)
+                if name in current_specs and isinstance(current_specs[name], dict):
+                    mn = current_specs[name].get("min", None)
+                    mx = current_specs[name].get("max", None)
+                    if mn is not None:
+                        new_val = max(new_val, mn)
+                    if mx is not None:
+                        new_val = min(new_val, mx)
+                updates[name] = new_val
+            except Exception:
+                continue
+
+        if updates:
+            try:
+                if hasattr(self.viewmodel, "handle_action"):
+                    try:
+                        self.viewmodel.handle_action("apply_parameters", params=updates)
+                    except Exception:
+                        self.viewmodel.apply_parameters(updates)
+                else:
+                    self.viewmodel.apply_parameters(updates)
+                # accept/consume the Qt event so the ViewBox does not perform zoom
+                try:
+                    event.accept()
+                except Exception:
+                    pass
+                if hasattr(self.viewmodel, "log_message"):
+                    try:
+                        # emit a concise interactive message for visibility
+                        self.viewmodel.log_message.emit(f"Interactive update: {updates}")
+                    except Exception:
+                        pass
+            except Exception as e:
+                self._log_exception("apply wheel updates failed", e)
+            return True
+        return False

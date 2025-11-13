@@ -1,8 +1,8 @@
 from __future__ import annotations
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Any
 
 @dataclass
 class Config:
@@ -11,6 +11,10 @@ class Config:
     default_save_folder: str = ""
     config_folder: str = ""
     config_filename: str = "settings.json"
+    # persisted queued files (list of dicts with keys 'path' and optional 'name')
+    queued_files: List[dict] = field(default_factory=list)
+    # index of active queued file, or None
+    queued_active: Optional[int] = None
 
     def __post_init__(self):
         # ensure folders are normalized strings
@@ -50,6 +54,8 @@ class Config:
                 default_save_folder=data.get("default_save_folder", ""),
                 config_folder=data.get("config_folder", str(path.parent)),
                 config_filename=data.get("config_filename", "settings.json"),
+                queued_files=data.get("queued_files", []),
+                queued_active=data.get("queued_active", None),
             )
         except Exception:
             # on parse error return defaults and keep config folder

@@ -3,5 +3,7 @@
   "default_load_folder": "C:/Users/AMM/Documents/GitHub/2025-ILL-IN8-FMO-Data-Processing/Data Parsing/Combined_Output",
   "default_save_folder": "C:\\Users\\AMM",
   "config_folder": "C:\\Users\\AMM\\Documents\\GitHub\\BigFit\\BigFit\\config",
-  "config_filename": "settings.json"
+  "config_filename": "settings.json",
+  "queued_files": [],
+  "queued_active": null
 }

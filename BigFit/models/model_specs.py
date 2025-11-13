@@ -1,9 +1,13 @@
+﻿# type: ignore
+"""Model specifications and helper functions for fitting.
+"""
 import numpy as np
 from scipy.special import wofz, voigt_profile
 from scipy.fft import fft, ifft
 from scipy.interpolate import interp1d
 from scipy.signal import fftconvolve
-from scipy.interpolate import interp1d
+from dataclasses import dataclass
+from itertools import cycle
 
 import matplotlib.pyplot as plt
 
@@ -208,14 +212,51 @@ def convolute_gaussian_dho(x_target, phonon_energy, center, gauss_fwhm, lorentz_
 
     return y
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Iterable
 
-# Allowed input action keys that model parameter specs may provide.
-# Models should use these keys (case-sensitive): "drag", "wheel", "hotkey".
-# - "drag": means left-click + drag to update a parameter (value usually comes from x or y)
-# - "wheel": means mouse-wheel; action dict may include "modifiers": ["Ctrl","Shift","Alt"]
-# - "hotkey": means a keyboard shortcut; action dict should specify key name and action.
-ALLOWED_INPUT_ACTIONS = ["drag", "wheel", "hotkey"]
+# Pre-defined colors cycled for composite components.
+_COMPONENT_COLORS = [
+    "#1f77b4",  # blue
+    "#ff7f0e",  # orange
+    "#2ca02c",  # green
+    "#d62728",  # red
+    "#9467bd",  # purple
+    "#8c564b",  # brown
+    "#e377c2",  # pink
+    "#7f7f7f",  # gray
+    "#bcbd22",  # olive
+    "#17becf",  # teal
+]
+
+
+def _clone_parameter(param: "Parameter", new_name: str, value: Any) -> "Parameter":
+    """Return a shallow copy of `param` with a new name/value."""
+    return Parameter(
+        name=new_name,
+        value=value,
+        ptype=getattr(param, "ptype", None),
+        minimum=getattr(param, "min", None),
+        maximum=getattr(param, "max", None),
+        choices=getattr(param, "choices", None),
+        hint=getattr(param, "hint", ""),
+        decimals=getattr(param, "decimals", None),
+        step=getattr(param, "step", None),
+        control=getattr(param, "control", None),
+        fixed=getattr(param, "fixed", False),
+    )
+
+
+@dataclass
+class CompositeComponent:
+    prefix: str
+    spec: "BaseModelSpec"
+    color: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.prefix.rstrip('_')}"
+
+
 
 class Parameter:
     """Represents a single parameter with metadata usable by the view.
@@ -233,16 +274,6 @@ class Parameter:
                    only a display/precision hint for the widget.
       step       : single-step increment for numeric controls (maps to
                    QDoubleSpinBox.setSingleStep / QSpinBox.setSingleStep).
-      input_hint : Optional[Any]
-         - If None: no interactive input advertised.
-         - If a string: treated as a human-readable hint only.
-         - If a dict: structured interactive spec. Top-level keys should be in ALLOWED_INPUT_ACTIONS.
-           Examples:
-             { "drag":  { "action": "set", "value_from": "x" } }
-             { "wheel": { "modifiers": ["Ctrl"], "action": "scale", "factor": 1.05 } }
-             { "hotkey": { "key": "F", "action": "trigger_fit" } }
-         The view and ViewModel agree on the action semantics: "set" sets parameter to coordinate,
-         "scale" multiplies numeric parameter by factor, "increment" adds a step, etc.
     """
     def __init__(self,
                  name: str,
@@ -254,7 +285,8 @@ class Parameter:
                  hint: str = "",
                  decimals: Optional[int] = None,
                  step: Optional[float] = None,
-                 input_hint: Optional[Any] = None):   # <-- note: can be str or structured dict
+                 control: Optional[Dict[str, Any]] = None,
+                 fixed: Optional[bool] = False):
         self.name = name
         self.value = value
         # ptype recommended to be one of: "float","int","str","bool","choice"
@@ -270,8 +302,11 @@ class Parameter:
         self.decimals = decimals
         # single-step increment (float for QDoubleSpinBox, int for QSpinBox)
         self.step = step
-        # short text describing interactive input (hotkeys/wheel/mouse)
-        self.input_hint = input_hint
+    # optional interactive control metadata describing how UI input maps to this param
+    # example: {"action": "wheel", "modifiers": []}
+        self.control = control
+        # whether this parameter should be held fixed during fitting
+        self.fixed = bool(fixed)
 
     def to_spec(self) -> Dict[str, Any]:
         """Export the parameter as a spec dict the view expects.
@@ -287,7 +322,8 @@ class Parameter:
           "hint"     -> help text for UI/tooltip
           "decimals" -> integer number of decimal places for float widgets
           "step"     -> numeric step increment for spin widgets
-          "input"    -> short text describing interactive input (hotkeys/wheel/mouse)
+
+        The view will use these keys to pick and configure widgets.
         """
         spec: Dict[str, Any] = {"value": self.value}
         if self.ptype:
@@ -306,10 +342,18 @@ class Parameter:
         if self.step is not None:
             # step is the widget increment (single step).
             spec["step"] = float(self.step)
-        if self.input_hint is not None:
-            # pass structured input metadata through under 'input' key.
-            # may be a str (hint) or a dict describing events/actions.
-            spec["input"] = self.input_hint
+        if getattr(self, "control", None) is not None:
+            # pass through control metadata (UI may map input events based on this).
+            # Interactive step/increment is intentionally NOT stored here; the view
+            # layer derives the interactive increment from the parameter 'step'
+            # so that a single-step value controls both widget increments and
+            # interactive inputs.
+            spec["control"] = dict(self.control)
+        # expose fixed state to the UI so parameters can be marked fixed/unfixed
+        try:
+            spec["fixed"] = bool(getattr(self, "fixed", False))
+        except Exception:
+            spec["fixed"] = False
         return spec
 
 class BaseModelSpec:
@@ -363,22 +407,244 @@ class BaseModelSpec:
         except Exception:
             return np.array([])
 
+
+class CompositeModelSpec(BaseModelSpec):
+    """Model spec composed of multiple atomic specs summed together."""
+
+    is_composite = True
+
+    def __init__(self):
+        super().__init__()
+        self._components: List[CompositeComponent] = []
+        self._color_iter = cycle(_COMPONENT_COLORS)
+        self._prefix_counter = 1
+        self._param_links: Dict[str, Any] = {}
+
+    # ----- component management -------------------------------------------------
+    def _next_color(self) -> str:
+        try:
+            return next(self._color_iter)
+        except Exception:
+            return "#1f77b4"
+
+    def _generate_prefix(self) -> str:
+        attempt = self._prefix_counter
+        existing = {comp.prefix for comp in self._components}
+        while True:
+            candidate = f"elem{attempt}_"
+            if candidate not in existing:
+                self._prefix_counter = attempt + 1
+                return candidate
+            attempt += 1
+
+    def add_component(
+        self,
+        spec_name: str,
+        initial_params: Optional[Dict[str, Any]] = None,
+        prefix: Optional[str] = None,
+        data_x=None,
+        data_y=None,
+    ) -> CompositeComponent:
+        from models import get_model_spec
+
+        spec_name = (spec_name or "").strip()
+        if not spec_name:
+            raise ValueError("spec_name required")
+        spec = get_model_spec(spec_name)
+        if isinstance(spec, CompositeModelSpec):
+            raise ValueError("Nested composite models are not supported")
+
+        try:
+            spec.initialize(data_x, data_y)
+        except Exception:
+            try:
+                spec.initialize()
+            except Exception:
+                pass
+
+        prefix = prefix or self._generate_prefix()
+        color = self._next_color()
+        component = CompositeComponent(prefix=prefix, spec=spec, color=color)
+        self._components.append(component)
+
+        if initial_params:
+            for name, value in initial_params.items():
+                if name in spec.params:
+                    spec.params[name].value = value
+
+        self._rebuild_flat_params()
+        return component
+
+    def remove_component_at(self, index: int) -> Optional[CompositeComponent]:
+        if index < 0 or index >= len(self._components):
+            return None
+        removed = self._components.pop(index)
+        self._rebuild_flat_params()
+        return removed
+
+    def reorder_component(self, old_index: int, new_index: int) -> bool:
+        if old_index < 0 or new_index < 0:
+            return False
+        if old_index >= len(self._components) or new_index >= len(self._components):
+            return False
+        if old_index == new_index:
+            return True
+        comp = self._components.pop(old_index)
+        self._components.insert(new_index, comp)
+        self._rebuild_flat_params()
+        return True
+
+    def reorder_by_prefix(self, prefix_order: Iterable[str]) -> bool:
+        prefix_order = [p for p in prefix_order]
+        if not prefix_order:
+            return False
+        current = {comp.prefix: comp for comp in self._components}
+        new_order: List[CompositeComponent] = []
+        for prefix in prefix_order:
+            comp = current.get(prefix)
+            if comp is not None:
+                new_order.append(comp)
+        if len(new_order) != len(self._components):
+            return False
+        if all(a.prefix == b.prefix for a, b in zip(new_order, self._components)):
+            return True
+        self._components = new_order
+        self._rebuild_flat_params()
+        return True
+
+    def clear_components(self):
+        self._components.clear()
+        self._rebuild_flat_params()
+
+    # ----- aggregation helpers --------------------------------------------------
+    def _rebuild_flat_params(self):
+        self.params = {}
+        self._param_links = {}
+        for component in self._components:
+            for name, param in component.spec.params.items():
+                flat_name = f"{component.prefix}{name}"
+                value = getattr(param, "value", None)
+                cloned = _clone_parameter(param, flat_name, value)
+                try:
+                    setattr(cloned, "component_prefix", component.prefix)
+                    setattr(cloned, "component_label", component.label)
+                    setattr(cloned, "component_color", component.color)
+                except Exception:
+                    pass
+                self.params[flat_name] = cloned
+                self._param_links[flat_name] = (component, name)
+
+    def get_parameters(self) -> Dict[str, Any]:
+        self._rebuild_flat_params()
+        specs = super().get_parameters()
+        for name, spec in specs.items():
+            link = self._param_links.get(name)
+            if link:
+                component, _ = link
+                spec.setdefault("component", component.prefix)
+                spec.setdefault("component_label", component.label)
+                spec.setdefault("color", component.color)
+        return specs
+
+    def get_param_values(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._rebuild_flat_params()
+        return super().get_param_values(overrides=overrides)
+
+    def list_components(self) -> List[CompositeComponent]:
+        return list(self._components)
+
+    def set_param_value(self, flat_name: str, value: Any):
+        link = self._param_links.get(flat_name)
+        if link:
+            component, name = link
+            try:
+                component.spec.params[name].value = value
+            except Exception:
+                pass
+        if flat_name in self.params:
+            try:
+                self.params[flat_name].value = value
+            except Exception:
+                pass
+
+    def get_link(self, flat_name: str):
+        return self._param_links.get(flat_name)
+
+    # ----- BaseModelSpec overrides ---------------------------------------------
+    def initialize(self, data_x=None, data_y=None):
+        for component in self._components:
+            try:
+                component.spec.initialize(data_x, data_y)
+            except Exception:
+                continue
+        self._rebuild_flat_params()
+
+    def evaluate_components(self, x, params: Optional[Dict[str, Any]] = None):
+        x_arr = np.asarray(x, dtype=float)
+        if x_arr.size == 0:
+            return []
+
+        param_values = self.get_param_values(overrides=params or {})
+        outputs = []
+
+        for component in self._components:
+            sub_params: Dict[str, Any] = {}
+            for name in component.spec.params.keys():
+                key = f"{component.prefix}{name}"
+                if key in param_values:
+                    sub_params[name] = param_values[key]
+                else:
+                    sub_params[name] = component.spec.params[name].value
+            try:
+                contribution = component.spec.evaluate(x_arr, sub_params)
+            except Exception:
+                contribution = np.zeros_like(x_arr, dtype=float)
+            try:
+                outputs.append((component, np.asarray(contribution, dtype=float)))
+            except Exception:
+                outputs.append((component, np.zeros_like(x_arr, dtype=float)))
+
+        return outputs
+
+    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
+        component_outputs = self.evaluate_components(x, params=params)
+        if not component_outputs:
+            return np.zeros_like(np.asarray(x, dtype=float), dtype=float)
+
+        total = np.zeros_like(np.asarray(x, dtype=float), dtype=float)
+        for _, values in component_outputs:
+            try:
+                total += values
+            except Exception:
+                pass
+
+        return total
+
 # Concrete model specs
 class GaussianModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
+        # Interactive controls added so the InputHandler / View can map
+        # wheel and mouse actions to these parameters.
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Gaussian peak", decimals=6, step=0.1))
-        self.add(Parameter("Width", value=0.1, ptype="float", minimum=1e-6,
-                           hint="Gaussian FWHM", decimals=6, step=0.01))
+                           hint="Integrated area of the Gaussian peak", decimals=3, step=1.0,
+                           control={"action": "wheel", "modifiers": []}))
+        # Ctrl + wheel adjusts the width (FWHM)
+        self.add(Parameter("Width", value=2, ptype="float", minimum=1e-6,
+                           hint="Gaussian FWHM", decimals=3, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Control"]}))
+        # Click-drag (mouse_move / peak drag) should update the center.
+        # Keep the parameter named "Center" (capital C) to match evaluate()'s
+        # argument names, but provide a control hint for the UI.
         self.add(Parameter("Center", value=0.0, ptype="float",
-                           hint="Peak center (x-axis)"))
+                           hint="Peak center (x-axis)",
+                           control={"action": "mouse_move", "modifiers": []}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
             pvals = self.get_param_values(params)
             Area = float(pvals.get("Area", 1.0))
-            Width = float(pvals.get("Width", 0.1))
+            Width = float(pvals.get("Width", 2.0))
             Center = float(pvals.get("Center", 0.0))
             return Gaussian(np.asarray(x, dtype=float), Area=Area, Width=Width, Center=Center)
         except Exception:
@@ -387,168 +653,94 @@ class GaussianModelSpec(BaseModelSpec):
 class VoigtModelSpec(BaseModelSpec):
     def __init__(self):
         super().__init__()
+        # Interactive control bindings are included in the Parameter so the view/input
+        # layer can map events to parameter updates dynamically (no UI hard-coding).
         self.add(Parameter("Area", value=1.0, ptype="float", minimum=0.0,
-                           hint="Integrated area of the Voigt peak", decimals=6, step=0.1,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
-        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0,
-                           hint="Gaussian resolution FWHM", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0,
-                           hint="Lorentzian FWHM (HWHM*2)", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        # Use "drag" (left-click + drag) instead of simple click so clicks remain available for other UI parts.
-        self.add(Parameter("center", value=0.0, ptype="float",
-                           hint="Peak center",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
+                           hint="Integrated area of the Voigt peak", decimals=3, step=1.0,
+                           control={"action": "wheel", "modifiers": []}))
+        # Ctrl + wheel adjusts the gaussian contribution
+        self.add(Parameter("Gauss FWHM", value=1.14, ptype="float", minimum=1E-6,
+                           hint="Gaussian resolution FWHM", decimals=3, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Control"]}))
+        # Shift + wheel adjusts the lorentzian contribution
+        self.add(Parameter("Lorentz FWHM", value=0.28, ptype="float", minimum=1E-6,
+                           hint="Lorentzian FWHM", decimals=3, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Shift"]}))
+        # Mouse movement (no modifiers) controls center by default
+        self.add(Parameter("Center", value=0.0, ptype="float",
+                           hint="Peak center", decimals=3,
+                           control={"action": "mouse_move", "modifiers": []}))
 
-    def initialize(self, data_x=None, data_y=None):
-        # simple example: set center to x of max if data provided
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
-        except Exception:
-            pass
+    # def initialize(self, data_x=None, data_y=None):
+    #     # simple example: set center to x of max if data provided
+    #     try:
+    #         if data_x is not None and data_y is not None:
+    #             arrx = np.asarray(data_x)
+    #             arry = np.asarray(data_y)
+    #             idx = int(np.nanargmax(arry))
+    #             self.params["Center"].value = float(arrx[idx])
+    #     except Exception:
+    #         pass
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
         try:
             pvals = self.get_param_values(params)
             Area = float(pvals.get("Area", 1.0))
-            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
-            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
-            center = float(pvals.get("center", 0.0))
+            gauss_fwhm = float(pvals.get("Gauss FWHM", 1.14))
+            lorentz_fwhm = float(pvals.get("Lorentz FWHM", 0.28))
+            center = float(pvals.get("Center", 0.0))
             return Voigt(np.asarray(x, dtype=float), Area=Area, gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm, center=center)
         except Exception:
             return super().evaluate(x, params)
 
-class DHOModelSpec(BaseModelSpec):
+
+
+
+class LinearBackgroundModelSpec(BaseModelSpec):
+    """Simple linear background y = m*x + b
+
+    Parameters exposed to the view are:
+      - "Slope" (m)
+      - "Intercept" (b)
+    """
     def __init__(self):
         super().__init__()
-        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0,
-                           hint="Phonon energy (meV)", decimals=4, step=0.1,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6,
-                           hint="DHO damping parameter", decimals=4, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0,
-                           hint="Phonon amplitude (area-like)", decimals=6, step=0.01,
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0,
-                           hint="Elastic (zero-energy) amplitude", decimals=6, step=0.01))
-        self.add(Parameter("BG", value=0.0, ptype="float",
-                           hint="Flat background"))
-        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1,
-                           hint="Temperature (K)", decimals=2, step=0.1))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectral center",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
-
-    def initialize(self, data_x=None, data_y=None):
-        # as example, pick center near max if available
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
-        except Exception:
-            pass
+        # slope (m)
+        self.add(Parameter("Slope", value=0.0, ptype="float", hint="Linear slope (m)", decimals=6, step=0.01,
+                           control={"action": "wheel", "modifiers": []}))
+        # intercept (b)
+        self.add(Parameter("Intercept", value=0.0, ptype="float", hint="Vertical offset / intercept (b)", decimals=6, step=0.1,
+                           control={"action": "wheel", "modifiers": ["Control"]}))
 
     def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
-        """Simple visible DHO-like curve (no instrument convolution here)."""
         try:
-            arr = np.asarray(x, dtype=float)
             pvals = self.get_param_values(params)
-            center_spec = float(pvals.get("center", 0.0))
-            phonon_energy = float(pvals.get("phonon_energy", 5.0))
-            damping = float(pvals.get("damping", 0.5))
-            phonon_amp = float(pvals.get("phonon_amplitude", 0.1))
-            elastic_amp = float(pvals.get("elastic_amplitude", 0.0))
-            BG = float(pvals.get("BG", 0.0))
-            T = float(pvals.get("T", 10.0))
-
-            x_shifted = arr - center_spec
-            stokes = Stokes_DHO(x_shifted, amplitude=phonon_amp, damping=damping, center=phonon_energy)
-            try:
-                astokes_amp = phonon_amp / np.exp(phonon_energy / (kB * T))
-            except Exception:
-                astokes_amp = phonon_amp
-            astokes = antiStokes_DHO(x_shifted, amplitude=astokes_amp, damping=damping, center=phonon_energy)
-            elastic = narrow_gaussian_delta(arr, center_spec, amplitude=elastic_amp, fwhm=0.1)
-            return stokes + astokes + elastic + BG
-        except Exception:
-            return super().evaluate(x, params)
-
-class DHOVoigtModelSpec(BaseModelSpec):
-    """Composite DHO convolved with Voigt resolution + elastic Voigt."""
-    def __init__(self):
-        super().__init__()
-        # include DHO params
-        self.add(Parameter("phonon_energy", value=5.0, ptype="float", minimum=0.0, hint="Phonon energy (meV)",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("damping", value=0.5, ptype="float", minimum=1e-6, hint="DHO damping",
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("phonon_amplitude", value=0.1, ptype="float", minimum=0.0, hint="Phonon amplitude",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        # Voigt resolution params
-        self.add(Parameter("gauss_fwhm", value=1.14, ptype="float", minimum=0.0, hint="Gaussian FWHM of resolution",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.05}}))
-        self.add(Parameter("lorentz_fwhm", value=0.28, ptype="float", minimum=0.0, hint="Lorentzian FWHM of resolution",
-                           input_hint={"wheel": {"modifiers": ["Shift"], "action": "scale", "factor": 1.05}}))
-        # elastic and BG
-        self.add(Parameter("elastic_amplitude", value=0.0, ptype="float", minimum=0.0, hint="Elastic Voigt area",
-                           input_hint={"wheel": {"modifiers": ["Ctrl"], "action": "scale", "factor": 1.1}}))
-        self.add(Parameter("BG", value=0.0, ptype="float", hint="Flat background",
-                           input_hint={"wheel": {"modifiers": ["Alt"], "action": "increment", "step": 0.01}}))
-        self.add(Parameter("T", value=10.0, ptype="float", minimum=0.1, hint="Temperature (K)",
-                           input_hint=None))
-        self.add(Parameter("center", value=0.0, ptype="float", hint="Spectrum center",
-                           input_hint={"drag": {"action": "set", "value_from": "x"}}))
-
-    def initialize(self, data_x=None, data_y=None):
-        # example: set center from data if available
-        try:
-            if data_x is not None and data_y is not None:
-                arrx = np.asarray(data_x)
-                arry = np.asarray(data_y)
-                idx = int(np.nanargmax(arry))
-                self.params["center"].value = float(arrx[idx])
-        except Exception:
-            pass
-
-    def evaluate(self, x, params: Optional[Dict[str, Any]] = None):
-        """Use the convolute_voigt_dho helper to produce a visible, realistic line."""
-        try:
-            arr = np.asarray(x, dtype=float)
-            pvals = self.get_param_values(params)
-            phonon_energy = float(pvals.get("phonon_energy", 5.0))
-            damping = float(pvals.get("damping", 0.5))
-            phonon_amplitude = float(pvals.get("phonon_amplitude", 0.1))
-            gauss_fwhm = float(pvals.get("gauss_fwhm", 1.14))
-            lorentz_fwhm = float(pvals.get("lorentz_fwhm", 0.28))
-            elastic_amplitude = float(pvals.get("elastic_amplitude", 0.0))
-            BG = float(pvals.get("BG", 0.0))
-            T = float(pvals.get("T", 10.0))
-            center = float(pvals.get("center", 0.0))
-
-            return convolute_voigt_dho(arr, phonon_energy=phonon_energy, center=center,
-                                       gauss_fwhm=gauss_fwhm, lorentz_fwhm=lorentz_fwhm,
-                                       damping=damping, phonon_amplitude=phonon_amplitude,
-                                       elastic_amplitude=elastic_amplitude, BG=BG, T=T, peak='all')
+            m = float(pvals.get("Slope", 0.0))
+            b = float(pvals.get("Intercept", 0.0))
+            xarr = np.asarray(x, dtype=float)
+            return m * xarr + b
         except Exception:
             return super().evaluate(x, params)
 
 # Factory / helper
 def get_model_spec(model_name: str) -> BaseModelSpec:
     name = (model_name or "").strip().lower()
+    if name in ("composite", "custom", "custom model", "custommodel"):
+        return CompositeModelSpec()
     if name in ("gauss", "gaussian", "gaussmodel", "gaussianmodel"):
         return GaussianModelSpec()
     if name in ("voigt", "voigtmodel"):
         return VoigtModelSpec()
-    if name in ("dho", "dhomodel", "dhoonly"):
-        return DHOModelSpec()
-    if name in ("dho+voigt", "dho_voigt", "dho+voigtmodel", "dho+voigtmodel"):
-        return DHOVoigtModelSpec()
+    if name in ("linear", "linear background", "linearbackground", "linearbackgroundmodel", "linearbg", "background", "linear model"):
+        return LinearBackgroundModelSpec()
     # default fallback
     return BaseModelSpec()
+
+
+def get_atomic_component_names() -> List[str]:
+    """Return display names for atomic components usable in composite models."""
+    return [
+        "Gaussian",
+        "Voigt",
+        "Linear Background",
+    ]
