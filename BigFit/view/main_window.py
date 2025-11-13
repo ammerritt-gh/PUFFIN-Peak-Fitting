@@ -759,85 +759,85 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        def _on_element_rows_moved(self, parent, start, end, dest_parent, dest_row):
-            """Sync drag-and-drop ordering back to the ViewModel."""
+    def _on_element_rows_moved(self, parent, start, end, dest_parent, dest_row):
+        """Sync drag-and-drop ordering back to the ViewModel."""
+        try:
+            if not self.viewmodel:
+                return
+            if start <= 0:
+                # keep the model entry fixed at the top
+                self._refresh_element_list()
+                return
+            first = self.element_list.item(0) if hasattr(self, 'element_list') else None
+            if first is None:
+                return
+            first_data = first.data(Qt.UserRole) if isinstance(first, QListWidgetItem) else None
+            if not isinstance(first_data, dict) or first_data.get('id') != 'model':
+                self._refresh_element_list()
+                return
+            prefixes = []
+            count = self.element_list.count() if hasattr(self, 'element_list') else 0
+            for idx in range(1, count):
+                item = self.element_list.item(idx)
+                if item is None:
+                    continue
+                data = item.data(Qt.UserRole)
+                if isinstance(data, dict):
+                    prefix = data.get('id')
+                    if prefix and prefix != 'model':
+                        prefixes.append(prefix)
+            if not prefixes:
+                return
+            # Prefer routing reorders through the centralized dispatcher
             try:
-                if not self.viewmodel:
-                    return
-                if start <= 0:
-                    # keep the model entry fixed at the top
-                    self._refresh_element_list()
-                    return
-                first = self.element_list.item(0) if hasattr(self, 'element_list') else None
-                if first is None:
-                    return
-                first_data = first.data(Qt.UserRole) if isinstance(first, QListWidgetItem) else None
-                if not isinstance(first_data, dict) or first_data.get('id') != 'model':
-                    self._refresh_element_list()
-                    return
-                prefixes = []
-                count = self.element_list.count() if hasattr(self, 'element_list') else 0
-                for idx in range(1, count):
-                    item = self.element_list.item(idx)
-                    if item is None:
-                        continue
-                    data = item.data(Qt.UserRole)
-                    if isinstance(data, dict):
-                        prefix = data.get('id')
-                        if prefix and prefix != 'model':
-                            prefixes.append(prefix)
-                if not prefixes:
-                    return
-                # Prefer routing reorders through the centralized dispatcher
-                try:
-                    if hasattr(self.viewmodel, "handle_action"):
-                        try:
-                            res = self.viewmodel.handle_action("reorder_components_by_prefix", prefix_order=prefixes)
-                            if not res and end == start:
-                                # best-effort fallback: try single-item reorder
-                                old_index = start - 1
-                                new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
-                                if new_index >= len(prefixes):
-                                    new_index = len(prefixes) - 1
-                                if new_index != old_index:
-                                    self.viewmodel.handle_action("reorder_component", old_index=old_index, new_index=new_index)
-                        except Exception:
-                            # final fallback: try direct methods
-                            if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
-                                try:
-                                    self.viewmodel.reorder_components_by_prefix(prefixes)
-                                except Exception:
-                                    pass
-                            elif hasattr(self.viewmodel, 'reorder_component') and end == start:
-                                old_index = start - 1
-                                new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
-                                if new_index >= len(prefixes):
-                                    new_index = len(prefixes) - 1
-                                if new_index != old_index:
-                                    try:
-                                        self.viewmodel.reorder_component(old_index, new_index)
-                                    except Exception:
-                                        pass
-                    else:
-                        if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
-                            self.viewmodel.reorder_components_by_prefix(prefixes)
-                        elif hasattr(self.viewmodel, 'reorder_component') and end == start:
-                            # fallback best-effort: compute positions relative to list excluding model
+                if hasattr(self.viewmodel, "handle_action"):
+                    try:
+                        res = self.viewmodel.handle_action("reorder_components_by_prefix", prefix_order=prefixes)
+                        if not res and end == start:
+                            # best-effort fallback: try single-item reorder
                             old_index = start - 1
                             new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
                             if new_index >= len(prefixes):
                                 new_index = len(prefixes) - 1
                             if new_index != old_index:
-                                self.viewmodel.reorder_component(old_index, new_index)
-                        else:
-                            self._refresh_element_list()
-                except Exception:
-                    self._refresh_element_list()
-            except Exception as e:
-                try:
-                    self.append_log(f"Failed to reorder elements: {e}")
-                except Exception:
-                    pass
+                                self.viewmodel.handle_action("reorder_component", old_index=old_index, new_index=new_index)
+                    except Exception:
+                        # final fallback: try direct methods
+                        if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
+                            try:
+                                self.viewmodel.reorder_components_by_prefix(prefixes)
+                            except Exception:
+                                pass
+                        elif hasattr(self.viewmodel, 'reorder_component') and end == start:
+                            old_index = start - 1
+                            new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
+                            if new_index >= len(prefixes):
+                                new_index = len(prefixes) - 1
+                            if new_index != old_index:
+                                try:
+                                    self.viewmodel.reorder_component(old_index, new_index)
+                                except Exception:
+                                    pass
+                else:
+                    if hasattr(self.viewmodel, 'reorder_components_by_prefix'):
+                        self.viewmodel.reorder_components_by_prefix(prefixes)
+                    elif hasattr(self.viewmodel, 'reorder_component') and end == start:
+                        # fallback best-effort: compute positions relative to list excluding model
+                        old_index = start - 1
+                        new_index = max(0, dest_row - 1 if dest_row <= count else count - 1)
+                        if new_index >= len(prefixes):
+                            new_index = len(prefixes) - 1
+                        if new_index != old_index:
+                            self.viewmodel.reorder_component(old_index, new_index)
+                    else:
+                        self._refresh_element_list()
+            except Exception:
+                self._refresh_element_list()
+        except Exception as e:
+            try:
+                self.append_log(f"Failed to reorder elements: {e}")
+            except Exception:
+                pass
 
     def _refresh_element_list(self):
         """Populate the element list from the ViewModel/state when possible.
