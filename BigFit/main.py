@@ -67,9 +67,9 @@ def main():
                 viewmodel.apply_parameters(params)
         except Exception as e:
             try:
-                viewmodel.log_message.emit(f"Failed to apply initial parameters: {e}\n{traceback.format_exc()}")
+                viewmodel.log_message.emit(f"Failed to apply parameters: {e}\n{traceback.format_exc()}")
             except Exception:
-                print(f"Failed to apply initial parameters: {e}")
+                print(f"Failed to apply parameters: {e}")
 
     def connect_param_signals():
         # Disconnecting previous connections is tricky; keep it simple: try to connect,
