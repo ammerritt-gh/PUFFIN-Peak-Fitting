@@ -374,6 +374,37 @@ class ParametersDock(QDockWidget):
                     else:
                         hbox.addWidget(QLabel(""))
 
+                    # Link group spinbox: allow user to link parameters together
+                    try:
+                        link_val = spec_dict.get("link_group", None)
+                        link_val = int(link_val) if link_val else 0
+                    except Exception:
+                        link_val = 0
+                    link_spin = QSpinBox()
+                    link_spin.setRange(0, 99)
+                    link_spin.setValue(link_val)
+                    link_spin.setPrefix("Link: ")
+                    link_spin.setToolTip("Enter a number to link this parameter with others (0 = not linked)")
+                    link_spin.setMaximumWidth(100)
+                    try:
+                        link_spin.blockSignals(True)
+                        link_spin.setValue(link_val)
+                    finally:
+                        link_spin.blockSignals(False)
+                    # Apply visual indicator if parameter is linked
+                    if link_val > 0:
+                        # Use different colors for different link groups
+                        link_colors = ["#FFD700", "#87CEEB", "#98FB98", "#FFB6C1", "#DDA0DD", "#F0E68C", "#E6E6FA", "#FFA07A"]
+                        color_idx = (link_val - 1) % len(link_colors)
+                        link_color = link_colors[color_idx]
+                        try:
+                            widget.setStyleSheet(f"border: 2px solid {link_color}; border-radius: 3px;")
+                        except Exception:
+                            pass
+                    # bind the link spinbox under a distinct key
+                    self._bind_param_widget(f"{name}__link", link_spin)
+                    hbox.addWidget(link_spin)
+
                     # Fixed checkbox: allow user to mark parameter as fixed during fits
                     try:
                         fixed_val = bool(spec_dict.get("fixed", False))
