@@ -251,6 +251,33 @@ class ParametersDock(QDockWidget):
                 form_layout.setSpacing(6)
                 group_box.setLayout(form_layout)
 
+                # Header row for the input area: helps indicate Link/Fix/Hint columns
+                try:
+                    header_widget = QWidget()
+                    header_h = QHBoxLayout(header_widget)
+                    header_h.setContentsMargins(0, 0, 0, 0)
+                    header_h.addWidget(QLabel("Value"))
+                    header_h.addStretch(1)
+                    # Right-side header container matches the fixed width used for rows
+                    right_header = QWidget()
+                    rh_layout = QHBoxLayout(right_header)
+                    rh_layout.setContentsMargins(0, 0, 0, 0)
+                    rh_layout.setSpacing(6)
+                    link_hdr = QLabel("Link")
+                    link_hdr.setFixedWidth(70)
+                    rh_layout.addWidget(link_hdr)
+                    fix_hdr = QLabel("Fix")
+                    fix_hdr.setFixedWidth(40)
+                    rh_layout.addWidget(fix_hdr)
+                    hint_hdr = QLabel("Hint")
+                    rh_layout.addWidget(hint_hdr)
+                    # total right width should accommodate link+fix+hint
+                    right_header.setFixedWidth(220)
+                    header_h.addWidget(right_header)
+                    form_layout.addRow(QLabel(""), header_widget)
+                except Exception:
+                    pass
+
                 for name, meta in entries:
                     spec_dict = meta
                     val = spec_dict.get("value")
@@ -361,18 +388,27 @@ class ParametersDock(QDockWidget):
                     except Exception:
                         pass
 
+                    # Compact sizing for common input widgets (we generally need 3-5 digits)
+                    try:
+                        if isinstance(widget, (QDoubleSpinBox, QSpinBox)):
+                            widget.setMaximumWidth(80)
+                        elif isinstance(widget, QComboBox):
+                            widget.setMaximumWidth(140)
+                        elif isinstance(widget, QLineEdit):
+                            widget.setMaximumWidth(140)
+                    except Exception:
+                        pass
+
                     container_h = QWidget()
                     hbox = QHBoxLayout(container_h)
                     hbox.setContentsMargins(0, 0, 0, 0)
-                    hbox.addWidget(widget)
-                    if hint:
-                        hint_label = QLabel(f"({hint})")
-                        hint_label.setStyleSheet("color: gray; font-size: 11px;")
-                        hint_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                        hint_label.setToolTip(f"Interactive control: {hint}")
-                        hbox.addWidget(hint_label)
-                    else:
-                        hbox.addWidget(QLabel(""))
+
+                    # Left container holds the main value widget and expands
+                    left_container = QWidget()
+                    left_l = QHBoxLayout(left_container)
+                    left_l.setContentsMargins(0, 0, 0, 0)
+                    left_l.addWidget(widget)
+                    left_l.addStretch(1)
 
                     # Link group spinbox: allow user to link parameters together
                     try:
@@ -383,9 +419,9 @@ class ParametersDock(QDockWidget):
                     link_spin = QSpinBox()
                     link_spin.setRange(0, 99)
                     link_spin.setValue(link_val)
-                    link_spin.setPrefix("Link: ")
+                    # Compact link control: remove long prefix
+                    link_spin.setPrefix("")
                     link_spin.setToolTip("Enter a number to link this parameter with others (0 = not linked)")
-                    link_spin.setMaximumWidth(100)
                     try:
                         link_spin.blockSignals(True)
                         link_spin.setValue(link_val)
@@ -403,14 +439,14 @@ class ParametersDock(QDockWidget):
                             pass
                     # bind the link spinbox under a distinct key
                     self._bind_param_widget(f"{name}__link", link_spin)
-                    hbox.addWidget(link_spin)
 
                     # Fixed checkbox: allow user to mark parameter as fixed during fits
                     try:
                         fixed_val = bool(spec_dict.get("fixed", False))
                     except Exception:
                         fixed_val = False
-                    fixed_chk = QCheckBox("Fixed")
+                    # Shorten label to save horizontal space
+                    fixed_chk = QCheckBox("")
                     try:
                         fixed_chk.blockSignals(True)
                         fixed_chk.setChecked(fixed_val)
@@ -423,7 +459,36 @@ class ParametersDock(QDockWidget):
                         pass
                     # bind the fixed checkbox under a distinct key so apply/commit sends it
                     self._bind_param_widget(f"{name}__fixed", fixed_chk)
-                    hbox.addWidget(fixed_chk)
+
+                    # Right container is fixed width so link/fix/hint align across rows
+                    right_container = QWidget()
+                    right_l = QHBoxLayout(right_container)
+                    right_l.setContentsMargins(0, 0, 0, 0)
+                    right_l.setSpacing(6)
+                    try:
+                        link_spin.setFixedWidth(70)
+                    except Exception:
+                        pass
+                    try:
+                        fixed_chk.setFixedWidth(40)
+                    except Exception:
+                        pass
+                    right_l.addWidget(link_spin)
+                    right_l.addWidget(fixed_chk)
+                    # Place interactive hint after link/fix so it's visually grouped to the right
+                    if hint:
+                        hint_label = QLabel(f"({hint})")
+                        hint_label.setStyleSheet("color: gray; font-size: 11px;")
+                        hint_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                        hint_label.setToolTip(f"Interactive control: {hint}")
+                        right_l.addWidget(hint_label)
+
+                    # fix the right container width to match header
+                    right_container.setFixedWidth(220)
+
+                    # compose the row: left (expanding) + right (fixed)
+                    hbox.addWidget(left_container)
+                    hbox.addWidget(right_container)
 
                     form_layout.addRow(f"{name}:", container_h)
                     self._bind_param_widget(name, widget)

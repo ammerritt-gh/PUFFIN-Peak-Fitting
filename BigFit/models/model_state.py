@@ -38,6 +38,10 @@ class ModelState:
         self.model_spec: BaseModelSpec = get_model_spec(model_name)
         self.fit_result: Optional[Dict[str, Any]] = None
 
+        # Information about the last-loaded file (path, name, size, ...)
+        # Initialized here so callers can safely assign `model_state.file_info`.
+        self.file_info: Optional[Dict[str, Any]] = None
+
         # Initialize parameters based on current data
         self.model_spec.initialize(self.x_data, self.y_data)
         # Exclusion mask (False = included, True = excluded)

@@ -140,7 +140,15 @@ def main():
                     pass
                 # notify via viewmodel and update plot
                 try:
-                    viewmodel.log_message.emit(f"Restored last dataset: {info.get('name')}")
+                    # Be defensive: `info` may be a dict (expected), a string
+                    # path, or another object. Don't assume `get` exists.
+                    if isinstance(info, dict):
+                        name = info.get("name") or os.path.basename(info.get("path") or last)
+                    elif isinstance(info, str):
+                        name = os.path.basename(info)
+                    else:
+                        name = getattr(info, "name", None) or (os.path.basename(last) if last else str(info))
+                    viewmodel.log_message.emit(f"Restored last dataset: {name}")
                 except Exception:
                     pass
                 try:
