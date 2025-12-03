@@ -142,6 +142,20 @@ def _extract_fit_state(model_state) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
+        # Extract component structure for CompositeModelSpec
+        components = []
+        try:
+            if getattr(model_spec, "is_composite", False) and hasattr(model_spec, "list_components"):
+                for comp in model_spec.list_components():
+                    comp_info = {
+                        "prefix": comp.prefix,
+                        "spec_name": comp.spec.__class__.__name__.replace("ModelSpec", ""),
+                        "color": comp.color,
+                    }
+                    components.append(comp_info)
+        except Exception:
+            pass
+
         # Build the state dict
         state = {
             "version": FIT_FILE_VERSION,
@@ -154,6 +168,7 @@ def _extract_fit_state(model_state) -> Optional[Dict[str, Any]]:
             "excluded": excluded,
             "signature": signature,
             "source": file_info if isinstance(file_info, dict) else {},
+            "components": components,  # Component structure for composite models
         }
         return state
 
@@ -175,14 +190,18 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
     try:
         import numpy as np
         from models import get_model_spec
+        from models.model_specs import CompositeModelSpec
 
         # Get model spec, create if needed
         model_spec = getattr(model_state, "model_spec", None)
         saved_model_name = fit_data.get("model_name", "Voigt")
+        saved_components = fit_data.get("components", [])
 
         # If model names differ or no spec, try to get the correct one
         current_model_name = getattr(model_state, "model_name", None)
-        if model_spec is None or (current_model_name and current_model_name.lower() != saved_model_name.lower()):
+        need_new_spec = model_spec is None or (current_model_name and current_model_name.lower() != saved_model_name.lower())
+        
+        if need_new_spec:
             try:
                 model_spec = get_model_spec(saved_model_name)
                 setattr(model_state, "model_spec", model_spec)
@@ -193,7 +212,43 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
         if model_spec is None:
             return False
 
-        # Apply parameters
+        # For composite models, rebuild the component structure first
+        if isinstance(model_spec, CompositeModelSpec) and saved_components:
+            try:
+                # Clear existing components
+                model_spec.clear_components()
+                
+                # Add components back in the saved order
+                x_data = getattr(model_state, "x_data", None)
+                y_data = getattr(model_state, "y_data", None)
+                
+                for comp_info in saved_components:
+                    spec_name = comp_info.get("spec_name", "")
+                    prefix = comp_info.get("prefix")
+                    
+                    # Map common spec names to the expected format
+                    spec_name_map = {
+                        "Gaussian": "Gaussian",
+                        "Voigt": "Voigt",
+                        "LinearBackground": "Linear Background",
+                        "Linear": "Linear Background",
+                    }
+                    spec_name = spec_name_map.get(spec_name, spec_name)
+                    
+                    if spec_name:
+                        try:
+                            model_spec.add_component(
+                                spec_name,
+                                prefix=prefix,
+                                data_x=x_data,
+                                data_y=y_data,
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Apply parameters (need to get params again after rebuilding components)
         params = fit_data.get("params", {})
         fixed = fit_data.get("fixed", {})
         link_groups = fit_data.get("link_groups", {})
@@ -203,6 +258,12 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
             if name in spec_params:
                 try:
                     spec_params[name].value = value
+                except Exception:
+                    pass
+            # For composite models, also try to set via set_param_value
+            if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, "set_param_value"):
+                try:
+                    model_spec.set_param_value(name, value)
                 except Exception:
                     pass
 
