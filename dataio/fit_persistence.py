@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 # Constants
 DEFAULT_FIT_FILENAME = "default_fit.json"
-FIT_FILE_VERSION = 1
+FIT_FILE_VERSION = 2  # Version 2: Human-readable format with grouped elements
 
 
 def _get_fits_folder() -> Path:
@@ -96,22 +96,6 @@ def _extract_fit_state(model_state) -> Optional[Dict[str, Any]]:
         if model_spec is None:
             return None
 
-        params = {}
-        fixed = {}
-        link_groups = {}
-
-        spec_params = getattr(model_spec, "params", {}) or {}
-        for name, param in spec_params.items():
-            try:
-                params[name] = getattr(param, "value", None)
-                fixed[name] = bool(getattr(param, "fixed", False))
-                lg = getattr(param, "link_group", None)
-                link_groups[name] = int(lg) if lg else None
-            except Exception:
-                params[name] = None
-                fixed[name] = False
-                link_groups[name] = None
-
         # Get fit_result if available
         fit_result = getattr(model_state, "fit_result", None)
         if fit_result is not None and not isinstance(fit_result, dict):
@@ -142,33 +126,83 @@ def _extract_fit_state(model_state) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
-        # Extract component structure for CompositeModelSpec
-        components = []
-        try:
-            if getattr(model_spec, "is_composite", False) and hasattr(model_spec, "list_components"):
+        # Extract elements in a human-readable grouped format
+        elements = []
+        model_name = getattr(model_state, "model_name", "Voigt")
+        
+        if getattr(model_spec, "is_composite", False) and hasattr(model_spec, "list_components"):
+            # Composite model - group parameters by component
+            try:
                 for comp in model_spec.list_components():
-                    comp_info = {
+                    element = {
+                        "type": comp.spec.__class__.__name__.replace("ModelSpec", ""),
                         "prefix": comp.prefix,
-                        "spec_name": comp.spec.__class__.__name__.replace("ModelSpec", ""),
                         "color": comp.color,
+                        "parameters": {}
                     }
-                    components.append(comp_info)
-        except Exception:
-            pass
+                    
+                    # Get parameters for this component from the flat params dict
+                    spec_params = getattr(model_spec, "params", {}) or {}
+                    for name, param in spec_params.items():
+                        # Check if this param belongs to this component
+                        if name.startswith(comp.prefix):
+                            # Extract the base parameter name (without prefix)
+                            base_name = name[len(comp.prefix):]
+                            try:
+                                lg = getattr(param, "link_group", None)
+                                element["parameters"][base_name] = {
+                                    "value": getattr(param, "value", None),
+                                    "fixed": bool(getattr(param, "fixed", False)),
+                                    "link_group": int(lg) if lg else None
+                                }
+                            except Exception:
+                                element["parameters"][base_name] = {
+                                    "value": None,
+                                    "fixed": False,
+                                    "link_group": None
+                                }
+                    
+                    elements.append(element)
+            except Exception:
+                pass
+        else:
+            # Non-composite model (single model like Voigt, Gaussian)
+            spec_params = getattr(model_spec, "params", {}) or {}
+            element = {
+                "type": model_name,
+                "prefix": "",
+                "color": None,
+                "parameters": {}
+            }
+            
+            for name, param in spec_params.items():
+                try:
+                    lg = getattr(param, "link_group", None)
+                    element["parameters"][name] = {
+                        "value": getattr(param, "value", None),
+                        "fixed": bool(getattr(param, "fixed", False)),
+                        "link_group": int(lg) if lg else None
+                    }
+                except Exception:
+                    element["parameters"][name] = {
+                        "value": None,
+                        "fixed": False,
+                        "link_group": None
+                    }
+            
+            if element["parameters"]:
+                elements.append(element)
 
         # Build the state dict
         state = {
             "version": FIT_FILE_VERSION,
             "saved_at": datetime.now(timezone.utc).isoformat(),
-            "model_name": getattr(model_state, "model_name", "Voigt"),
-            "params": params,
-            "fixed": fixed,
-            "link_groups": link_groups,
+            "model_name": model_name,
+            "elements": elements,
             "fit_result": fit_result,
             "excluded": excluded,
             "signature": signature,
             "source": file_info if isinstance(file_info, dict) else {},
-            "components": components,  # Component structure for composite models
         }
         return state
 
@@ -195,7 +229,7 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
         # Get model spec, create if needed
         model_spec = getattr(model_state, "model_spec", None)
         saved_model_name = fit_data.get("model_name", "Voigt")
-        saved_components = fit_data.get("components", [])
+        saved_elements = fit_data.get("elements", [])
 
         # If model names differ or no spec, try to get the correct one
         current_model_name = getattr(model_state, "model_name", None)
@@ -213,7 +247,7 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
             return False
 
         # For composite models, rebuild the component structure first
-        if isinstance(model_spec, CompositeModelSpec) and saved_components:
+        if isinstance(model_spec, CompositeModelSpec) and saved_elements:
             try:
                 # Clear existing components
                 model_spec.clear_components()
@@ -222,9 +256,9 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                 x_data = getattr(model_state, "x_data", None)
                 y_data = getattr(model_state, "y_data", None)
                 
-                for comp_info in saved_components:
-                    spec_name = comp_info.get("spec_name", "")
-                    prefix = comp_info.get("prefix")
+                for element in saved_elements:
+                    spec_name = element.get("type", "")
+                    prefix = element.get("prefix")
                     
                     # Map common spec names to the expected format
                     spec_name_map = {
@@ -248,40 +282,45 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
             except Exception:
                 pass
 
-        # Apply parameters (need to get params again after rebuilding components)
-        params = fit_data.get("params", {})
-        fixed = fit_data.get("fixed", {})
-        link_groups = fit_data.get("link_groups", {})
-
+        # Apply parameters from elements
         spec_params = getattr(model_spec, "params", {}) or {}
-        for name, value in params.items():
-            if name in spec_params:
-                try:
-                    spec_params[name].value = value
-                except Exception:
-                    pass
-            # For composite models, also try to set via set_param_value
-            if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, "set_param_value"):
-                try:
-                    model_spec.set_param_value(name, value)
-                except Exception:
-                    pass
-
-        # Apply fixed states
-        for name, is_fixed in fixed.items():
-            if name in spec_params:
-                try:
-                    spec_params[name].fixed = bool(is_fixed)
-                except Exception:
-                    pass
-
-        # Apply link groups
-        for name, lg in link_groups.items():
-            if name in spec_params:
-                try:
-                    spec_params[name].link_group = int(lg) if lg else None
-                except Exception:
-                    pass
+        
+        for element in saved_elements:
+            prefix = element.get("prefix", "")
+            params = element.get("parameters", {})
+            
+            for base_name, param_info in params.items():
+                # Construct the full parameter name
+                full_name = f"{prefix}{base_name}" if prefix else base_name
+                
+                if full_name in spec_params:
+                    # Apply value
+                    value = param_info.get("value")
+                    if value is not None:
+                        try:
+                            spec_params[full_name].value = value
+                        except Exception:
+                            pass
+                        # For composite models, also try to set via set_param_value
+                        if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, "set_param_value"):
+                            try:
+                                model_spec.set_param_value(full_name, value)
+                            except Exception:
+                                pass
+                    
+                    # Apply fixed state
+                    is_fixed = param_info.get("fixed", False)
+                    try:
+                        spec_params[full_name].fixed = bool(is_fixed)
+                    except Exception:
+                        pass
+                    
+                    # Apply link group
+                    link_group = param_info.get("link_group")
+                    try:
+                        spec_params[full_name].link_group = int(link_group) if link_group else None
+                    except Exception:
+                        pass
 
         # Apply fit_result
         fit_result = fit_data.get("fit_result")
