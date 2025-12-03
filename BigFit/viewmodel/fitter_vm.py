@@ -2,6 +2,7 @@
 from PySide6.QtCore import QObject, Signal
 import numpy as np
 import os
+import math
 from types import SimpleNamespace
 
 from models import ModelState, CompositeModelSpec, get_model_spec, get_atomic_component_names
@@ -31,6 +32,8 @@ class FitterViewModel(QObject):
         self._datasets = []  # queued datasets [(dict)]
         self._active_dataset_index = None
         self.curves: dict = {}
+        self._last_blocked_drag = None  # tracks last drag ignored due to fixed params
+        self._last_blocked_value_update = None
         # Attempt to restore previously queued files from configuration
         try:
             self._load_queue_from_config()
@@ -1188,6 +1191,149 @@ class FitterViewModel(QObject):
             pass
         return True
 
+    def _is_parameter_fixed(self, name: _typing.Optional[str]) -> bool:
+        """Return True if the given parameter is flagged as fixed in the current spec."""
+        if not name or not isinstance(name, str):
+            return False
+
+        spec = getattr(self.state, "model_spec", None)
+        params = {}
+        if spec is not None:
+            try:
+                params = getattr(spec, "params", {}) or {}
+            except Exception:
+                params = {}
+
+        param = params.get(name)
+        if param is not None:
+            try:
+                if bool(getattr(param, "fixed", False)):
+                    return True
+            except Exception:
+                pass
+
+        if isinstance(spec, CompositeModelSpec) and hasattr(spec, "get_link"):
+            try:
+                link = spec.get_link(name)
+            except Exception:
+                link = None
+            if link and isinstance(link, tuple) and len(link) >= 2:
+                component, base_name = link
+                try:
+                    comp_params = getattr(component.spec, "params", {}) if hasattr(component, "spec") else {}
+                except Exception:
+                    comp_params = {}
+                comp_param = comp_params.get(base_name)
+                if comp_param is not None:
+                    try:
+                        if bool(getattr(comp_param, "fixed", False)):
+                            return True
+                    except Exception:
+                        pass
+
+        mdl = getattr(self.state, "model", None)
+        if mdl is not None:
+            try:
+                if bool(getattr(mdl, f"{name}__fixed", False)):
+                    return True
+            except Exception:
+                pass
+
+        return False
+
+    def _collect_link_groups(self, model_spec) -> dict:
+        groups = {}
+        if model_spec is None:
+            return groups
+        try:
+            params = getattr(model_spec, "params", {}) or {}
+        except Exception:
+            return groups
+
+        for pname, param in params.items():
+            try:
+                lg = getattr(param, "link_group", None)
+            except Exception:
+                lg = None
+            if lg and lg > 0:
+                groups.setdefault(lg, []).append(pname)
+        return groups
+
+    def _set_param_fixed_state(self, model_spec, model_obj, name: str, fixed_value: bool):
+        if not name:
+            return
+        try:
+            if model_spec is not None and name in getattr(model_spec, "params", {}):
+                try:
+                    model_spec.params[name].fixed = bool(fixed_value)
+                except Exception:
+                    pass
+                if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, "get_link"):
+                    try:
+                        link = model_spec.get_link(name)
+                    except Exception:
+                        link = None
+                    if link and isinstance(link, tuple) and len(link) >= 2:
+                        component, pname = link
+                        try:
+                            comp_params = getattr(component.spec, "params", {}) if hasattr(component, "spec") else {}
+                        except Exception:
+                            comp_params = {}
+                        if pname in comp_params:
+                            try:
+                                comp_params[pname].fixed = bool(fixed_value)
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        if model_obj is not None:
+            try:
+                setattr(model_obj, f"{name}__fixed", bool(fixed_value))
+            except Exception:
+                pass
+
+    def _apply_fixed_state_to_group(self, model_spec, model_obj, base: str, fixed_value: bool, link_groups: dict):
+        targets = set()
+        if base:
+            targets.add(base)
+        try:
+            params = getattr(model_spec, "params", {}) if model_spec is not None else {}
+            lg = None
+            if base in params:
+                lg = getattr(params[base], "link_group", None)
+        except Exception:
+            lg = None
+        if lg and lg in link_groups:
+            for name in link_groups[lg]:
+                targets.add(name)
+
+        for name in targets:
+            self._set_param_fixed_state(model_spec, model_obj, name, fixed_value)
+
+    def _get_current_param_value(self, name: str):
+        mdl = getattr(self.state, "model", None)
+        if mdl is not None and hasattr(mdl, name):
+            try:
+                return getattr(mdl, name)
+            except Exception:
+                pass
+        spec = getattr(self.state, "model_spec", None)
+        if spec is not None and name in getattr(spec, "params", {}):
+            try:
+                return spec.params[name].value
+            except Exception:
+                pass
+        return None
+
+    def _values_close(self, a, b) -> bool:
+        if a is None or b is None:
+            return a is b
+        try:
+            return math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-9)
+        except Exception:
+            return a == b
+
     def apply_parameters(self, params: dict):
         """Apply parameters from the UI.
 
@@ -1230,6 +1376,7 @@ class FitterViewModel(QObject):
             setattr(self.state, "model", mdl)
 
         is_composite = isinstance(model_spec, CompositeModelSpec)
+        link_groups = self._collect_link_groups(model_spec)
         # split fixed toggles (keys ending with '__fixed'), link groups (keys ending with '__link'), 
         # and value updates
         fixed_suffix = "__fixed"
@@ -1255,6 +1402,7 @@ class FitterViewModel(QObject):
                 value_updates[k] = v
 
         applied = []
+        blocked_values = []
         # First apply link_group updates
         for base, link_val in link_updates.items():
             try:
@@ -1279,53 +1427,24 @@ class FitterViewModel(QObject):
                 applied.append(f"{base}{link_suffix}")
             except Exception:
                 pass
+        link_groups = self._collect_link_groups(model_spec)
         
         # Apply fixed-state updates so UI and fit logic see changes immediately
         for base, fv in fixed_updates.items():
             try:
-                if model_spec is not None and base in model_spec.params:
-                    try:
-                        model_spec.params[base].fixed = bool(fv)
-                    except Exception:
-                        pass
-                    # If composite, also propagate fixed state back to the underlying component param
-                    try:
-                        if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, 'get_link'):
-                            link = model_spec.get_link(base)
-                            if link and isinstance(link, tuple) and len(link) >= 2:
-                                component, pname = link
-                                try:
-                                    if pname in getattr(component.spec, 'params', {}):
-                                        component.spec.params[pname].fixed = bool(fv)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                # also record on the concrete model object if present
-                try:
-                    setattr(mdl, f"{base}{fixed_suffix}", bool(fv))
-                except Exception:
-                    pass
+                self._apply_fixed_state_to_group(model_spec, mdl, base, bool(fv), link_groups)
                 applied.append(f"{base}{fixed_suffix}")
             except Exception:
                 pass
 
         # Now apply value updates (regular parameter assignments)
-        # Build a map of link_group -> [param_names] to propagate values to linked params
-        link_groups = {}
-        if model_spec is not None and hasattr(model_spec, "params"):
-            for pname, param in model_spec.params.items():
-                try:
-                    lg = getattr(param, "link_group", None)
-                    if lg and lg > 0:
-                        if lg not in link_groups:
-                            link_groups[lg] = []
-                        link_groups[lg].append(pname)
-                except Exception:
-                    pass
-        
         for k, v in value_updates.items():
             try:
+                if self._is_parameter_fixed(k):
+                    current_val = self._get_current_param_value(k)
+                    if not self._values_close(current_val, v):
+                        blocked_values.append(k)
+                    continue
                 # prefer to set attribute on the actual model object
                 try:
                     setattr(mdl, k, v)
@@ -1376,6 +1495,22 @@ class FitterViewModel(QObject):
             except Exception:
                 # ignore per-parameter failures
                 pass
+
+        if blocked_values:
+            key = tuple(sorted(blocked_values))
+            if getattr(self, "_last_blocked_value_update", None) != key:
+                self._last_blocked_value_update = key
+                try:
+                    if len(blocked_values) == 1:
+                        msg = f"Skipped update: '{blocked_values[0]}' is fixed."
+                    else:
+                        names = ", ".join(blocked_values)
+                        msg = f"Skipped updates; fixed parameters: {names}."
+                    self.log_message.emit(msg)
+                except Exception:
+                    pass
+        else:
+            self._last_blocked_value_update = None
 
         # Also update any model_spec values for consistency if both exist
         if model_spec is not None:
@@ -1482,6 +1617,32 @@ class FitterViewModel(QObject):
 
         if not updates:
             return
+
+        free_updates = {}
+        blocked = []
+        for pname, pval in updates.items():
+            if self._is_parameter_fixed(pname):
+                blocked.append(pname)
+            else:
+                free_updates[pname] = pval
+
+        if not free_updates:
+            if blocked:
+                blocked_key = tuple(sorted(blocked))
+                if getattr(self, "_last_blocked_drag", None) != blocked_key:
+                    self._last_blocked_drag = blocked_key
+                    try:
+                        if len(blocked) == 1:
+                            msg = f"Ignored peak drag: '{blocked[0]}' is fixed."
+                        else:
+                            msg = "Ignored peak drag: all targeted centers are fixed."
+                        self.log_message.emit(msg)
+                    except Exception:
+                        pass
+            return
+
+        self._last_blocked_drag = None
+        updates = free_updates
 
         try:
             self.apply_parameters(updates)
