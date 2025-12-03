@@ -172,6 +172,10 @@ class FitterViewModel(QObject):
     def notify_file_queue(self):
         self._emit_file_queue()
 
+    def has_queued_files(self) -> bool:
+        """Return True if there are queued files."""
+        return len(self._datasets) > 0
+
     def _save_queue_to_config(self):
         try:
             from dataio import get_config
@@ -222,6 +226,9 @@ class FitterViewModel(QObject):
             # restore active index if valid
             if isinstance(active, int) and 0 <= active < len(self._datasets):
                 self._active_dataset_index = int(active)
+            elif len(self._datasets) > 0:
+                # Default to first file if no valid active index
+                self._active_dataset_index = 0
             else:
                 self._active_dataset_index = None
             if added:
@@ -230,6 +237,12 @@ class FitterViewModel(QObject):
                     self._emit_file_queue()
                 except Exception:
                     pass
+                # Actually activate the file to apply data and load saved fit
+                if self._active_dataset_index is not None:
+                    try:
+                        self.activate_file(self._active_dataset_index)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
