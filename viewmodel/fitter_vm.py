@@ -291,6 +291,20 @@ class FitterViewModel(QObject):
         label = name or f"Dataset {idx + 1}"
         self._log_message(f"Loaded dataset: {label}")
 
+        # Try to load saved fit for this file, or fall back to default fit
+        fit_loaded = False
+        try:
+            fit_loaded = self._load_fit_for_current_file()
+        except Exception:
+            pass
+
+        if not fit_loaded:
+            # Try to load the default fit as a fallback
+            try:
+                self._load_default_fit()
+            except Exception:
+                pass
+
         try:
             self.parameters_updated.emit()
         except Exception:
@@ -477,6 +491,7 @@ class FitterViewModel(QObject):
             "on_peak_selected": lambda: self.on_peak_selected(kwargs.get("x"), kwargs.get("y")),
             "activate_file": lambda: _call_with_index(("index", "idx"), self.activate_file),
             "remove_file_at": lambda: _call_with_index(("index", "idx"), self.remove_file_at),
+            "reset_fit": self.reset_fit,
         }
 
         try:
@@ -728,6 +743,12 @@ class FitterViewModel(QObject):
                         self.plot_updated.emit(getattr(self.state, "x_data", x), getattr(self.state, "y_data", y), full_y_fit, full_errs)
 
                     self._log_message("Fit completed successfully.")
+
+                    # Auto-save fit after successful fit
+                    try:
+                        self._save_current_fit()
+                    except Exception:
+                        pass
                 else:
                     self._log_message("Fit failed.")
             finally:
@@ -825,6 +846,134 @@ class FitterViewModel(QObject):
             except Exception:
                 pass
             return {"reduced_chi2": None, "cash": None, "reduced_cash": None}
+
+    # --------------------------
+    # Fit Persistence
+    # --------------------------
+    def _get_current_file_path(self) -> _typing.Optional[str]:
+        """Get the file path of the currently loaded data file, if any."""
+        try:
+            file_info = getattr(self.state, "file_info", None)
+            if isinstance(file_info, dict):
+                return file_info.get("path")
+        except Exception:
+            pass
+        return None
+
+    def _save_current_fit(self):
+        """Save the current fit state to both default and file-specific locations."""
+        try:
+            from dataio import save_default_fit, save_fit_for_file
+
+            # Always save to default fit
+            try:
+                if save_default_fit(self.state):
+                    self._log_message("Saved default fit.")
+            except Exception:
+                pass
+
+            # Also save to file-specific fit if we have a loaded file
+            filepath = self._get_current_file_path()
+            if filepath:
+                try:
+                    if save_fit_for_file(self.state, filepath):
+                        self._log_message(f"Saved fit for: {os.path.basename(filepath)}")
+                except Exception:
+                    pass
+        except Exception as e:
+            log_exception("Failed to save fit", e, vm=self)
+
+    def _load_fit_for_current_file(self) -> bool:
+        """Try to load a saved fit for the currently loaded file.
+
+        Returns True if a file-specific fit was loaded, False otherwise.
+        """
+        try:
+            from dataio import load_fit_for_file, has_fit_for_file
+
+            filepath = self._get_current_file_path()
+            if not filepath:
+                return False
+
+            if not has_fit_for_file(filepath):
+                return False
+
+            if load_fit_for_file(self.state, filepath, apply_excluded=True):
+                self._log_message(f"Restored fit for: {os.path.basename(filepath)}")
+                return True
+        except Exception as e:
+            log_exception("Failed to load fit for file", e, vm=self)
+        return False
+
+    def _load_default_fit(self) -> bool:
+        """Try to load the default fit for the current data.
+
+        Returns True if the default fit was loaded, False otherwise.
+        """
+        try:
+            from dataio import load_default_fit
+
+            if load_default_fit(self.state, apply_excluded=False):
+                self._log_message("Loaded default fit parameters.")
+                return True
+        except Exception as e:
+            log_exception("Failed to load default fit", e, vm=self)
+        return False
+
+    def reset_fit(self):
+        """Reset the fit for the current file and/or default fit.
+
+        This clears the saved fit state and reinitializes the model parameters.
+        """
+        try:
+            from dataio import reset_fit_for_file, reset_default_fit
+
+            # Reset file-specific fit if applicable
+            filepath = self._get_current_file_path()
+            if filepath:
+                try:
+                    if reset_fit_for_file(filepath):
+                        self._log_message(f"Cleared saved fit for: {os.path.basename(filepath)}")
+                except Exception:
+                    pass
+
+            # Also reset the default fit
+            try:
+                if reset_default_fit():
+                    self._log_message("Cleared default fit.")
+            except Exception:
+                pass
+
+            # Reinitialize model spec with current data
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is not None:
+                try:
+                    model_spec.initialize(
+                        getattr(self.state, "x_data", None),
+                        getattr(self.state, "y_data", None)
+                    )
+                except Exception:
+                    pass
+
+            # Clear fit result
+            try:
+                self.state.fit_result = None
+            except Exception:
+                pass
+
+            # Notify views and update plot
+            try:
+                self.parameters_updated.emit()
+            except Exception:
+                pass
+            try:
+                self.update_plot()
+            except Exception:
+                pass
+
+            self._log_message("Fit has been reset.")
+        except Exception as e:
+            log_exception("Failed to reset fit", e, vm=self)
 
     # --------------------------
     # Exclusion management (called from InputHandler/View)
