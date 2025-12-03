@@ -362,6 +362,7 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 BigFit/config/
+config/settings.json
 
 # Fit persistence files (auto-generated, not tracked)
 fits/*.json
