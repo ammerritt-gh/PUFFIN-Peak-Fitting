@@ -1,5 +1,5 @@
 ﻿# viewmodel/fitter_vm.py
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QTimer
 import numpy as np
 import os
 import math
@@ -34,6 +34,13 @@ class FitterViewModel(QObject):
         self.curves: dict = {}
         self._last_blocked_drag = None  # tracks last drag ignored due to fixed params
         self._last_blocked_value_update = None
+        
+        # Debounce timer for auto-saving fit state after parameter changes
+        self._fit_save_timer = QTimer()
+        self._fit_save_timer.setSingleShot(True)
+        self._fit_save_timer.setInterval(500)  # 500ms debounce
+        self._fit_save_timer.timeout.connect(self._save_current_fit)
+        
         # Attempt to restore previously queued files from configuration
         try:
             self._load_queue_from_config()
@@ -896,6 +903,22 @@ class FitterViewModel(QObject):
         except Exception as e:
             log_exception("Failed to save fit", e, vm=self)
 
+    def _schedule_fit_save(self):
+        """Schedule a debounced save of the current fit state.
+        
+        This restarts the timer so that rapid changes only trigger one save
+        after the user stops making changes (500ms debounce).
+        """
+        try:
+            self._fit_save_timer.stop()
+            self._fit_save_timer.start()
+        except Exception:
+            # If timer doesn't work, save immediately
+            try:
+                self._save_current_fit()
+            except Exception:
+                pass
+
     def _load_fit_for_current_file(self) -> bool:
         """Try to load a saved fit for the currently loaded file.
 
@@ -1279,6 +1302,11 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
+        except Exception:
+            pass
         return True
 
     def remove_component_at(self, index: int) -> bool:
@@ -1300,6 +1328,11 @@ class FitterViewModel(QObject):
             pass
         try:
             self.update_plot()
+        except Exception:
+            pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
         except Exception:
             pass
         return True
@@ -1330,6 +1363,11 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
+        except Exception:
+            pass
         return True
 
     def reorder_components_by_prefix(self, prefix_order: _typing.List[str]) -> bool:
@@ -1349,6 +1387,11 @@ class FitterViewModel(QObject):
             pass
         try:
             self.update_plot()
+        except Exception:
+            pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
         except Exception:
             pass
         return True
@@ -1696,6 +1739,11 @@ class FitterViewModel(QObject):
         # Notify views that parameters changed so UI can refresh widgets
         try:
             self.parameters_updated.emit()
+        except Exception:
+            pass
+        # Schedule debounced save of fit state
+        try:
+            self._schedule_fit_save()
         except Exception:
             pass
 
