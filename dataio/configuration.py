@@ -44,7 +44,7 @@ class Config:
         path = Path(path)
         if not path.exists():
             # return default config with folder set
-            return cls(config_folder=str(path.parent))
+            return cls(config_folder=str(path.parent), config_filename=path.name)
         try:
             with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -52,14 +52,14 @@ class Config:
                 last_loaded_file=data.get("last_loaded_file"),
                 default_load_folder=data.get("default_load_folder", ""),
                 default_save_folder=data.get("default_save_folder", ""),
-                config_folder=data.get("config_folder", str(path.parent)),
-                config_filename=data.get("config_filename", "settings.json"),
+                config_folder=str(path.parent),
+                config_filename=path.name,
                 queued_files=data.get("queued_files", []),
                 queued_active=data.get("queued_active", None),
             )
         except Exception:
             # on parse error return defaults and keep config folder
-            return cls(config_folder=str(path.parent))
+            return cls(config_folder=str(path.parent), config_filename=path.name)
 
 # Module-level singleton accessor
 _config_singleton: Optional[Config] = None
