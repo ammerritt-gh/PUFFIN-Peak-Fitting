@@ -120,7 +120,7 @@ def main():
     # Skip if the viewmodel already has datasets loaded from queue restoration
     if not viewmodel.has_queued_files():
         try:
-            from dataio import get_config, load_data_from_file
+            from dataio import get_config, load_data_from_file, load_fit_for_file, has_fit_for_file, load_default_fit
             cfg = get_config()
             last = getattr(cfg, "last_loaded_file", None)
             if last and os.path.isfile(last):
@@ -142,7 +142,6 @@ def main():
                         pass
                     # Try to load the saved fit for this file
                     try:
-                        from dataio import load_fit_for_file, has_fit_for_file, load_default_fit
                         if has_fit_for_file(last):
                             load_fit_for_file(model_state, last, apply_excluded=True)
                             viewmodel.log_message.emit(f"Restored fit for: {os.path.basename(last)}")
@@ -177,6 +176,22 @@ def main():
                         viewmodel.log_message.emit(f"Failed to restore last dataset: {e}")
                     except Exception:
                         pass
+            else:
+                # No queued files and no last_loaded_file - using default data
+                # Try to load the default fit to apply last used model/parameters
+                try:
+                    if load_default_fit(model_state, apply_excluded=False):
+                        viewmodel.log_message.emit("Loaded default fit for startup data.")
+                        try:
+                            viewmodel.parameters_updated.emit()
+                        except Exception:
+                            pass
+                        try:
+                            viewmodel.update_plot()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
         except Exception as e:
             try:
                 viewmodel.log_message.emit(f"Config/restore failed: {e}\n{traceback.format_exc()}")
