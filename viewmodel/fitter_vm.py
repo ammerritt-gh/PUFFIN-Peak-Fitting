@@ -11,6 +11,10 @@ from dataio.data_saver import save_dataset
 import typing as _typing
 from .logging_helpers import log_exception, log_message
 
+# Constants for resolution convolution
+DEFAULT_RESOLUTION_RANGE = 20.0  # Range for resolution kernel evaluation (symmetric around 0)
+RESOLUTION_PREVIEW_RANGE = 5.0  # Range for preview plot display
+
 
 class FitterViewModel(QObject):
     """
@@ -928,7 +932,11 @@ class FitterViewModel(QObject):
                     except Exception as e:
                         log_exception("Failed to apply resolution in update_plot (non-composite)", e, vm=self)
                 curves_payload["fit"] = (np.asarray(x, dtype=float), arr)
-            y_fit_payload = y_fit if not self.has_resolution() else arr if y_fit is not None else None
+            # Determine fit payload: use convolved array if resolution is active, otherwise original
+            if self.has_resolution() and y_fit is not None:
+                y_fit_payload = arr
+            else:
+                y_fit_payload = y_fit
 
         self.curves = curves_payload
         errs = getattr(self.state, "errors", None)
@@ -2095,7 +2103,7 @@ class FitterViewModel(QObject):
         
         try:
             # Create a symmetric grid centered at 0
-            x = np.linspace(-5, 5, 200)
+            x = np.linspace(-RESOLUTION_PREVIEW_RANGE, RESOLUTION_PREVIEW_RANGE, 200)
             
             # Evaluate the resolution function
             if hasattr(self._resolution_spec, "evaluate"):
@@ -2141,8 +2149,7 @@ class FitterViewModel(QObject):
             
             # Create a uniform grid for the resolution kernel
             # Use a range that's large enough to capture the full resolution function
-            res_range = 20.0  # This should capture most resolution functions
-            x_res = np.arange(-res_range, res_range, dx)
+            x_res = np.arange(-DEFAULT_RESOLUTION_RANGE, DEFAULT_RESOLUTION_RANGE, dx)
             
             # Evaluate the resolution function centered at 0
             try:

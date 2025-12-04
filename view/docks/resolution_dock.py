@@ -17,6 +17,10 @@ import numpy as np
 import math
 from functools import partial
 
+# Constants
+EXCLUDED_RESOLUTION_MODELS = ("composite", "custom", "custom model")  # Model types not suitable for resolution
+FLOAT_COMPARISON_TOLERANCE = 1e-9  # Tolerance for float equality comparisons
+
 
 class ResolutionDock(QDockWidget):
     """Floating dock widget for global resolution convolution settings."""
@@ -73,8 +77,8 @@ class ResolutionDock(QDockWidget):
             
             spec_class_names = get_available_model_names()
             display_names = [_pretty(n) for n in spec_class_names]
-            # Filter out composite/custom for resolution (doesn't make sense)
-            display_names = [n for n in display_names if n.lower() not in ("composite", "custom", "custom model")]
+            # Filter out model types not suitable for resolution convolution
+            display_names = [n for n in display_names if n.lower() not in EXCLUDED_RESOLUTION_MODELS]
             if display_names:
                 self.model_selector.addItems(display_names)
             else:
@@ -439,7 +443,7 @@ class ResolutionDock(QDockWidget):
         last = self._param_last_values.get(name, None)
         
         if isinstance(value, float) and isinstance(last, float):
-            if math.isclose(value, last, rel_tol=1e-9, abs_tol=1e-9):
+            if math.isclose(value, last, rel_tol=FLOAT_COMPARISON_TOLERANCE, abs_tol=FLOAT_COMPARISON_TOLERANCE):
                 return
         elif value == last:
             return
