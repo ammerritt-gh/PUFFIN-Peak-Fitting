@@ -2124,6 +2124,10 @@ class FitterViewModel(QObject):
     def evaluate_with_resolution(self, x: np.ndarray, y_model: np.ndarray) -> np.ndarray:
         """Apply resolution convolution to a model output.
         
+        The convolution is performed on a uniform grid centered at 0 to avoid
+        edge effects and ensure proper preservation of peak positions. The
+        result is then interpolated back to the original x values.
+        
         Args:
             x: X values (used to determine spacing for convolution)
             y_model: Model output to convolve
@@ -2144,28 +2148,44 @@ class FitterViewModel(QObject):
             if x_arr.size < 2 or y_arr.size != x_arr.size:
                 return y_model
             
-            # Determine grid spacing
-            dx = np.abs(x_arr[1] - x_arr[0]) if len(x_arr) > 1 else 0.1
+            # Determine grid spacing - use median spacing for robustness
+            dx_values = np.abs(np.diff(x_arr))
+            dx = np.median(dx_values) if len(dx_values) > 0 else 0.1
+            if dx < 1e-10:
+                dx = 0.1
             
-            # Create a uniform grid for the resolution kernel
-            # Use a range that's large enough to capture the full resolution function
-            x_res = np.arange(-DEFAULT_RESOLUTION_RANGE, DEFAULT_RESOLUTION_RANGE, dx)
+            # Create a uniform grid centered at 0 with padding for convolution
+            # The grid must span the original data range plus padding
+            x_min, x_max = np.min(x_arr), np.max(x_arr)
+            pad_range = DEFAULT_RESOLUTION_RANGE
+            x_span = max(abs(x_min), abs(x_max)) + pad_range
+            x_uniform = np.arange(-x_span, x_span + dx, dx)
             
-            # Evaluate the resolution function centered at 0
+            # Interpolate the input signal onto the uniform grid
+            signal_interp = interp1d(x_arr, y_arr, kind='linear', 
+                                     bounds_error=False, fill_value=0.0)
+            signal_uniform = signal_interp(x_uniform)
+            
+            # Evaluate the resolution function on the same uniform grid (centered at 0)
             try:
-                res_y = self._resolution_spec.evaluate(x_res)
+                res_y = self._resolution_spec.evaluate(x_uniform)
             except Exception:
                 return y_model
             
             # Normalize the resolution function (area = 1 for proper convolution)
-            area = np.trapz(res_y, x_res)
-            if area > 1e-12:
+            area = np.trapz(res_y, x_uniform)
+            if abs(area) > 1e-12:
                 res_y = res_y / area
             
-            # Perform convolution
-            convolved = fftconvolve(y_arr, res_y, mode='same') * dx
+            # Perform convolution on the uniform grid
+            convolved = fftconvolve(signal_uniform, res_y, mode='same') * dx
             
-            return convolved
+            # Interpolate the convolved result back to original x values
+            result_interp = interp1d(x_uniform, convolved, kind='linear',
+                                     bounds_error=False, fill_value=0.0)
+            result = result_interp(x_arr)
+            
+            return result
         except Exception as e:
             log_exception("Failed to apply resolution convolution", e, vm=self)
             return y_model
