@@ -738,21 +738,84 @@ class LinearBackgroundModelSpec(BaseModelSpec):
 
 # Factory / helper
 def get_model_spec(model_name: str) -> BaseModelSpec:
+    """Get a model specification by name.
+    
+    This function first tries to load from YAML-based model elements in 
+    models/model_elements/, then falls back to hardcoded specs for compatibility.
+    
+    Args:
+        model_name: Name of the model (case-insensitive)
+        
+    Returns:
+        A ModelSpec instance for the requested model
+        
+    Note:
+        If a model is not found, returns an empty BaseModelSpec rather than
+        raising an exception, for graceful degradation.
+    """
     name = (model_name or "").strip().lower()
+    
+    # Handle composite/custom model specially - not from YAML
     if name in ("composite", "custom", "custom model", "custommodel"):
         return CompositeModelSpec()
+    
+    # Try to load from YAML-based model elements first
+    try:
+        from models.model_elements import get_element_spec, ModelElementNotFoundError
+        
+        # Map common aliases to element names
+        alias_map = {
+            "gauss": "gaussian",
+            "gaussmodel": "gaussian",
+            "gaussianmodel": "gaussian",
+            "voigtmodel": "voigt",
+            "linear": "linear background",
+            "linearbackground": "linear background",
+            "linearbackgroundmodel": "linear background",
+            "linearbg": "linear background",
+            "background": "linear background",
+            "linear model": "linear background",
+        }
+        
+        element_name = alias_map.get(name, name)
+        return get_element_spec(element_name)
+        
+    except Exception as e:
+        # Log the error but don't fail - try hardcoded fallbacks
+        import logging
+        logging.getLogger(__name__).debug(f"Could not load model '{model_name}' from elements: {e}")
+    
+    # Fallback to hardcoded specs for backward compatibility
     if name in ("gauss", "gaussian", "gaussmodel", "gaussianmodel"):
         return GaussianModelSpec()
     if name in ("voigt", "voigtmodel"):
         return VoigtModelSpec()
     if name in ("linear", "linear background", "linearbackground", "linearbackgroundmodel", "linearbg", "background", "linear model"):
         return LinearBackgroundModelSpec()
-    # default fallback
+    
+    # default fallback - return empty spec
     return BaseModelSpec()
 
 
 def get_atomic_component_names() -> List[str]:
-    """Return display names for atomic components usable in composite models."""
+    """Return display names for atomic components usable in composite models.
+    
+    This function returns the list of available model elements that can be
+    used as components in a composite model. It dynamically discovers
+    available elements from the model_elements directory.
+    
+    Returns:
+        Sorted list of element display names
+    """
+    try:
+        from models.model_elements import list_available_elements
+        elements = list_available_elements()
+        if elements:
+            return elements
+    except Exception:
+        pass
+    
+    # Fallback to hardcoded list
     return [
         "Gaussian",
         "Voigt",

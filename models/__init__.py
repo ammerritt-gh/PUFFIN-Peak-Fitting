@@ -3,22 +3,33 @@
 """Public API for the models package.
 
 This module programmatically discovers ModelSpec implementations defined in
-`model_specs.py` and exports them automatically so adding a new spec does
-not require editing this file.
+`model_specs.py` and YAML files in `model_elements/`, exporting them 
+automatically so adding a new spec requires only creating a YAML file.
 
 Exports provided:
-  - get_model_spec(model_name)
-  - Parameter, BaseModelSpec
-  - ModelState
-  - <Each ModelSpec class found in model_specs as a module-level name>
+  - get_model_spec(model_name) - factory to get model specs by name
+  - Parameter, BaseModelSpec, CompositeModelSpec - core classes
+  - ModelState - runtime state container
   - get_available_model_spec_classes() -> dict(name -> class)
   - get_available_model_names() -> list[str]
+  - get_atomic_component_names() -> list[str] - names usable in composites
+  - list_available_elements() -> list[str] - YAML-defined element names
+  - reload_model_elements() - reload YAML definitions from disk
+
+Model Element System:
+  Model elements are defined in human-readable YAML files in the 
+  `model_elements/` subfolder. Each file defines a single model with
+  its parameters, hints, and evaluation expression. This allows for:
+  - Easy sharing of model definitions
+  - Human-readable and editable format
+  - Dynamic discovery without code changes
+  - Graceful handling of missing or invalid models
 
 Note: model spec classes are detected by finding classes that subclass
 `BaseModelSpec` (excluding the BaseModelSpec itself).
 """
 
-from typing import Dict
+from typing import Dict, List
 
 from . import model_specs as _model_specs
 from .model_state import ModelState
@@ -29,6 +40,37 @@ Parameter = _model_specs.Parameter
 BaseModelSpec = _model_specs.BaseModelSpec
 CompositeModelSpec = _model_specs.CompositeModelSpec
 get_atomic_component_names = _model_specs.get_atomic_component_names
+
+# Import model element utilities with graceful handling
+try:
+    from .model_elements import (
+        list_available_elements,
+        reload_elements as reload_model_elements,
+        ModelElementError,
+        ModelElementNotFoundError,
+        ModelElementValidationError,
+    )
+except ImportError:
+    # Fallback if model_elements module is not available
+    def list_available_elements() -> List[str]:
+        """Return list of available model elements."""
+        return get_atomic_component_names()
+    
+    def reload_model_elements() -> None:
+        """Reload model elements from disk (no-op fallback)."""
+        pass
+    
+    class ModelElementError(Exception):
+        """Exception raised when a model element cannot be loaded."""
+        pass
+    
+    class ModelElementNotFoundError(ModelElementError):
+        """Exception raised when a requested model element does not exist."""
+        pass
+    
+    class ModelElementValidationError(ModelElementError):
+        """Exception raised when a model element fails validation."""
+        pass
 
 # Discover all ModelSpec subclasses in model_specs module
 _available_model_specs: Dict[str, type] = {}
@@ -61,6 +103,11 @@ __all__ = [
     "get_available_model_spec_classes",
     "get_available_model_names",
     "get_atomic_component_names",
+    "list_available_elements",
+    "reload_model_elements",
+    "ModelElementError",
+    "ModelElementNotFoundError",
+    "ModelElementValidationError",
 ]
 # Append discovered class names
 __all__.extend(list(_available_model_specs.keys()))

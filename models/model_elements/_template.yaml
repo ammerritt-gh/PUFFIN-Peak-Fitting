@@ -1,0 +1,89 @@
+# Model Element Template
+# ========================
+# This file documents the format for creating new model elements.
+# Files starting with underscore (_) are not loaded as models.
+#
+# To create a new model:
+# 1. Copy this file and remove the underscore prefix (e.g., my_model.yaml)
+# 2. Edit the fields below
+# 3. The model will be automatically discovered on program restart
+#
+# Notes:
+# - YAML is a human-readable format (indentation matters!)
+# - Use spaces, not tabs, for indentation
+# - Strings can be quoted or unquoted
+# - Comments start with #
+
+# Required: Model name (displayed in UI)
+name: Example Model
+
+# Optional: Description (can be multiline using | for literal blocks)
+description: |
+  A brief description of what this model does.
+  Can span multiple lines.
+  
+  Formula: y = A * sin(x)
+
+# Optional: Version number for tracking changes
+version: 1
+
+# Optional: Author name
+author: Your Name
+
+# Optional: Category for organization (e.g., "peak", "background", "composite")
+category: peak
+
+# Required: List of parameters
+# Each parameter can have the following fields:
+parameters:
+  - name: Amplitude           # Required: Parameter name (shown in UI)
+    description: Peak amplitude  # Optional: Longer description
+    type: float              # Optional: "float", "int", "bool", "choice" (default: float)
+    value: 1.0               # Optional: Default value (default: 0.0)
+    min: 0.0                 # Optional: Minimum allowed value
+    max: 100.0               # Optional: Maximum allowed value
+    decimals: 3              # Optional: Decimal places in UI spinbox
+    step: 0.1                # Optional: Increment step in UI
+    hint: Peak amplitude     # Optional: Short tooltip text
+    fixed: false             # Optional: Whether parameter is fixed in fits
+    
+    # Optional: Control hints for interactive manipulation
+    # action can be: "wheel" (mouse wheel), "mouse_move" (drag)
+    # modifiers: list of modifier keys: ["Control"], ["Shift"], [], etc.
+    control:
+      action: wheel
+      modifiers: []
+  
+  - name: Width
+    type: float
+    value: 2.0
+    min: 0.001
+    decimals: 3
+    step: 0.1
+    hint: Peak width (FWHM)
+    control:
+      action: wheel
+      modifiers: ["Control"]
+  
+  - name: Center
+    type: float
+    value: 0.0
+    decimals: 3
+    hint: Peak center position
+    control:
+      action: mouse_move
+      modifiers: []
+
+# Optional: Evaluation expression
+# Available functions:
+#   - Gaussian(x, Area, Width, Center)
+#   - Lorentzian(x, Area, Width, Center)  
+#   - Voigt(x, Area, gauss_fwhm, lorentz_fwhm, center)
+#   - numpy functions via np.* (np.sin, np.exp, np.sqrt, etc.)
+#   - sqrt, log, exp, pi, kB (Boltzmann constant)
+#
+# Parameter names with spaces become underscores in expressions:
+#   "Gauss FWHM" -> Gauss_FWHM
+#
+# If no evaluate is provided, the model returns zeros
+evaluate: "Amplitude * np.exp(-4 * np.log(2) * (x - Center)**2 / Width**2)"
