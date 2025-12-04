@@ -1,0 +1,41 @@
+# Linear Background Model Element
+# A simple linear background y = m*x + b
+
+name: Linear Background
+description: |
+  Simple linear background model.
+  
+  Formula: y = Slope * x + Intercept
+  
+  Use this for datasets with a linear trend that needs to be accounted for
+  during peak fitting.
+
+version: 1
+author: BigFit Team
+category: background
+
+parameters:
+  - name: Slope
+    description: Linear slope coefficient (m)
+    type: float
+    value: 0.0
+    decimals: 6
+    step: 0.01
+    hint: Linear slope (m)
+    control:
+      action: wheel
+      modifiers: []
+
+  - name: Intercept
+    description: Vertical offset / y-intercept (b)
+    type: float
+    value: 0.0
+    decimals: 6
+    step: 0.1
+    hint: Vertical offset / intercept (b)
+    control:
+      action: wheel
+      modifiers: ["Control"]
+
+# Evaluation expression
+evaluate: "Slope * x + Intercept"

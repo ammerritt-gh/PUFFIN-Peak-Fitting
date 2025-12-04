@@ -1,0 +1,52 @@
+# Gaussian Model Element
+# A Gaussian peak profile using FWHM as width, integrating to Area
+
+name: Gaussian
+description: |
+  Gaussian peak model using FWHM as width parameter.
+  The function integrates to the specified Area.
+  
+  Formula: Area * sqrt(4*ln(2)/pi) / Width * exp(-4*ln(2) * (x-Center)^2 / Width^2)
+
+version: 1
+author: BigFit Team
+category: peak
+
+parameters:
+  - name: Area
+    description: Integrated area of the Gaussian peak
+    type: float
+    value: 1.0
+    min: 0.0
+    decimals: 3
+    step: 1.0
+    hint: Integrated area of the Gaussian peak
+    control:
+      action: wheel
+      modifiers: []
+
+  - name: Width
+    description: Full width at half maximum (FWHM)
+    type: float
+    value: 2.0
+    min: 1.0e-6
+    decimals: 3
+    step: 0.1
+    hint: Gaussian FWHM
+    control:
+      action: wheel
+      modifiers: ["Control"]
+
+  - name: Center
+    description: Peak center position on x-axis
+    type: float
+    value: 0.0
+    decimals: 3
+    hint: Peak center (x-axis)
+    control:
+      action: mouse_move
+      modifiers: []
+
+# Evaluation expression using available functions
+# Available: Gaussian(x, Area, Width, Center), Lorentzian, Voigt, np, sqrt, log, exp, pi
+evaluate: "Gaussian(x, Area, Width, Center)"

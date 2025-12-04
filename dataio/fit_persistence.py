@@ -220,7 +220,16 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
 
     Returns:
         True if application succeeded, False otherwise
+        
+    Note:
+        This function handles missing or invalid model elements gracefully:
+        - If a model type is not found, it skips that element with a warning
+        - If parameters don't match, it applies what it can
+        - The function never raises exceptions, returning False on failure
     """
+    import logging
+    logger = logging.getLogger(__name__)
+    
     try:
         import numpy as np
         from models import get_model_spec
@@ -240,10 +249,12 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                 model_spec = get_model_spec(saved_model_name)
                 setattr(model_state, "model_spec", model_spec)
                 setattr(model_state, "model_name", saved_model_name)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Could not load model '{saved_model_name}': {e}")
+                # Continue with existing spec if available
 
         if model_spec is None:
+            logger.warning("No model spec available, cannot apply fit state")
             return False
 
         # For composite models, rebuild the component structure first
@@ -256,6 +267,7 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                 x_data = getattr(model_state, "x_data", None)
                 y_data = getattr(model_state, "y_data", None)
                 
+                skipped_elements = []
                 for element in saved_elements:
                     spec_name = element.get("type", "")
                     prefix = element.get("prefix")
@@ -277,13 +289,38 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                                 data_x=x_data,
                                 data_y=y_data,
                             )
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                        except Exception as e:
+                            # Model element not found or invalid
+                            skipped_elements.append((spec_name, str(e)))
+                            logger.warning(f"Skipped missing model element '{spec_name}' (prefix: {prefix}): {e}")
+                
+                if skipped_elements:
+                    logger.info(f"Fit loaded with {len(skipped_elements)} missing element(s)")
+                    
+            except Exception as e:
+                logger.warning(f"Error rebuilding composite model: {e}")
 
         # Apply parameters from elements
         spec_params = getattr(model_spec, "params", {}) or {}
+
+        def _update_component_attr(flat_name: str, attr: str, value):
+            """If composite, propagate attribute changes to the underlying component param."""
+            if not isinstance(model_spec, CompositeModelSpec):
+                return
+            try:
+                link = model_spec.get_link(flat_name)
+            except Exception:
+                link = None
+            if not link or not isinstance(link, tuple) or len(link) < 2:
+                return
+            component, pname = link
+            try:
+                comp_params = getattr(component.spec, "params", {}) or {}
+                target = comp_params.get(pname)
+                if target is not None:
+                    setattr(target, attr, value)
+            except Exception:
+                pass
         
         for element in saved_elements:
             prefix = element.get("prefix", "")
@@ -309,18 +346,27 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                                 pass
                     
                     # Apply fixed state
-                    is_fixed = param_info.get("fixed", False)
+                    is_fixed = bool(param_info.get("fixed", False))
                     try:
-                        spec_params[full_name].fixed = bool(is_fixed)
+                        spec_params[full_name].fixed = is_fixed
                     except Exception:
                         pass
+                    _update_component_attr(full_name, "fixed", is_fixed)
                     
                     # Apply link group
                     link_group = param_info.get("link_group")
+                    if link_group is None or link_group == "":
+                        link_value = None
+                    else:
+                        try:
+                            link_value = int(link_group)
+                        except Exception:
+                            link_value = None
                     try:
-                        spec_params[full_name].link_group = int(link_group) if link_group else None
+                        spec_params[full_name].link_group = link_value
                     except Exception:
                         pass
+                    _update_component_attr(full_name, "link_group", link_value)
 
         # Apply fit_result
         fit_result = fit_data.get("fit_result")

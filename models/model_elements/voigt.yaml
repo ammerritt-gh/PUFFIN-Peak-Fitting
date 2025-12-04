@@ -1,0 +1,67 @@
+# Voigt Model Element
+# A Voigt profile combining Gaussian and Lorentzian components
+
+name: Voigt
+description: |
+  Voigt profile model, which is a convolution of Gaussian and Lorentzian.
+  The profile integrates to the specified Area.
+  
+  Uses the Faddeeva function (scipy.special.wofz) for accurate computation.
+  The Gaussian component is specified by Gauss FWHM, and the Lorentzian
+  component by Lorentz FWHM.
+
+version: 1
+author: BigFit Team
+category: peak
+
+parameters:
+  - name: Area
+    description: Integrated area of the Voigt peak
+    type: float
+    value: 1.0
+    min: 0.0
+    decimals: 3
+    step: 1.0
+    hint: Integrated area of the Voigt peak
+    control:
+      action: wheel
+      modifiers: []
+
+  - name: Gauss FWHM
+    description: Gaussian resolution FWHM component
+    type: float
+    value: 1.14
+    min: 1.0e-6
+    decimals: 3
+    step: 0.1
+    hint: Gaussian resolution FWHM
+    control:
+      action: wheel
+      modifiers: ["Control"]
+
+  - name: Lorentz FWHM
+    description: Lorentzian FWHM component
+    type: float
+    value: 0.28
+    min: 1.0e-6
+    decimals: 3
+    step: 0.1
+    hint: Lorentzian FWHM
+    control:
+      action: wheel
+      modifiers: ["Shift"]
+
+  - name: Center
+    description: Peak center position
+    type: float
+    value: 0.0
+    decimals: 3
+    hint: Peak center
+    control:
+      action: mouse_move
+      modifiers: []
+
+# Evaluation expression
+# Parameter names with spaces are converted to underscores in the expression
+# e.g., "Gauss FWHM" becomes "Gauss_FWHM"
+evaluate: "Voigt(x, Area, Gauss_FWHM, Lorentz_FWHM, Center)"

@@ -789,21 +789,46 @@ class FitterViewModel(QObject):
         if x is None or y is None:
             return
 
+        try:
+            x_arr = np.asarray(x, dtype=float)
+        except Exception:
+            x_arr = np.array([], dtype=float)
+
         model_spec = getattr(self.state, "model_spec", None)
         y_fit_payload = None
         curves_payload = {}
 
+        preview_grid = self._build_preview_grid(x_arr)
+        preview_enabled = preview_grid.size > x_arr.size
+
         if isinstance(model_spec, CompositeModelSpec):
             try:
-                component_outputs = model_spec.evaluate_components(x)
+                component_outputs = model_spec.evaluate_components(x_arr)
             except Exception:
                 component_outputs = []
 
-            total = np.zeros_like(np.asarray(x, dtype=float), dtype=float)
+            preview_lookup = {}
+            if preview_enabled:
+                try:
+                    preview_outputs = model_spec.evaluate_components(preview_grid)
+                    for component, values in preview_outputs:
+                        try:
+                            preview_lookup[component.prefix] = np.asarray(values, dtype=float)
+                        except Exception:
+                            preview_lookup[component.prefix] = np.array([], dtype=float)
+                except Exception:
+                    preview_lookup = {}
+                    preview_enabled = False
+
+            total = np.zeros_like(x_arr, dtype=float)
+            total_preview = np.zeros_like(preview_grid, dtype=float) if preview_enabled else None
+            preview_complete = bool(preview_enabled)
             components_for_view = []
 
             for component, values in component_outputs:
                 arr = np.asarray(values, dtype=float)
+                if arr.shape != x_arr.shape:
+                    continue
                 try:
                     total += arr
                 except Exception as e:
@@ -813,25 +838,47 @@ class FitterViewModel(QObject):
                         e,
                         vm=self,
                     )
+                disp_x = x_arr
+                disp_y = arr
+                if preview_enabled:
+                    preview_arr = np.asarray(preview_lookup.get(component.prefix, np.array([])), dtype=float)
+                    if preview_arr.size == preview_grid.size:
+                        disp_x = preview_grid
+                        disp_y = preview_arr
+                        try:
+                            if total_preview is not None:
+                                total_preview += preview_arr
+                        except Exception:
+                            preview_complete = False
+                    else:
+                        preview_complete = False
                 components_for_view.append(
                     {
                         "prefix": component.prefix,
                         "label": component.label,
                         "color": component.color,
-                        "y": arr,
+                        "x": np.asarray(disp_x, dtype=float),
+                        "y": np.asarray(disp_y, dtype=float),
                     }
                 )
                 curves_payload[f"component:{component.prefix}"] = (
-                    np.asarray(x, dtype=float),
-                    arr,
+                    np.asarray(disp_x, dtype=float),
+                    np.asarray(disp_y, dtype=float),
                 )
 
-            if components_for_view:
-                curves_payload["fit"] = (np.asarray(x, dtype=float), total)
-                y_fit_payload = {"total": total, "components": components_for_view}
+            if preview_complete and total_preview is not None and total_preview.size == preview_grid.size:
+                fit_x = np.asarray(preview_grid, dtype=float)
+                fit_y = np.asarray(total_preview, dtype=float)
             else:
-                curves_payload["fit"] = (np.asarray(x, dtype=float), total)
-                y_fit_payload = total
+                fit_x = np.asarray(x_arr, dtype=float)
+                fit_y = np.asarray(total, dtype=float)
+                preview_complete = False
+
+            curves_payload["fit"] = (fit_x, fit_y)
+            y_fit_payload = {
+                "total": {"x": fit_x, "y": fit_y, "data_y": total},
+                "components": components_for_view,
+            }
         else:
             y_fit = None
             if hasattr(self.state, "evaluate"):
@@ -848,6 +895,31 @@ class FitterViewModel(QObject):
         errs = getattr(self.state, "errors", None)
         errs = None if errs is None else np.asarray(errs, dtype=float)
         self.plot_updated.emit(x, y, y_fit_payload, errs)
+
+    def _build_preview_grid(self, x: np.ndarray) -> np.ndarray:
+        """Return a smoother grid for previewing fits/components."""
+        try:
+            x_arr = np.asarray(x, dtype=float)
+        except Exception:
+            return np.array([], dtype=float)
+
+        finite = x_arr[np.isfinite(x_arr)]
+        if finite.size < 2:
+            return x_arr
+
+        span_min = float(np.min(finite))
+        span_max = float(np.max(finite))
+        if not np.isfinite(span_min) or not np.isfinite(span_max) or span_max <= span_min:
+            return x_arr
+
+        target_samples = max(400, min(8000, int(finite.size * 4)))
+        if target_samples <= finite.size:
+            return x_arr
+
+        try:
+            return np.linspace(span_min, span_max, target_samples)
+        except Exception:
+            return x_arr
 
     def compute_statistics(self, y_fit=None, n_params: int = 0) -> dict:
         """Compute common fit statistics (reduced chi-squared, Cash) for current state.
@@ -885,21 +957,22 @@ class FitterViewModel(QObject):
         try:
             from dataio import save_default_fit, save_fit_for_file
 
-            # Always save to default fit
-            try:
-                if save_default_fit(self.state):
-                    self._log_message("Saved default fit.")
-            except Exception as e:
-                self._log_message(f"Failed to save default fit: {e}")
-
-            # Also save to file-specific fit if we have a loaded file
             filepath = self._get_current_file_path()
+
             if filepath:
+                # When working with a real data file, keep the default fit untouched
                 try:
                     if save_fit_for_file(self.state, filepath):
                         self._log_message(f"Saved fit for: {os.path.basename(filepath)}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._log_message(f"Failed to save fit for file: {e}")
+            else:
+                # Only update the default fit when no external file is active
+                try:
+                    if save_default_fit(self.state):
+                        self._log_message("Saved default fit.")
+                except Exception as e:
+                    self._log_message(f"Failed to save default fit: {e}")
         except Exception as e:
             log_exception("Failed to save fit", e, vm=self)
 
@@ -989,7 +1062,7 @@ class FitterViewModel(QObject):
                         getattr(self.state, "y_data", None)
                     )
                 except Exception as e:
-                    log_exception(e, "Error during model_spec.initialize in reset_fit")
+                    log_exception("Error during model_spec.initialize in reset_fit", e, vm=self)
 
             # Clear fit result
             try:
@@ -1275,6 +1348,7 @@ class FitterViewModel(QObject):
                     "label": component.label,
                     "color": component.color,
                     "spec_name": component.spec.__class__.__name__,
+                    "tooltip": component.spec_label,
                 }
             )
         return descriptors
