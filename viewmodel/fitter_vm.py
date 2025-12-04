@@ -1,5 +1,5 @@
 ﻿# viewmodel/fitter_vm.py
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, QTimer
 import numpy as np
 import os
 import math
@@ -34,6 +34,13 @@ class FitterViewModel(QObject):
         self.curves: dict = {}
         self._last_blocked_drag = None  # tracks last drag ignored due to fixed params
         self._last_blocked_value_update = None
+        
+        # Debounce timer for auto-saving fit state after parameter changes
+        self._fit_save_timer = QTimer()
+        self._fit_save_timer.setSingleShot(True)
+        self._fit_save_timer.setInterval(500)  # 500ms debounce
+        self._fit_save_timer.timeout.connect(self._save_current_fit)
+        
         # Attempt to restore previously queued files from configuration
         try:
             self._load_queue_from_config()
@@ -172,6 +179,10 @@ class FitterViewModel(QObject):
     def notify_file_queue(self):
         self._emit_file_queue()
 
+    def has_queued_files(self) -> bool:
+        """Return True if there are queued files."""
+        return len(self._datasets) > 0
+
     def _save_queue_to_config(self):
         try:
             from dataio import get_config
@@ -222,6 +233,9 @@ class FitterViewModel(QObject):
             # restore active index if valid
             if isinstance(active, int) and 0 <= active < len(self._datasets):
                 self._active_dataset_index = int(active)
+            elif len(self._datasets) > 0:
+                # Default to first file if no valid active index
+                self._active_dataset_index = 0
             else:
                 self._active_dataset_index = None
             if added:
@@ -230,6 +244,12 @@ class FitterViewModel(QObject):
                     self._emit_file_queue()
                 except Exception:
                     pass
+                # Actually activate the file to apply data and load saved fit
+                if self._active_dataset_index is not None:
+                    try:
+                        self.activate_file(self._active_dataset_index)
+                    except Exception as e:
+                        log_exception("Failed to activate file in _load_queue_from_config", e)
         except Exception:
             pass
 
@@ -290,6 +310,20 @@ class FitterViewModel(QObject):
         name = info.get("name")
         label = name or f"Dataset {idx + 1}"
         self._log_message(f"Loaded dataset: {label}")
+
+        # Try to load saved fit for this file, or fall back to default fit
+        fit_loaded = False
+        try:
+            fit_loaded = self._load_fit_for_current_file()
+        except Exception:
+            pass
+
+        if not fit_loaded:
+            # Try to load the default fit as a fallback
+            try:
+                self._load_default_fit()
+            except Exception:
+                pass
 
         try:
             self.parameters_updated.emit()
@@ -477,6 +511,7 @@ class FitterViewModel(QObject):
             "on_peak_selected": lambda: self.on_peak_selected(kwargs.get("x"), kwargs.get("y")),
             "activate_file": lambda: _call_with_index(("index", "idx"), self.activate_file),
             "remove_file_at": lambda: _call_with_index(("index", "idx"), self.remove_file_at),
+            "reset_fit": self.reset_fit,
         }
 
         try:
@@ -728,6 +763,12 @@ class FitterViewModel(QObject):
                         self.plot_updated.emit(getattr(self.state, "x_data", x), getattr(self.state, "y_data", y), full_y_fit, full_errs)
 
                     self._log_message("Fit completed successfully.")
+
+                    # Auto-save fit after successful fit
+                    try:
+                        self._schedule_fit_save()
+                    except Exception as e:
+                        log_exception("Auto-save fit failed", e)
                 else:
                     self._log_message("Fit failed.")
             finally:
@@ -825,6 +866,150 @@ class FitterViewModel(QObject):
             except Exception:
                 pass
             return {"reduced_chi2": None, "cash": None, "reduced_cash": None}
+
+    # --------------------------
+    # Fit Persistence
+    # --------------------------
+    def _get_current_file_path(self) -> _typing.Optional[str]:
+        """Get the file path of the currently loaded data file, if any."""
+        try:
+            file_info = getattr(self.state, "file_info", None)
+            if isinstance(file_info, dict):
+                return file_info.get("path")
+        except Exception as e:
+            self.log_message.emit(f"Failed to get current file path: {e}")
+        return None
+
+    def _save_current_fit(self):
+        """Save the current fit state to both default and file-specific locations."""
+        try:
+            from dataio import save_default_fit, save_fit_for_file
+
+            # Always save to default fit
+            try:
+                if save_default_fit(self.state):
+                    self._log_message("Saved default fit.")
+            except Exception as e:
+                self._log_message(f"Failed to save default fit: {e}")
+
+            # Also save to file-specific fit if we have a loaded file
+            filepath = self._get_current_file_path()
+            if filepath:
+                try:
+                    if save_fit_for_file(self.state, filepath):
+                        self._log_message(f"Saved fit for: {os.path.basename(filepath)}")
+                except Exception:
+                    pass
+        except Exception as e:
+            log_exception("Failed to save fit", e, vm=self)
+
+    def _schedule_fit_save(self):
+        """Schedule a debounced save of the current fit state.
+        
+        This restarts the timer so that rapid changes only trigger one save
+        after the user stops making changes (500ms debounce).
+        """
+        try:
+            self._fit_save_timer.stop()
+            self._fit_save_timer.start()
+        except Exception:
+            # If timer doesn't work, save immediately
+            try:
+                self._save_current_fit()
+            except Exception as e:
+                log_exception("Failed to save fit in fallback", e, vm=self)
+
+    def _load_fit_for_current_file(self) -> bool:
+        """Try to load a saved fit for the currently loaded file.
+
+        Returns True if a file-specific fit was loaded, False otherwise.
+        """
+        try:
+            from dataio import load_fit_for_file, has_fit_for_file
+
+            filepath = self._get_current_file_path()
+            if not filepath:
+                return False
+
+            if not has_fit_for_file(filepath):
+                return False
+
+            if load_fit_for_file(self.state, filepath, apply_excluded=True):
+                self._log_message(f"Restored fit for: {os.path.basename(filepath)}")
+                return True
+        except Exception as e:
+            log_exception("Failed to load fit for file", e, vm=self)
+        return False
+
+    def _load_default_fit(self) -> bool:
+        """Try to load the default fit for the current data.
+
+        Returns True if the default fit was loaded, False otherwise.
+        """
+        try:
+            from dataio import load_default_fit
+
+            if load_default_fit(self.state, apply_excluded=False):
+                self._log_message("Loaded default fit parameters.")
+                return True
+        except Exception as e:
+            log_exception("Failed to load default fit", e, vm=self)
+        return False
+
+    def reset_fit(self):
+        """Reset the fit for the current file and/or default fit.
+
+        This clears the saved fit state and reinitializes the model parameters.
+        """
+        try:
+            from dataio import reset_fit_for_file, reset_default_fit
+
+            # Reset file-specific fit if applicable
+            filepath = self._get_current_file_path()
+            if filepath:
+                try:
+                    if reset_fit_for_file(filepath):
+                        self._log_message(f"Cleared saved fit for: {os.path.basename(filepath)}")
+                except Exception as e:
+                    log_exception(f"Failed to clear saved fit for file: {filepath}", e, vm=self)
+
+            # Also reset the default fit
+            try:
+                if reset_default_fit():
+                    self._log_message("Cleared default fit.")
+            except Exception:
+                pass
+
+            # Reinitialize model spec with current data
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is not None:
+                try:
+                    model_spec.initialize(
+                        getattr(self.state, "x_data", None),
+                        getattr(self.state, "y_data", None)
+                    )
+                except Exception as e:
+                    log_exception(e, "Error during model_spec.initialize in reset_fit")
+
+            # Clear fit result
+            try:
+                self.state.fit_result = None
+            except Exception:
+                pass
+
+            # Notify views and update plot
+            try:
+                self.parameters_updated.emit()
+            except Exception:
+                pass
+            try:
+                self.update_plot()
+            except Exception:
+                pass
+
+            self._log_message("Fit has been reset.")
+        except Exception as e:
+            log_exception("Failed to reset fit", e, vm=self)
 
     # --------------------------
     # Exclusion management (called from InputHandler/View)
@@ -1117,6 +1302,11 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
+        except Exception:
+            pass
         return True
 
     def remove_component_at(self, index: int) -> bool:
@@ -1138,6 +1328,11 @@ class FitterViewModel(QObject):
             pass
         try:
             self.update_plot()
+        except Exception:
+            pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
         except Exception:
             pass
         return True
@@ -1168,6 +1363,11 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
+        except Exception:
+            pass
         return True
 
     def reorder_components_by_prefix(self, prefix_order: _typing.List[str]) -> bool:
@@ -1187,6 +1387,11 @@ class FitterViewModel(QObject):
             pass
         try:
             self.update_plot()
+        except Exception:
+            pass
+        # Save fit immediately when component structure changes
+        try:
+            self._save_current_fit()
         except Exception:
             pass
         return True
@@ -1534,6 +1739,11 @@ class FitterViewModel(QObject):
         # Notify views that parameters changed so UI can refresh widgets
         try:
             self.parameters_updated.emit()
+        except Exception:
+            pass
+        # Schedule debounced save of fit state
+        try:
+            self._schedule_fit_save()
         except Exception:
             pass
 
