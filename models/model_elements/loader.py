@@ -12,18 +12,22 @@ The loader supports:
 - Parameter metadata (type, min/max, hint, decimals, step, control)
 - Mathematical function evaluation using numpy/scipy
 - Graceful error handling with detailed error messages
+
+Security:
+- Expression evaluation uses a restricted sandbox with empty __builtins__
+- Only pre-defined mathematical functions are available
+- Dangerous patterns are blocked before evaluation
+- YAML files are application-distributed, not user-uploaded content
 """
 
-import os
+import ast
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Set, Type
 
 import yaml
 import numpy as np
 from scipy.special import wofz
-from scipy.signal import fftconvolve
-from scipy.interpolate import interp1d
 
 # Set up logging for graceful error handling
 logger = logging.getLogger(__name__)
@@ -44,15 +48,28 @@ class ModelElementValidationError(ModelElementError):
     pass
 
 
-# Import base classes from model_specs
-# This circular import is resolved at runtime when needed
+# Minimum value for FWHM parameters to prevent division by zero.
+# This value is chosen to be small enough not to affect physical results
+# while preventing numerical overflow in the Voigt function calculation.
+_MIN_FWHM_VALUE = 1e-10
+
+
+# Lazy loading pattern for base classes
+# The base classes are imported from model_specs only when first needed.
+# This delays the import until runtime to avoid import-time circular
+# dependency issues between this module and model_specs.
 _base_classes_loaded = False
 _Parameter = None
 _BaseModelSpec = None
 
 
 def _ensure_base_classes():
-    """Lazy-load base classes to avoid circular imports."""
+    """Lazy-load base classes from model_specs.
+    
+    This function imports Parameter and BaseModelSpec the first time
+    it's called. Using lazy loading avoids import-time circular
+    dependency issues between this module and model_specs.
+    """
     global _base_classes_loaded, _Parameter, _BaseModelSpec
     if not _base_classes_loaded:
         from models.model_specs import Parameter, BaseModelSpec
@@ -80,6 +97,13 @@ def _Lorentzian(x, Area, Width, Center):
 
 def _Voigt(x, Area, gauss_fwhm, lorentz_fwhm, center):
     """Voigt profile integrating to Area."""
+    # Convert x to numpy array for proper broadcasting
+    x = np.asarray(x, dtype=float)
+    
+    # Protect against division by zero with minimum values
+    gauss_fwhm = max(float(gauss_fwhm), _MIN_FWHM_VALUE)
+    lorentz_fwhm = max(float(lorentz_fwhm), _MIN_FWHM_VALUE)
+    
     sigma = gauss_fwhm / (2 * np.sqrt(2 * np.log(2)))  # Convert FWHM to std
     gamma = lorentz_fwhm / 2                           # Convert FWHM to HWHM
     z = ((x - center) + 1j * gamma) / (sigma * np.sqrt(2))
@@ -203,6 +227,68 @@ def _load_element_definition(filepath: Path) -> Dict[str, Any]:
     return definition
 
 
+# Whitelist of allowed AST node types for expression validation
+_ALLOWED_AST_NODES: Set[type] = {
+    ast.Expression,
+    ast.BinOp,       # Binary operations: +, -, *, /, etc.
+    ast.UnaryOp,     # Unary operations: -, +
+    ast.Compare,     # Comparisons (though not typically needed)
+    ast.Call,        # Function calls
+    ast.Name,        # Variable names
+    ast.Constant,    # Numeric/string constants
+    ast.Num,         # Numbers (Python 3.7 compat)
+    ast.Str,         # Strings (Python 3.7 compat)
+    ast.Load,        # Load context
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,  # Operators
+    ast.FloorDiv, ast.USub, ast.UAdd,
+    ast.Attribute,   # Allow numpy attribute access like np.sin
+    ast.Subscript,   # Allow array indexing
+    ast.Index,       # Index context (Python 3.8 compat)
+    ast.Slice,       # Allow slicing
+}
+
+
+def _validate_expression_ast(expression: str, allowed_names: Set[str]) -> bool:
+    """Validate an expression using AST analysis.
+    
+    Args:
+        expression: The expression string to validate
+        allowed_names: Set of allowed variable/function names
+        
+    Returns:
+        True if the expression is safe, False otherwise
+    """
+    try:
+        tree = ast.parse(expression, mode='eval')
+    except SyntaxError:
+        return False
+    
+    # Walk the AST and check each node
+    for node in ast.walk(tree):
+        node_type = type(node)
+        
+        # Check if node type is allowed
+        if node_type not in _ALLOWED_AST_NODES:
+            logger.warning(f"Disallowed AST node type: {node_type.__name__}")
+            return False
+        
+        # Check variable/function names are in whitelist
+        if isinstance(node, ast.Name):
+            if node.id not in allowed_names:
+                logger.warning(f"Disallowed name in expression: {node.id}")
+                return False
+        
+        # Check attribute access is for allowed modules (like np.sin)
+        if isinstance(node, ast.Attribute):
+            # Allow accessing attributes on allowed names (e.g., np.sin, np.exp)
+            if isinstance(node.value, ast.Name):
+                if node.value.id not in allowed_names:
+                    logger.warning(f"Disallowed attribute access: {node.value.id}.{node.attr}")
+                    return False
+    
+    return True
+
+
 def _create_evaluate_function(eval_expression: Optional[str], param_names: List[str]):
     """Create an evaluate function from a YAML expression.
     
@@ -216,12 +302,33 @@ def _create_evaluate_function(eval_expression: Optional[str], param_names: List[
     Note:
         Parameter names containing spaces are made available with underscores
         (e.g., "Gauss FWHM" becomes "Gauss_FWHM" in the expression)
+        
+    Security:
+        - Expression is validated using AST analysis before execution
+        - Only whitelisted functions and variables are allowed
+        - eval() is sandboxed with empty __builtins__
+        - YAML files are application-distributed, not user-uploaded
     """
     if not eval_expression:
         # Default: return zeros
         def default_evaluate(x, params):
             return np.zeros_like(np.asarray(x, dtype=float))
         return default_evaluate
+    
+    # Build whitelist of allowed names
+    allowed_names = set(_EVAL_FUNCTIONS.keys())
+    allowed_names.add('x')  # The input variable
+    for name in param_names:
+        allowed_names.add(name)
+        # Also add underscore version
+        allowed_names.add(name.replace(" ", "_"))
+    
+    # Validate expression using AST
+    if not _validate_expression_ast(eval_expression, allowed_names):
+        logger.error(f"Expression failed AST validation: {eval_expression}")
+        def safe_fallback(x, params):
+            return np.zeros_like(np.asarray(x, dtype=float))
+        return safe_fallback
     
     def evaluate(x, params):
         """Evaluate the model expression with the given parameters."""
@@ -244,8 +351,9 @@ def _create_evaluate_function(eval_expression: Optional[str], param_names: List[
                 safe_name = name.replace(" ", "_")
                 local_vars[safe_name] = float_value
             
-            # Evaluate the expression
-            result = eval(eval_expression, {"__builtins__": {}}, local_vars)
+            # Evaluate the expression with restricted builtins
+            # The expression has been validated via AST analysis above
+            result = eval(eval_expression, {"__builtins__": {}}, local_vars)  # noqa: S307
             return np.asarray(result, dtype=float)
         except Exception as e:
             logger.warning(f"Error evaluating model expression: {e}")
@@ -392,6 +500,27 @@ def list_available_elements() -> List[str]:
     return sorted(names)
 
 
+def _normalize_element_name(name: str) -> str:
+    """Normalize an element name for cache lookup.
+    
+    Converts to lowercase, strips whitespace, and removes common suffixes
+    like 'modelspec' and 'model' to allow flexible name matching.
+    
+    Args:
+        name: The element name to normalize
+        
+    Returns:
+        Normalized lowercase name suitable for cache lookup
+    """
+    normalized = (name or "").strip().lower()
+    
+    # Remove common suffixes for flexible matching
+    if normalized not in _element_cache:
+        normalized = normalized.replace("modelspec", "").replace("model", "").strip()
+    
+    return normalized
+
+
 def get_element_spec(element_name: str):
     """Get a model element specification instance by name.
     
@@ -410,12 +539,7 @@ def get_element_spec(element_name: str):
         _load_all_elements()
     
     # Normalize name for lookup
-    name_lower = (element_name or "").strip().lower()
-    
-    # Try direct lookup
-    if name_lower not in _element_cache:
-        # Try without "modelspec" suffix
-        name_lower = name_lower.replace("modelspec", "").replace("model", "").strip()
+    name_lower = _normalize_element_name(element_name)
     
     if name_lower not in _element_cache:
         available = list_available_elements()
@@ -448,11 +572,7 @@ def get_element_spec_class(element_name: str) -> Type:
         _load_all_elements()
     
     # Normalize name for lookup
-    name_lower = (element_name or "").strip().lower()
-    
-    # Try direct lookup
-    if name_lower not in _element_cache:
-        name_lower = name_lower.replace("modelspec", "").replace("model", "").strip()
+    name_lower = _normalize_element_name(element_name)
     
     if name_lower not in _element_cache:
         available = list_available_elements()

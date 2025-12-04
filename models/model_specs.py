@@ -1,6 +1,7 @@
 ﻿# type: ignore
 """Model specifications and helper functions for fitting.
 """
+import logging
 import numpy as np
 from scipy.special import wofz, voigt_profile
 from scipy.fft import fft, ifft
@@ -10,6 +11,9 @@ from dataclasses import dataclass
 from itertools import cycle
 
 import matplotlib.pyplot as plt
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Constants
 kB = 0.086173324  # meV/K
@@ -780,10 +784,15 @@ def get_model_spec(model_name: str) -> BaseModelSpec:
         element_name = alias_map.get(name, name)
         return get_element_spec(element_name)
         
-    except Exception as e:
-        # Log the error but don't fail - try hardcoded fallbacks
-        import logging
-        logging.getLogger(__name__).debug(f"Could not load model '{model_name}' from elements: {e}")
+    except ModelElementNotFoundError as e:
+        # Element not found in YAML files - try hardcoded fallbacks
+        logger.debug(f"Model element '{model_name}' not found in YAML files: {e}")
+    except ImportError as e:
+        # model_elements module not available
+        logger.debug(f"Could not import model_elements: {e}")
+    except (ValueError, TypeError, OSError) as e:
+        # Other expected errors during model loading
+        logger.warning(f"Error loading model '{model_name}' from elements: {e}")
     
     # Fallback to hardcoded specs for backward compatibility
     if name in ("gauss", "gaussian", "gaussmodel", "gaussianmodel"):
