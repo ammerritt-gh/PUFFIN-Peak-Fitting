@@ -14,6 +14,7 @@ from .logging_helpers import log_exception, log_message
 # Constants for resolution convolution
 DEFAULT_RESOLUTION_RANGE = 20.0  # Range for resolution kernel evaluation (symmetric around 0)
 RESOLUTION_PREVIEW_RANGE = 5.0  # Range for preview plot display
+PREVIEW_VISIBLE_MARGIN = 2.0  # Visible margin beyond data range (smaller than calculation padding)
 
 
 class FitterViewModel(QObject):
@@ -908,9 +909,30 @@ class FitterViewModel(QObject):
                             comp_data["y"] = self.evaluate_with_resolution(comp_x, comp_y)
                     # Update total for data_y
                     total = self.evaluate_with_resolution(x_arr, total)
+                    
+                    # Trim preview to visible range (data range + small margin)
+                    # to hide edge artifacts while keeping the plot focused on data
+                    data_min, data_max = float(np.min(x_arr)), float(np.max(x_arr))
+                    fit_x, fit_y = self._trim_to_visible_range(fit_x, fit_y, data_min, data_max)
+                    for comp_data in components_for_view:
+                        comp_x = comp_data.get("x")
+                        comp_y = comp_data.get("y")
+                        if comp_x is not None and comp_y is not None:
+                            comp_data["x"], comp_data["y"] = self._trim_to_visible_range(
+                                comp_x, comp_y, data_min, data_max
+                            )
                 except Exception as e:
                     log_exception("Failed to apply resolution in update_plot", e, vm=self)
 
+            # Update curves_payload for components with trimmed data
+            for comp_data in components_for_view:
+                prefix = comp_data.get("prefix")
+                if prefix:
+                    curves_payload[f"component:{prefix}"] = (
+                        np.asarray(comp_data.get("x", np.array([])), dtype=float),
+                        np.asarray(comp_data.get("y", np.array([])), dtype=float),
+                    )
+            
             curves_payload["fit"] = (fit_x, fit_y)
             y_fit_payload = {
                 "total": {"x": fit_x, "y": fit_y, "data_y": total},
@@ -991,6 +1013,31 @@ class FitterViewModel(QObject):
             return np.linspace(extended_min, extended_max, target_samples)
         except Exception:
             return x_arr
+
+    def _trim_to_visible_range(self, x_arr: np.ndarray, y_arr: np.ndarray, 
+                                data_min: float, data_max: float) -> _typing.Tuple[np.ndarray, np.ndarray]:
+        """Trim preview arrays to visible range (data range plus small margin).
+        
+        This hides edge artifacts from convolution while keeping previews
+        slightly larger than the data for visual appeal.
+        
+        Args:
+            x_arr: X values of preview
+            y_arr: Y values of preview
+            data_min: Minimum of original data range
+            data_max: Maximum of original data range
+            
+        Returns:
+            Tuple of (trimmed_x, trimmed_y)
+        """
+        try:
+            visible_min = data_min - PREVIEW_VISIBLE_MARGIN
+            visible_max = data_max + PREVIEW_VISIBLE_MARGIN
+            
+            mask = (x_arr >= visible_min) & (x_arr <= visible_max)
+            return x_arr[mask], y_arr[mask]
+        except Exception:
+            return x_arr, y_arr
 
     def compute_statistics(self, y_fit=None, n_params: int = 0) -> dict:
         """Compute common fit statistics (reduced chi-squared, Cash) for current state.
