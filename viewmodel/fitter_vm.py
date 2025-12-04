@@ -2145,9 +2145,9 @@ class FitterViewModel(QObject):
     def evaluate_with_resolution(self, x: np.ndarray, y_model: np.ndarray) -> np.ndarray:
         """Apply resolution convolution to a model output.
         
-        The convolution kernel (resolution function) is centered at 0 and applied
-        using proper padding to avoid edge effects. This preserves peak positions
-        regardless of where the data x-range starts.
+        The convolution is performed on a uniform grid centered at 0 with proper
+        padding to avoid edge effects. The result is interpolated back to the
+        original x values. This approach matches `convolute_voigt_dho()`.
         
         Args:
             x: X values (used to determine spacing for convolution)
@@ -2161,6 +2161,7 @@ class FitterViewModel(QObject):
         
         try:
             from scipy.signal import fftconvolve
+            from scipy.interpolate import interp1d
             
             x_arr = np.asarray(x, dtype=float)
             y_arr = np.asarray(y_model, dtype=float)
@@ -2168,37 +2169,40 @@ class FitterViewModel(QObject):
             if x_arr.size < 2 or y_arr.size != x_arr.size:
                 return y_model
             
-            # Determine grid spacing - use median spacing for robustness
-            dx_values = np.abs(np.diff(x_arr))
-            dx = np.median(dx_values) if len(dx_values) > 0 else 0.1
-            if dx < 1e-10:
-                dx = 0.1
+            # Use a fixed step size for the uniform grid (like convolute_voigt_dho)
+            dx = 0.05
+            pad_range = DEFAULT_RESOLUTION_RANGE
             
-            # Create a symmetric kernel grid centered at 0
-            # This kernel will be used for convolution regardless of where the data is
-            kernel_half_width = DEFAULT_RESOLUTION_RANGE
-            n_kernel = int(2 * kernel_half_width / dx) + 1
-            # Ensure odd number of points for symmetric kernel
-            if n_kernel % 2 == 0:
-                n_kernel += 1
-            x_kernel = np.linspace(-kernel_half_width, kernel_half_width, n_kernel)
+            # Create a uniform grid centered at 0 that spans the data range plus padding
+            x_min, x_max = np.min(x_arr), np.max(x_arr)
+            x_span = max(abs(x_min), abs(x_max)) + pad_range
+            x_uniform = np.arange(-x_span, x_span, dx)
             
-            # Evaluate the resolution function centered at 0
+            # Interpolate the input signal onto the uniform grid
+            signal_interp = interp1d(x_arr, y_arr, kind='linear',
+                                     bounds_error=False, fill_value=0.0)
+            signal_uniform = signal_interp(x_uniform)
+            
+            # Evaluate the resolution function on the uniform grid (centered at 0)
             try:
-                kernel = self._resolution_spec.evaluate(x_kernel)
+                res_y = self._resolution_spec.evaluate(x_uniform)
             except Exception:
                 return y_model
             
-            # Normalize the kernel (area = 1 for proper convolution)
-            area = np.trapz(kernel, x_kernel)
+            # Normalize the resolution function (area = 1 for proper convolution)
+            area = np.trapz(res_y, x_uniform)
             if abs(area) > 1e-12:
-                kernel = kernel / area
+                res_y = res_y / area
             
-            # Perform convolution - 'same' mode preserves array length and centering
-            # The kernel being symmetric and centered at 0 ensures no position shift
-            convolved = fftconvolve(y_arr, kernel, mode='same') * dx
+            # Perform convolution on the uniform grid
+            convolved = fftconvolve(signal_uniform, res_y, mode='same') * dx
             
-            return convolved
+            # Interpolate the convolved result back to original x values
+            result_interp = interp1d(x_uniform, convolved, kind='linear',
+                                     bounds_error=False, fill_value=0.0)
+            result = result_interp(x_arr)
+            
+            return result
         except Exception as e:
             log_exception("Failed to apply resolution convolution", e, vm=self)
             return y_model
@@ -2250,6 +2254,10 @@ class FitterViewModel(QObject):
         if state is None:
             self._resolution_model_name = "None"
             self._resolution_spec = None
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
             return True
         
         try:
@@ -2257,6 +2265,10 @@ class FitterViewModel(QObject):
             if not model_name or model_name == "None":
                 self._resolution_model_name = "None"
                 self._resolution_spec = None
+                try:
+                    self.resolution_updated.emit()
+                except Exception:
+                    pass
                 return True
             
             # Set the model (this creates the spec)

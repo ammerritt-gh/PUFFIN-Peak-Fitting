@@ -413,6 +413,13 @@ class MainWindow(QMainWindow):
         self.resolution_dock.resolution_parameter_changed.connect(self._on_resolution_parameter_changed)
         self.resolution_dock.resolution_apply_clicked.connect(self._on_resolution_apply_clicked)
         
+        # Connect viewmodel resolution_updated to refresh resolution dock UI
+        try:
+            if hasattr(self.viewmodel, "resolution_updated"):
+                self.viewmodel.resolution_updated.connect(self._on_resolution_state_changed)
+        except Exception:
+            pass
+        
         # Initial population
         try:
             self.viewmodel.notify_file_queue()
@@ -1799,6 +1806,21 @@ class MainWindow(QMainWindow):
                     self.resolution_dock.update_preview(x, y)
         except Exception:
             pass
+
+    def _on_resolution_state_changed(self):
+        """Handle resolution state changes (e.g., from persistence restore)."""
+        try:
+            if not self.viewmodel or not hasattr(self, "resolution_dock"):
+                return
+            
+            # Update the model selector to match the current resolution model
+            model_name = self.viewmodel.get_resolution_model_name()
+            self.resolution_dock.set_model_selector(model_name)
+            
+            # Refresh parameters and preview
+            self._refresh_resolution_parameters()
+        except Exception as e:
+            self.append_log(f"Failed to update resolution dock state: {e}")
 
     def _on_curve_clicked(self, event, curve_id):
         """Handle mouse click on a curve."""
