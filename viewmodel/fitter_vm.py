@@ -248,8 +248,8 @@ class FitterViewModel(QObject):
                 if self._active_dataset_index is not None:
                     try:
                         self.activate_file(self._active_dataset_index)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log_exception("Failed to activate file in _load_queue_from_config", e)
         except Exception:
             pass
 
@@ -766,9 +766,9 @@ class FitterViewModel(QObject):
 
                     # Auto-save fit after successful fit
                     try:
-                        self._save_current_fit()
-                    except Exception:
-                        pass
+                        self._schedule_fit_save()
+                    except Exception as e:
+                        log_exception("Auto-save fit failed", e)
                 else:
                     self._log_message("Fit failed.")
             finally:
@@ -876,8 +876,8 @@ class FitterViewModel(QObject):
             file_info = getattr(self.state, "file_info", None)
             if isinstance(file_info, dict):
                 return file_info.get("path")
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_message.emit(f"Failed to get current file path: {e}")
         return None
 
     def _save_current_fit(self):
@@ -889,8 +889,8 @@ class FitterViewModel(QObject):
             try:
                 if save_default_fit(self.state):
                     self._log_message("Saved default fit.")
-            except Exception:
-                pass
+            except Exception as e:
+                self._log_message(f"Failed to save default fit: {e}")
 
             # Also save to file-specific fit if we have a loaded file
             filepath = self._get_current_file_path()
@@ -916,8 +916,8 @@ class FitterViewModel(QObject):
             # If timer doesn't work, save immediately
             try:
                 self._save_current_fit()
-            except Exception:
-                pass
+            except Exception as e:
+                log_exception("Failed to save fit in fallback", e, vm=self)
 
     def _load_fit_for_current_file(self) -> bool:
         """Try to load a saved fit for the currently loaded file.
@@ -970,8 +970,8 @@ class FitterViewModel(QObject):
                 try:
                     if reset_fit_for_file(filepath):
                         self._log_message(f"Cleared saved fit for: {os.path.basename(filepath)}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_exception(f"Failed to clear saved fit for file: {filepath}", e, vm=self)
 
             # Also reset the default fit
             try:
@@ -988,8 +988,8 @@ class FitterViewModel(QObject):
                         getattr(self.state, "x_data", None),
                         getattr(self.state, "y_data", None)
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_exception(e, "Error during model_spec.initialize in reset_fit")
 
             # Clear fit result
             try:
