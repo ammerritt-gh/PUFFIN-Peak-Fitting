@@ -49,4 +49,4 @@ parameters:
 
 # Evaluation expression using available functions
 # Available: Gaussian(x, Area, Width, Center), Lorentzian, Voigt, np, sqrt, log, exp, pi
-evaluate: "Gaussian(x, Area, Width, Center)"
+evaluate: "Gaussian(x, Area, np.maximum(Width, 1.0e-6), Center)"

@@ -52,4 +52,4 @@ parameters:
 # chi''(omega) ~ (2*omega*Gamma) / ((omega^2 - Omega^2)^2 + (2*omega*Gamma)^2)
 # Parameter names with spaces expose underscore variants in the expression
 # so Center -> Center and Damping -> Damping remain readable.
-evaluate: "Amplitude * (2 * x * Damping) / ((Center**2 - x**2)**2 + (2 * x * Damping)**2)"
+evaluate: "Amplitude * (2 * x * np.maximum(Damping, 1.0e-6)) / ((Center**2 - x**2)**2 + (2 * x * np.maximum(Damping, 1.0e-6))**2)"

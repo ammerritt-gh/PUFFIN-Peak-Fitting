@@ -64,4 +64,4 @@ parameters:
 # Evaluation expression
 # Parameter names with spaces are converted to underscores in the expression
 # e.g., "Gauss FWHM" becomes "Gauss_FWHM"
-evaluate: "Voigt(x, Area, Gauss_FWHM, Lorentz_FWHM, Center)"
+evaluate: "Voigt(x, Area, np.maximum(Gauss_FWHM, 1.0e-6), np.maximum(Lorentz_FWHM, 1.0e-6), Center)"
