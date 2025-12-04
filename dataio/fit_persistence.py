@@ -302,6 +302,25 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
 
         # Apply parameters from elements
         spec_params = getattr(model_spec, "params", {}) or {}
+
+        def _update_component_attr(flat_name: str, attr: str, value):
+            """If composite, propagate attribute changes to the underlying component param."""
+            if not isinstance(model_spec, CompositeModelSpec):
+                return
+            try:
+                link = model_spec.get_link(flat_name)
+            except Exception:
+                link = None
+            if not link or not isinstance(link, tuple) or len(link) < 2:
+                return
+            component, pname = link
+            try:
+                comp_params = getattr(component.spec, "params", {}) or {}
+                target = comp_params.get(pname)
+                if target is not None:
+                    setattr(target, attr, value)
+            except Exception:
+                pass
         
         for element in saved_elements:
             prefix = element.get("prefix", "")
@@ -327,18 +346,27 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                                 pass
                     
                     # Apply fixed state
-                    is_fixed = param_info.get("fixed", False)
+                    is_fixed = bool(param_info.get("fixed", False))
                     try:
-                        spec_params[full_name].fixed = bool(is_fixed)
+                        spec_params[full_name].fixed = is_fixed
                     except Exception:
                         pass
+                    _update_component_attr(full_name, "fixed", is_fixed)
                     
                     # Apply link group
                     link_group = param_info.get("link_group")
+                    if link_group is None or link_group == "":
+                        link_value = None
+                    else:
+                        try:
+                            link_value = int(link_group)
+                        except Exception:
+                            link_value = None
                     try:
-                        spec_params[full_name].link_group = int(link_group) if link_group else None
+                        spec_params[full_name].link_group = link_value
                     except Exception:
                         pass
+                    _update_component_attr(full_name, "link_group", link_value)
 
         # Apply fit_result
         fit_result = fit_data.get("fit_result")

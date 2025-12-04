@@ -885,21 +885,22 @@ class FitterViewModel(QObject):
         try:
             from dataio import save_default_fit, save_fit_for_file
 
-            # Always save to default fit
-            try:
-                if save_default_fit(self.state):
-                    self._log_message("Saved default fit.")
-            except Exception as e:
-                self._log_message(f"Failed to save default fit: {e}")
-
-            # Also save to file-specific fit if we have a loaded file
             filepath = self._get_current_file_path()
+
             if filepath:
+                # When working with a real data file, keep the default fit untouched
                 try:
                     if save_fit_for_file(self.state, filepath):
                         self._log_message(f"Saved fit for: {os.path.basename(filepath)}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    self._log_message(f"Failed to save fit for file: {e}")
+            else:
+                # Only update the default fit when no external file is active
+                try:
+                    if save_default_fit(self.state):
+                        self._log_message("Saved default fit.")
+                except Exception as e:
+                    self._log_message(f"Failed to save default fit: {e}")
         except Exception as e:
             log_exception("Failed to save fit", e, vm=self)
 
