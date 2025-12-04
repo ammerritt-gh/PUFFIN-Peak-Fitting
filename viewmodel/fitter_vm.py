@@ -944,7 +944,11 @@ class FitterViewModel(QObject):
         self.plot_updated.emit(x, y, y_fit_payload, errs)
 
     def _build_preview_grid(self, x: np.ndarray) -> np.ndarray:
-        """Return a smoother grid for previewing fits/components."""
+        """Return a smoother grid for previewing fits/components.
+        
+        When resolution convolution is active, the grid is extended beyond the
+        data range to avoid edge artifacts in the convolution.
+        """
         try:
             x_arr = np.asarray(x, dtype=float)
         except Exception:
@@ -959,12 +963,32 @@ class FitterViewModel(QObject):
         if not np.isfinite(span_min) or not np.isfinite(span_max) or span_max <= span_min:
             return x_arr
 
-        target_samples = max(400, min(8000, int(finite.size * 4)))
+        # Extend grid beyond data range if resolution is active to avoid edge effects
+        padding = 0.0
+        if self.has_resolution():
+            # Add padding equal to the resolution range on each side
+            padding = DEFAULT_RESOLUTION_RANGE
+        
+        extended_min = span_min - padding
+        extended_max = span_max + padding
+        
+        # Calculate target samples for the extended range
+        data_range = span_max - span_min
+        extended_range = extended_max - extended_min
+        base_samples = max(400, min(8000, int(finite.size * 4)))
+        
+        # Scale samples proportionally for extended range
+        if data_range > 0:
+            target_samples = int(base_samples * extended_range / data_range)
+            target_samples = max(base_samples, min(12000, target_samples))
+        else:
+            target_samples = base_samples
+        
         if target_samples <= finite.size:
             return x_arr
 
         try:
-            return np.linspace(span_min, span_max, target_samples)
+            return np.linspace(extended_min, extended_max, target_samples)
         except Exception:
             return x_arr
 
@@ -2049,6 +2073,12 @@ class FitterViewModel(QObject):
                 self.resolution_updated.emit()
             except Exception:
                 pass
+            
+            # Schedule fit save when resolution model changes
+            try:
+                self._schedule_fit_save()
+            except Exception:
+                pass
         except Exception as e:
             log_exception(f"Failed to set resolution model '{model_name}'", e, vm=self)
 
@@ -2108,6 +2138,12 @@ class FitterViewModel(QObject):
             
             try:
                 self.resolution_updated.emit()
+            except Exception:
+                pass
+            
+            # Schedule fit save when resolution parameters change
+            try:
+                self._schedule_fit_save()
             except Exception:
                 pass
         except Exception as e:
