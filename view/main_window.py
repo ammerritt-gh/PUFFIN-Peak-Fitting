@@ -1231,23 +1231,51 @@ class MainWindow(QMainWindow):
                     pass
 
         components_meta = []
-        total_fit_arr = None
+        fit_display_x = x_arr
+        fit_display_y = None
+        fit_stats_y = None
+
         if isinstance(y_fit, dict):
             try:
                 components_meta = list(y_fit.get("components") or [])
             except Exception:
                 components_meta = []
             total_payload = y_fit.get("total")
-            if total_payload is not None:
+            if isinstance(total_payload, dict):
+                raw_x = total_payload.get("x")
+                raw_y = total_payload.get("y")
+                raw_stats = total_payload.get("data_y")
                 try:
-                    total_fit_arr = np.asarray(total_payload, dtype=float)
+                    if raw_x is not None:
+                        fit_display_x = np.asarray(raw_x, dtype=float)
                 except Exception:
-                    total_fit_arr = None
+                    fit_display_x = x_arr
+                try:
+                    if raw_y is not None:
+                        fit_display_y = np.asarray(raw_y, dtype=float)
+                except Exception:
+                    fit_display_y = None
+                try:
+                    if raw_stats is not None:
+                        fit_stats_y = np.asarray(raw_stats, dtype=float)
+                except Exception:
+                    fit_stats_y = None
+                if fit_stats_y is None and fit_display_y is not None and len(fit_display_y) == len(x_arr):
+                    fit_stats_y = fit_display_y
+            elif total_payload is not None:
+                try:
+                    fit_display_y = np.asarray(total_payload, dtype=float)
+                except Exception:
+                    fit_display_y = None
+                if fit_display_y is not None and len(fit_display_y) == len(x_arr):
+                    fit_stats_y = fit_display_y
         elif y_fit is not None:
             try:
-                total_fit_arr = np.asarray(y_fit, dtype=float)
+                fit_display_y = np.asarray(y_fit, dtype=float)
             except Exception:
-                total_fit_arr = None
+                fit_display_y = None
+            if fit_display_y is not None and len(fit_display_y) == len(x_arr):
+                fit_stats_y = fit_display_y
 
         try:
             if excl_mask is None:
@@ -1257,7 +1285,7 @@ class MainWindow(QMainWindow):
                     errin = y_err_arr
                 else:
                     errin = None
-                yfit_for_chi = total_fit_arr if total_fit_arr is not None else None
+                yfit_for_chi = fit_stats_y if fit_stats_y is not None else None
             else:
                 xin = x_in if 'x_in' in locals() else np.array([], dtype=float)
                 yin = y_in if 'y_in' in locals() else np.array([], dtype=float)
@@ -1270,13 +1298,13 @@ class MainWindow(QMainWindow):
                         errin = y_err_arr
                     else:
                         errin = None
-                if total_fit_arr is None:
+                if fit_stats_y is None:
                     yfit_for_chi = None
                 else:
-                    if len(total_fit_arr) == len(x_arr):
-                        yfit_for_chi = total_fit_arr[~excl_mask]
-                    elif len(total_fit_arr) == len(xin):
-                        yfit_for_chi = total_fit_arr
+                    if len(fit_stats_y) == len(x_arr):
+                        yfit_for_chi = fit_stats_y[~excl_mask]
+                    elif len(fit_stats_y) == len(xin):
+                        yfit_for_chi = fit_stats_y
                     else:
                         yfit_for_chi = None
 
@@ -1323,21 +1351,29 @@ class MainWindow(QMainWindow):
                 comp_arr = np.asarray(comp_y, dtype=float)
             except Exception:
                 continue
-            if len(comp_arr) != len(x_arr):
+            comp_x = comp.get("x")
+            if comp_x is not None:
+                try:
+                    comp_x_arr = np.asarray(comp_x, dtype=float)
+                except Exception:
+                    comp_x_arr = x_arr
+            else:
+                comp_x_arr = x_arr
+            if comp_arr.size == 0 or comp_x_arr.size != comp_arr.size:
                 continue
             color = comp.get("color") or FIT_COLOR
             curve_id = f"component:{prefix}"
             label = comp.get("label") or prefix.rstrip("_") or prefix
-            self._upsert_curve(curve_id, x_arr, comp_arr, color=color, selectable=True, is_component=True, label=label)
+            self._upsert_curve(curve_id, comp_x_arr, comp_arr, color=color, selectable=True, is_component=True, label=label)
             target_ids.add(curve_id)
             self._component_legend_order.append((label, curve_id))
 
-        if total_fit_arr is not None and len(total_fit_arr) == len(x_arr):
+        if fit_display_y is not None and fit_display_x is not None and len(fit_display_y) == len(fit_display_x) and len(fit_display_y) > 0:
             selectable_total = not is_composite_payload
             self._upsert_curve(
                 "fit",
-                x_arr,
-                total_fit_arr,
+                fit_display_x,
+                fit_display_y,
                 color=FIT_COLOR,
                 selectable=selectable_total,
                 is_component=False,

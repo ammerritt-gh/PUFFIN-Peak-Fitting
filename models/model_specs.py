@@ -2,6 +2,7 @@
 """Model specifications and helper functions for fitting.
 """
 import logging
+import re
 import numpy as np
 from scipy.special import wofz, voigt_profile
 from scipy.fft import fft, ifft
@@ -233,6 +234,23 @@ _COMPONENT_COLORS = [
 ]
 
 
+def _format_spec_label(spec_obj) -> str:
+    """Return a human-friendly label for a component's spec."""
+    try:
+        element_name = getattr(spec_obj, "_element_name", None)
+        if element_name:
+            return str(element_name)
+    except Exception:
+        pass
+    try:
+        name = spec_obj.__class__.__name__
+    except Exception:
+        return ""
+    name = re.sub(r"ModelSpec$", "", name)
+    name = re.sub(r"(?<!^)(?=[A-Z])", " ", name)
+    return name.strip()
+
+
 def _clone_parameter(param: "Parameter", new_name: str, value: Any) -> "Parameter":
     """Return a shallow copy of `param` with a new name/value."""
     return Parameter(
@@ -258,8 +276,16 @@ class CompositeComponent:
     color: str
 
     @property
+    def spec_label(self) -> str:
+        return _format_spec_label(self.spec)
+
+    @property
     def label(self) -> str:
-        return f"{self.prefix.rstrip('_')}"
+        base = self.prefix.rstrip('_') or "component"
+        spec_label = self.spec_label
+        if spec_label and spec_label.lower() != base.lower():
+            return f"{base} ({spec_label})"
+        return base
 
 
 

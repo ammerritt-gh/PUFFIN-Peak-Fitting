@@ -1,0 +1,55 @@
+# Damped Harmonic Oscillator (DHO) Model Element
+# Represents a single phonon mode described by a damped harmonic oscillator
+
+name: DHO
+description: |
+  Damped harmonic oscillator line shape describing an inelastic phonon mode.
+  Uses the standard DHO susceptibility form with adjustable amplitude,
+  resonance energy, and damping width.
+
+version: 1
+author: BigFit Team
+category: peak
+
+parameters:
+  - name: Amplitude
+    description: Overall scale factor applied to the DHO line shape
+    type: float
+    value: 1.0
+    min: 0.0
+    decimals: 3
+    step: 1.0
+    hint: Integrated intensity scale
+    control:
+      action: wheel
+      modifiers: []
+
+  - name: Center
+    description: Resonance energy (phonon frequency) in meV
+    type: float
+    value: 10.0
+    min: 1.0e-6
+    decimals: 3
+    step: 0.5
+    hint: Phonon energy
+    control:
+      action: mouse_move
+      modifiers: []
+
+  - name: Damping
+    description: Half-width damping constant (Gamma) in meV
+    type: float
+    value: 1.0
+    min: 1.0e-6
+    decimals: 3
+    step: 0.1
+    hint: Damping width controlling peak broadening
+    control:
+      action: wheel
+      modifiers: ["Control"]
+
+# Standard DHO susceptibility scaled by Amplitude
+# chi''(omega) ~ (2*omega*Gamma) / ((omega^2 - Omega^2)^2 + (2*omega*Gamma)^2)
+# Parameter names with spaces expose underscore variants in the expression
+# so Center -> Center and Damping -> Damping remain readable.
+evaluate: "Amplitude * (2 * x * Damping) / ((Center**2 - x**2)**2 + (2 * x * Damping)**2)"
