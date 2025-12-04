@@ -82,11 +82,12 @@ def _get_fit_filename_for_file(filepath: str) -> str:
     return f"{sanitized}_{path_hash}_fit.json"
 
 
-def _extract_fit_state(model_state) -> Optional[Dict[str, Any]]:
+def _extract_fit_state(model_state, resolution_state: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Extract fit state from a ModelState object into a serializable dict.
 
     Args:
         model_state: The ModelState object to extract from
+        resolution_state: Optional resolution state dict from viewmodel
 
     Returns:
         A dict containing the fit state, or None if extraction fails
@@ -203,6 +204,7 @@ def _extract_fit_state(model_state) -> Optional[Dict[str, Any]]:
             "excluded": excluded,
             "signature": signature,
             "source": file_info if isinstance(file_info, dict) else {},
+            "resolution": resolution_state,  # Resolution state from viewmodel
         }
         return state
 
@@ -393,7 +395,7 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
         return False
 
 
-def save_default_fit(model_state) -> bool:
+def save_default_fit(model_state, resolution_state: Optional[Dict[str, Any]] = None) -> bool:
     """Save the current fit as the generic default fit.
 
     This saves the fit state to default_fit.json, which can be loaded
@@ -401,13 +403,14 @@ def save_default_fit(model_state) -> bool:
 
     Args:
         model_state: The ModelState object to save
+        resolution_state: Optional resolution state from viewmodel
 
     Returns:
         True if save succeeded, False otherwise
     """
     try:
         fits_folder = _ensure_fits_folder()
-        fit_data = _extract_fit_state(model_state)
+        fit_data = _extract_fit_state(model_state, resolution_state)
         if fit_data is None:
             return False
 
@@ -424,7 +427,7 @@ def save_default_fit(model_state) -> bool:
         return False
 
 
-def load_default_fit(model_state, apply_excluded: bool = False) -> bool:
+def load_default_fit(model_state, apply_excluded: bool = False) -> tuple:
     """Load the generic default fit into the model state.
 
     This loads from default_fit.json. By default, does NOT apply the
@@ -435,25 +438,28 @@ def load_default_fit(model_state, apply_excluded: bool = False) -> bool:
         apply_excluded: Whether to apply the excluded mask
 
     Returns:
-        True if load succeeded, False otherwise
+        Tuple of (success: bool, resolution_state: Optional[dict])
+        For backward compatibility, can also return just bool
     """
     try:
         fits_folder = _get_fits_folder()
         fit_path = fits_folder / DEFAULT_FIT_FILENAME
 
         if not fit_path.exists():
-            return False
+            return False, None
 
         with fit_path.open("r", encoding="utf-8") as f:
             fit_data = json.load(f)
 
-        return _apply_fit_state(model_state, fit_data, apply_excluded=apply_excluded)
+        success = _apply_fit_state(model_state, fit_data, apply_excluded=apply_excluded)
+        resolution_state = fit_data.get("resolution", None)
+        return success, resolution_state
 
     except Exception:
-        return False
+        return False, None
 
 
-def save_fit_for_file(model_state, filepath: str) -> bool:
+def save_fit_for_file(model_state, filepath: str, resolution_state: Optional[Dict[str, Any]] = None) -> bool:
     """Save the current fit for a specific data file.
 
     This creates a fit file in the fits/ folder named after the data file.
@@ -462,6 +468,7 @@ def save_fit_for_file(model_state, filepath: str) -> bool:
     Args:
         model_state: The ModelState object to save
         filepath: The path to the data file this fit is for
+        resolution_state: Optional resolution state from viewmodel
 
     Returns:
         True if save succeeded, False otherwise
@@ -471,7 +478,7 @@ def save_fit_for_file(model_state, filepath: str) -> bool:
 
     try:
         fits_folder = _ensure_fits_folder()
-        fit_data = _extract_fit_state(model_state)
+        fit_data = _extract_fit_state(model_state, resolution_state)
         if fit_data is None:
             return False
 
@@ -508,7 +515,7 @@ def save_fit_for_file(model_state, filepath: str) -> bool:
         return False
 
 
-def load_fit_for_file(model_state, filepath: str, apply_excluded: bool = True) -> bool:
+def load_fit_for_file(model_state, filepath: str, apply_excluded: bool = True) -> tuple:
     """Load a saved fit for a specific data file.
 
     Searches for a fit file matching the given filepath and applies it
@@ -520,21 +527,21 @@ def load_fit_for_file(model_state, filepath: str, apply_excluded: bool = True) -
         apply_excluded: Whether to apply the excluded mask
 
     Returns:
-        True if a matching fit was found and applied, False otherwise
+        Tuple of (success: bool, resolution_state: Optional[dict])
     """
     if not filepath:
-        return False
+        return False, None
 
     try:
         fits_folder = _get_fits_folder()
         if not fits_folder.exists():
-            return False
+            return False, None
 
         fit_filename = _get_fit_filename_for_file(filepath)
         fit_path = fits_folder / fit_filename
 
         if not fit_path.exists():
-            return False
+            return False, None
 
         with fit_path.open("r", encoding="utf-8") as f:
             fit_data = json.load(f)
@@ -545,12 +552,14 @@ def load_fit_for_file(model_state, filepath: str, apply_excluded: bool = True) -
         if saved_path:
             # Check that basenames match
             if os.path.basename(saved_path) != os.path.basename(filepath):
-                return False
+                return False, None
 
-        return _apply_fit_state(model_state, fit_data, apply_excluded=apply_excluded)
+        success = _apply_fit_state(model_state, fit_data, apply_excluded=apply_excluded)
+        resolution_state = fit_data.get("resolution", None)
+        return success, resolution_state
 
     except Exception:
-        return False
+        return False, None
 
 
 def reset_fit_for_file(filepath: str) -> bool:

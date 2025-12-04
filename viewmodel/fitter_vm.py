@@ -1005,18 +1005,19 @@ class FitterViewModel(QObject):
             from dataio import save_default_fit, save_fit_for_file
 
             filepath = self._get_current_file_path()
+            resolution_state = self.get_resolution_state()
 
             if filepath:
                 # When working with a real data file, keep the default fit untouched
                 try:
-                    if save_fit_for_file(self.state, filepath):
+                    if save_fit_for_file(self.state, filepath, resolution_state):
                         self._log_message(f"Saved fit for: {os.path.basename(filepath)}")
                 except Exception as e:
                     self._log_message(f"Failed to save fit for file: {e}")
             else:
                 # Only update the default fit when no external file is active
                 try:
-                    if save_default_fit(self.state):
+                    if save_default_fit(self.state, resolution_state):
                         self._log_message("Saved default fit.")
                 except Exception as e:
                     self._log_message(f"Failed to save default fit: {e}")
@@ -1054,8 +1055,18 @@ class FitterViewModel(QObject):
             if not has_fit_for_file(filepath):
                 return False
 
-            if load_fit_for_file(self.state, filepath, apply_excluded=True):
+            result = load_fit_for_file(self.state, filepath, apply_excluded=True)
+            # Handle both old (bool) and new (tuple) return formats
+            if isinstance(result, tuple):
+                success, resolution_state = result
+            else:
+                success, resolution_state = result, None
+            
+            if success:
                 self._log_message(f"Restored fit for: {os.path.basename(filepath)}")
+                # Restore resolution state if present
+                if resolution_state:
+                    self.set_resolution_state(resolution_state)
                 return True
         except Exception as e:
             log_exception("Failed to load fit for file", e, vm=self)
@@ -1069,8 +1080,18 @@ class FitterViewModel(QObject):
         try:
             from dataio import load_default_fit
 
-            if load_default_fit(self.state, apply_excluded=False):
+            result = load_default_fit(self.state, apply_excluded=False)
+            # Handle both old (bool) and new (tuple) return formats
+            if isinstance(result, tuple):
+                success, resolution_state = result
+            else:
+                success, resolution_state = result, None
+            
+            if success:
                 self._log_message("Loaded default fit parameters.")
+                # Restore resolution state if present
+                if resolution_state:
+                    self.set_resolution_state(resolution_state)
                 return True
         except Exception as e:
             log_exception("Failed to load default fit", e, vm=self)
@@ -2124,9 +2145,9 @@ class FitterViewModel(QObject):
     def evaluate_with_resolution(self, x: np.ndarray, y_model: np.ndarray) -> np.ndarray:
         """Apply resolution convolution to a model output.
         
-        The convolution is performed on a uniform grid centered at 0 to avoid
-        edge effects and ensure proper preservation of peak positions. The
-        result is then interpolated back to the original x values.
+        The convolution kernel (resolution function) is centered at 0 and applied
+        using proper padding to avoid edge effects. This preserves peak positions
+        regardless of where the data x-range starts.
         
         Args:
             x: X values (used to determine spacing for convolution)
@@ -2140,7 +2161,6 @@ class FitterViewModel(QObject):
         
         try:
             from scipy.signal import fftconvolve
-            from scipy.interpolate import interp1d
             
             x_arr = np.asarray(x, dtype=float)
             y_arr = np.asarray(y_model, dtype=float)
@@ -2154,38 +2174,31 @@ class FitterViewModel(QObject):
             if dx < 1e-10:
                 dx = 0.1
             
-            # Create a uniform grid centered at 0 with padding for convolution
-            # The grid must span the original data range plus padding
-            x_min, x_max = np.min(x_arr), np.max(x_arr)
-            pad_range = DEFAULT_RESOLUTION_RANGE
-            x_span = max(abs(x_min), abs(x_max)) + pad_range
-            x_uniform = np.arange(-x_span, x_span + dx, dx)
+            # Create a symmetric kernel grid centered at 0
+            # This kernel will be used for convolution regardless of where the data is
+            kernel_half_width = DEFAULT_RESOLUTION_RANGE
+            n_kernel = int(2 * kernel_half_width / dx) + 1
+            # Ensure odd number of points for symmetric kernel
+            if n_kernel % 2 == 0:
+                n_kernel += 1
+            x_kernel = np.linspace(-kernel_half_width, kernel_half_width, n_kernel)
             
-            # Interpolate the input signal onto the uniform grid
-            signal_interp = interp1d(x_arr, y_arr, kind='linear', 
-                                     bounds_error=False, fill_value=0.0)
-            signal_uniform = signal_interp(x_uniform)
-            
-            # Evaluate the resolution function on the same uniform grid (centered at 0)
+            # Evaluate the resolution function centered at 0
             try:
-                res_y = self._resolution_spec.evaluate(x_uniform)
+                kernel = self._resolution_spec.evaluate(x_kernel)
             except Exception:
                 return y_model
             
-            # Normalize the resolution function (area = 1 for proper convolution)
-            area = np.trapz(res_y, x_uniform)
+            # Normalize the kernel (area = 1 for proper convolution)
+            area = np.trapz(kernel, x_kernel)
             if abs(area) > 1e-12:
-                res_y = res_y / area
+                kernel = kernel / area
             
-            # Perform convolution on the uniform grid
-            convolved = fftconvolve(signal_uniform, res_y, mode='same') * dx
+            # Perform convolution - 'same' mode preserves array length and centering
+            # The kernel being symmetric and centered at 0 ensures no position shift
+            convolved = fftconvolve(y_arr, kernel, mode='same') * dx
             
-            # Interpolate the convolved result back to original x values
-            result_interp = interp1d(x_uniform, convolved, kind='linear',
-                                     bounds_error=False, fill_value=0.0)
-            result = result_interp(x_arr)
-            
-            return result
+            return convolved
         except Exception as e:
             log_exception("Failed to apply resolution convolution", e, vm=self)
             return y_model
@@ -2193,3 +2206,92 @@ class FitterViewModel(QObject):
     def has_resolution(self) -> bool:
         """Check if a resolution model is active."""
         return self._resolution_spec is not None
+
+    def get_resolution_state(self) -> _typing.Optional[dict]:
+        """Get the current resolution state for persistence.
+        
+        Returns:
+            Dict containing resolution model name and parameters, or None if no resolution
+        """
+        if self._resolution_spec is None or self._resolution_model_name == "None":
+            return None
+        
+        try:
+            params = {}
+            spec_params = getattr(self._resolution_spec, "params", {}) or {}
+            for name, param in spec_params.items():
+                try:
+                    lg = getattr(param, "link_group", None)
+                    params[name] = {
+                        "value": getattr(param, "value", None),
+                        "fixed": bool(getattr(param, "fixed", False)),
+                        "link_group": int(lg) if lg else None
+                    }
+                except Exception:
+                    params[name] = {"value": None, "fixed": False, "link_group": None}
+            
+            return {
+                "model_name": self._resolution_model_name,
+                "parameters": params
+            }
+        except Exception as e:
+            log_exception("Failed to get resolution state", e, vm=self)
+            return None
+
+    def set_resolution_state(self, state: _typing.Optional[dict]) -> bool:
+        """Restore resolution state from persistence.
+        
+        Args:
+            state: Dict containing resolution model name and parameters, or None to clear
+            
+        Returns:
+            True if state was applied successfully
+        """
+        if state is None:
+            self._resolution_model_name = "None"
+            self._resolution_spec = None
+            return True
+        
+        try:
+            model_name = state.get("model_name", "None")
+            if not model_name or model_name == "None":
+                self._resolution_model_name = "None"
+                self._resolution_spec = None
+                return True
+            
+            # Set the model (this creates the spec)
+            self.set_resolution_model(model_name)
+            
+            if self._resolution_spec is None:
+                return False
+            
+            # Apply saved parameters
+            params = state.get("parameters", {})
+            spec_params = getattr(self._resolution_spec, "params", {}) or {}
+            
+            for name, param_info in params.items():
+                if name in spec_params:
+                    try:
+                        # Apply value
+                        value = param_info.get("value")
+                        if value is not None:
+                            spec_params[name].value = value
+                        
+                        # Apply fixed state
+                        spec_params[name].fixed = bool(param_info.get("fixed", False))
+                        
+                        # Apply link group
+                        link_group = param_info.get("link_group")
+                        spec_params[name].link_group = int(link_group) if link_group else None
+                    except Exception:
+                        pass
+            
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+            
+            return True
+        except Exception as e:
+            log_exception("Failed to set resolution state", e, vm=self)
+            return False

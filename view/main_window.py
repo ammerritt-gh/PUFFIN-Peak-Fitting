@@ -1750,6 +1750,11 @@ class MainWindow(QMainWindow):
                 self.viewmodel.apply_resolution_parameters({name: value})
                 # Update preview
                 self._update_resolution_preview()
+                # Update main plot immediately (like other parameters)
+                try:
+                    self.viewmodel.update_plot()
+                except Exception:
+                    pass
         except Exception as e:
             self.append_log(f"Failed to update resolution parameter '{name}': {e}")
 
