@@ -8,5 +8,6 @@ from .controls_dock import ControlsDock
 from .parameters_dock import ParametersDock
 from .elements_dock import ElementsDock
 from .log_dock import LogDock
+from .resolution_dock import ResolutionDock
 
-__all__ = ["ControlsDock", "ParametersDock", "ElementsDock", "LogDock"]
+__all__ = ["ControlsDock", "ParametersDock", "ElementsDock", "LogDock", "ResolutionDock"]

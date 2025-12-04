@@ -22,6 +22,7 @@ class FitterViewModel(QObject):
     log_message = Signal(str)
     parameters_updated = Signal()
     files_updated = Signal(object)                          # list of queued file metadata
+    resolution_updated = Signal()                           # emitted when resolution changes
 
 
     def __init__(self, model_state=None):
@@ -34,6 +35,10 @@ class FitterViewModel(QObject):
         self.curves: dict = {}
         self._last_blocked_drag = None  # tracks last drag ignored due to fixed params
         self._last_blocked_value_update = None
+        
+        # Resolution model state
+        self._resolution_model_name = "None"  # "None" means no resolution convolution
+        self._resolution_spec = None  # BaseModelSpec or None
         
         # Debounce timer for auto-saving fit state after parameter changes
         self._fit_save_timer = QTimer()
@@ -632,6 +637,10 @@ class FitterViewModel(QObject):
 
         # wrap evaluate(x, **params) into curve_fit-style f(x, *args)
         param_keys = list(params.keys())
+        
+        # Capture resolution state for use inside wrapped_func
+        has_res = self.has_resolution()
+        evaluate_with_res = self.evaluate_with_resolution if has_res else None
 
         def wrapped_func(xx, *args):
             # start from the full map (including fixed values) and overwrite free keys
@@ -649,10 +658,19 @@ class FitterViewModel(QObject):
             # as the second positional argument (evaluate(x, params)). Others accept **kwargs.
             # Pass the params dict positionally to support evaluate(x, params).
             try:
-                return model_func(xx, p)
+                y_out = model_func(xx, p)
             except TypeError:
                 # fallback: try as kwargs (in case evaluate accepts keyword args)
-                return model_func(xx, **p)
+                y_out = model_func(xx, **p)
+            
+            # Apply resolution convolution if enabled
+            if has_res and evaluate_with_res is not None:
+                try:
+                    y_out = evaluate_with_res(xx, y_out)
+                except Exception:
+                    pass
+            
+            return y_out
 
         # lazy import of FitWorker to reduce module-time coupling
         try:
@@ -874,6 +892,21 @@ class FitterViewModel(QObject):
                 fit_y = np.asarray(total, dtype=float)
                 preview_complete = False
 
+            # Apply resolution convolution if enabled
+            if self.has_resolution():
+                try:
+                    fit_y = self.evaluate_with_resolution(fit_x, fit_y)
+                    # Also apply to component displays
+                    for comp_data in components_for_view:
+                        comp_y = comp_data.get("y")
+                        comp_x = comp_data.get("x")
+                        if comp_y is not None and comp_x is not None:
+                            comp_data["y"] = self.evaluate_with_resolution(comp_x, comp_y)
+                    # Update total for data_y
+                    total = self.evaluate_with_resolution(x_arr, total)
+                except Exception as e:
+                    log_exception("Failed to apply resolution in update_plot", e, vm=self)
+
             curves_payload["fit"] = (fit_x, fit_y)
             y_fit_payload = {
                 "total": {"x": fit_x, "y": fit_y, "data_y": total},
@@ -888,8 +921,14 @@ class FitterViewModel(QObject):
                     y_fit = None
             if y_fit is not None:
                 arr = np.asarray(y_fit, dtype=float)
+                # Apply resolution convolution if enabled
+                if self.has_resolution():
+                    try:
+                        arr = self.evaluate_with_resolution(np.asarray(x, dtype=float), arr)
+                    except Exception as e:
+                        log_exception("Failed to apply resolution in update_plot (non-composite)", e, vm=self)
                 curves_payload["fit"] = (np.asarray(x, dtype=float), arr)
-            y_fit_payload = y_fit
+            y_fit_payload = y_fit if not self.has_resolution() else arr if y_fit is not None else None
 
         self.curves = curves_payload
         errs = getattr(self.state, "errors", None)
@@ -1934,3 +1973,196 @@ class FitterViewModel(QObject):
             self.log_message.emit(f"Peak center updated -> {val} ({target})")
         except Exception:
             pass
+
+    # --------------------------
+    # Resolution model management
+    # --------------------------
+    def set_resolution_model(self, model_name: str):
+        """Set the resolution model to use for convolution.
+        
+        Args:
+            model_name: Name of the model to use, or "None" for no resolution
+        """
+        try:
+            model_name = (model_name or "").strip()
+            if not model_name or model_name.lower() == "none":
+                self._resolution_model_name = "None"
+                self._resolution_spec = None
+                self._log_message("Resolution convolution disabled.")
+            else:
+                # Create a model spec for the resolution
+                spec = get_model_spec(model_name)
+                if spec is None:
+                    self._log_message(f"Failed to create resolution model: {model_name}")
+                    return
+                
+                # Initialize the resolution spec centered at 0 (since it's a kernel)
+                try:
+                    # Create a symmetric x range for initialization
+                    x_init = np.linspace(-10, 10, 100)
+                    y_init = np.ones_like(x_init)
+                    spec.initialize(x_init, y_init)
+                except Exception:
+                    pass
+                
+                # Set default center to 0 for resolution functions
+                try:
+                    if hasattr(spec, "params") and "Center" in spec.params:
+                        spec.params["Center"].value = 0.0
+                except Exception:
+                    pass
+                
+                self._resolution_model_name = model_name
+                self._resolution_spec = spec
+                self._log_message(f"Resolution model set to: {model_name}")
+            
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+        except Exception as e:
+            log_exception(f"Failed to set resolution model '{model_name}'", e, vm=self)
+
+    def get_resolution_model_name(self) -> str:
+        """Get the current resolution model name."""
+        return self._resolution_model_name or "None"
+
+    def get_resolution_parameters(self) -> dict:
+        """Get the resolution model parameters for the UI.
+        
+        Returns:
+            Dict of parameter specs (same format as get_parameters())
+        """
+        if self._resolution_spec is None:
+            return {}
+        
+        try:
+            if hasattr(self._resolution_spec, "get_parameters"):
+                return self._resolution_spec.get_parameters()
+            elif hasattr(self._resolution_spec, "params"):
+                return {name: p.to_spec() for name, p in self._resolution_spec.params.items()}
+        except Exception as e:
+            log_exception("Failed to get resolution parameters", e, vm=self)
+        return {}
+
+    def apply_resolution_parameters(self, params: dict):
+        """Apply parameter updates to the resolution model.
+        
+        Args:
+            params: Dict mapping parameter names to values
+        """
+        if self._resolution_spec is None or not params:
+            return
+        
+        try:
+            fixed_suffix = "__fixed"
+            link_suffix = "__link"
+            
+            for k, v in params.items():
+                try:
+                    if isinstance(k, str) and k.endswith(fixed_suffix):
+                        base = k[: -len(fixed_suffix)]
+                        if base in self._resolution_spec.params:
+                            self._resolution_spec.params[base].fixed = bool(v)
+                    elif isinstance(k, str) and k.endswith(link_suffix):
+                        base = k[: -len(link_suffix)]
+                        if base in self._resolution_spec.params:
+                            try:
+                                self._resolution_spec.params[base].link_group = int(v) if v else None
+                            except Exception:
+                                self._resolution_spec.params[base].link_group = None
+                    else:
+                        if k in self._resolution_spec.params:
+                            self._resolution_spec.params[k].value = v
+                except Exception:
+                    pass
+            
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+        except Exception as e:
+            log_exception("Failed to apply resolution parameters", e, vm=self)
+
+    def get_resolution_preview(self) -> _typing.Tuple[np.ndarray, np.ndarray]:
+        """Get the resolution function preview data.
+        
+        Returns:
+            Tuple of (x_data, y_data) for the preview plot
+        """
+        if self._resolution_spec is None:
+            return np.array([]), np.array([])
+        
+        try:
+            # Create a symmetric grid centered at 0
+            x = np.linspace(-5, 5, 200)
+            
+            # Evaluate the resolution function
+            if hasattr(self._resolution_spec, "evaluate"):
+                y = self._resolution_spec.evaluate(x)
+            else:
+                y = np.zeros_like(x)
+            
+            # Normalize so peak is at 1 for display
+            y_max = np.max(np.abs(y))
+            if y_max > 0:
+                y = y / y_max
+            
+            return x, y
+        except Exception as e:
+            log_exception("Failed to generate resolution preview", e, vm=self)
+            return np.array([]), np.array([])
+
+    def evaluate_with_resolution(self, x: np.ndarray, y_model: np.ndarray) -> np.ndarray:
+        """Apply resolution convolution to a model output.
+        
+        Args:
+            x: X values (used to determine spacing for convolution)
+            y_model: Model output to convolve
+            
+        Returns:
+            Convolved model output, or original if no resolution set
+        """
+        if self._resolution_spec is None:
+            return y_model
+        
+        try:
+            from scipy.signal import fftconvolve
+            from scipy.interpolate import interp1d
+            
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y_model, dtype=float)
+            
+            if x_arr.size < 2 or y_arr.size != x_arr.size:
+                return y_model
+            
+            # Determine grid spacing
+            dx = np.abs(x_arr[1] - x_arr[0]) if len(x_arr) > 1 else 0.1
+            
+            # Create a uniform grid for the resolution kernel
+            # Use a range that's large enough to capture the full resolution function
+            res_range = 20.0  # This should capture most resolution functions
+            x_res = np.arange(-res_range, res_range, dx)
+            
+            # Evaluate the resolution function centered at 0
+            try:
+                res_y = self._resolution_spec.evaluate(x_res)
+            except Exception:
+                return y_model
+            
+            # Normalize the resolution function (area = 1 for proper convolution)
+            area = np.trapz(res_y, x_res)
+            if area > 1e-12:
+                res_y = res_y / area
+            
+            # Perform convolution
+            convolved = fftconvolve(y_arr, res_y, mode='same') * dx
+            
+            return convolved
+        except Exception as e:
+            log_exception("Failed to apply resolution convolution", e, vm=self)
+            return y_model
+
+    def has_resolution(self) -> bool:
+        """Check if a resolution model is active."""
+        return self._resolution_spec is not None
