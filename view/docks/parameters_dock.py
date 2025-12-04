@@ -497,8 +497,27 @@ class ParametersDock(QDockWidget):
 
             outer_layout.addStretch(1)
 
+            # Preserve current scroll positions so rebuilds don't jump to top
+            try:
+                vpos = self.param_scroll.verticalScrollBar().value()
+            except Exception:
+                vpos = 0
+            try:
+                hpos = self.param_scroll.horizontalScrollBar().value()
+            except Exception:
+                hpos = 0
+
             self.param_scroll.takeWidget()
             self.param_scroll.setWidget(new_widget)
+            # Restore previous scroll positions where possible
+            try:
+                self.param_scroll.verticalScrollBar().setValue(vpos)
+            except Exception:
+                pass
+            try:
+                self.param_scroll.horizontalScrollBar().setValue(hpos)
+            except Exception:
+                pass
             self.param_form_widget = new_widget
             self.param_form = None
 
