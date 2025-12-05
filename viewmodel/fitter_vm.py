@@ -28,6 +28,11 @@ class FitterViewModel(QObject):
     parameters_updated = Signal()
     files_updated = Signal(object)                          # list of queued file metadata
     resolution_updated = Signal()                           # emitted when resolution changes
+    fit_progress = Signal(float)                            # fit progress 0.0 to 1.0
+    fit_step_completed = Signal(int, object, object)        # step_num, fit_result, y_fit
+    fit_started = Signal()                                  # emitted when fit begins
+    fit_finished = Signal(bool)                             # emitted when fit ends (success)
+    revert_available_changed = Signal(bool)                 # emitted when revert state changes
 
 
     def __init__(self, model_state=None):
@@ -44,6 +49,10 @@ class FitterViewModel(QObject):
         # Resolution model state
         self._resolution_model_name = "None"  # "None" means no resolution convolution
         self._resolution_spec = None  # BaseModelSpec or None
+        
+        # Pre-fit state storage for revert functionality
+        self._pre_fit_params = None  # dict of parameter values before fit
+        self._pre_fit_resolution = None  # resolution state before fit
         
         # Debounce timer for auto-saving fit state after parameter changes
         self._fit_save_timer = QTimer()
@@ -877,6 +886,414 @@ class FitterViewModel(QObject):
         worker.finished.connect(on_finished)
         worker.start()
         self._log_message("Fit started in background...")
+
+    def _store_pre_fit_state(self):
+        """Store the current parameter state before fitting for revert functionality."""
+        try:
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return
+            
+            # Store current parameter values
+            self._pre_fit_params = {}
+            params = getattr(model_spec, "params", {}) or {}
+            for name, param in params.items():
+                try:
+                    self._pre_fit_params[name] = {
+                        "value": getattr(param, "value", None),
+                        "fixed": bool(getattr(param, "fixed", False)),
+                        "link_group": getattr(param, "link_group", None),
+                        "min": getattr(param, "min", None),
+                        "max": getattr(param, "max", None),
+                    }
+                except Exception:
+                    pass
+            
+            # Store resolution state
+            self._pre_fit_resolution = self.get_resolution_state()
+            
+            try:
+                self.revert_available_changed.emit(True)
+            except Exception:
+                pass
+            
+            self._log_message("Pre-fit parameters stored for revert.")
+        except Exception as e:
+            log_exception("Failed to store pre-fit state", e, vm=self)
+
+    def has_revert_state(self) -> bool:
+        """Check if there's a pre-fit state available for revert."""
+        return self._pre_fit_params is not None and len(self._pre_fit_params) > 0
+
+    def revert_to_pre_fit(self) -> bool:
+        """Revert parameters to their pre-fit values.
+        
+        Returns:
+            True if revert was successful
+        """
+        try:
+            if not self.has_revert_state():
+                self._log_message("No pre-fit state available to revert to.")
+                return False
+            
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                self._log_message("No model spec available for revert.")
+                return False
+            
+            params = getattr(model_spec, "params", {}) or {}
+            mdl = getattr(self.state, "model", None)
+            is_composite = isinstance(model_spec, CompositeModelSpec)
+            
+            # Restore parameter values
+            for name, stored in self._pre_fit_params.items():
+                try:
+                    if name in params:
+                        params[name].value = stored.get("value")
+                        params[name].fixed = stored.get("fixed", False)
+                        params[name].link_group = stored.get("link_group")
+                        if stored.get("min") is not None:
+                            params[name].min = stored.get("min")
+                        if stored.get("max") is not None:
+                            params[name].max = stored.get("max")
+                        
+                        # Update model object if present
+                        if mdl is not None:
+                            try:
+                                setattr(mdl, name, stored.get("value"))
+                            except Exception:
+                                pass
+                        
+                        # Update composite spec if applicable
+                        if is_composite and hasattr(model_spec, "set_param_value"):
+                            try:
+                                model_spec.set_param_value(name, stored.get("value"))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            
+            # Restore resolution state
+            if self._pre_fit_resolution is not None:
+                self.set_resolution_state(self._pre_fit_resolution)
+            
+            # Clear pre-fit state
+            self._pre_fit_params = None
+            self._pre_fit_resolution = None
+            
+            try:
+                self.revert_available_changed.emit(False)
+            except Exception:
+                pass
+            
+            # Notify views
+            try:
+                self.parameters_updated.emit()
+            except Exception:
+                pass
+            
+            try:
+                self.update_plot()
+            except Exception:
+                pass
+            
+            self._log_message("Reverted to pre-fit parameters.")
+            return True
+        except Exception as e:
+            log_exception("Failed to revert to pre-fit state", e, vm=self)
+            return False
+
+    def run_fit_steps(self, num_steps: int = 1, live_preview: bool = True):
+        """Run a limited number of fit iterations with optional live preview.
+        
+        Args:
+            num_steps: Number of fitting iterations to run
+            live_preview: If True, update plot after each step
+        """
+        # Prevent multiple concurrent fits
+        if getattr(self, "_fit_worker", None) is not None:
+            self._log_message("A fit is already running.")
+            return
+        
+        # Store pre-fit state
+        self._store_pre_fit_state()
+        
+        # Emit fit started signal
+        try:
+            self.fit_started.emit()
+        except Exception:
+            pass
+
+        # Get data
+        try:
+            x_incl, y_incl, err_incl = self.state.get_masked_data()
+        except Exception:
+            x_incl, y_incl, err_incl = None, None, None
+        x = x_incl if x_incl is not None else getattr(self.state, "x_data", None)
+        y = y_incl if y_incl is not None else getattr(self.state, "y_data", None)
+        if x is None or y is None:
+            self._log_message("No data available to fit.")
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        err = err_incl if err_incl is not None else getattr(self.state, "errors", None)
+
+        # Get model spec
+        model_spec = getattr(self.state, "model_spec", None)
+        if model_spec is None:
+            self._log_message("No model available to fit.")
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        # Build parameter info (same as run_fit)
+        model_func = getattr(model_spec, "evaluate", None)
+        if model_func is None:
+            self._log_message("Selected model does not provide an evaluate function.")
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        try:
+            model_params_map = getattr(model_spec, "params", {}) or {}
+            model_full_values = {k: getattr(v, "value", None) for k, v in model_params_map.items()}
+            model_free_keys = [k for k, v in model_params_map.items() if not bool(getattr(v, "fixed", False))]
+            
+            if not model_free_keys:
+                self._log_message("No free parameters to fit.")
+                try:
+                    self.fit_finished.emit(False)
+                except Exception:
+                    pass
+                return
+            
+            # Build bounds
+            model_lower = [getattr(model_params_map[k], "min", None) if getattr(model_params_map[k], "min", None) is not None else -np.inf for k in model_free_keys]
+            model_upper = [getattr(model_params_map[k], "max", None) if getattr(model_params_map[k], "max", None) is not None else np.inf for k in model_free_keys]
+            
+            params = {k: model_full_values.get(k) for k in model_free_keys}
+            bounds = (model_lower, model_upper)
+        except Exception as e:
+            log_exception("Failed to build parameter list", e, vm=self)
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        # Create wrapped function
+        has_res = self.has_resolution()
+        
+        def wrapped_func(xx, *args):
+            p = dict(model_full_values)
+            try:
+                for k, val in zip(model_free_keys, args):
+                    p[k] = val
+            except Exception:
+                pass
+            try:
+                y_out = model_func(xx, p)
+            except TypeError:
+                y_out = model_func(xx, **p)
+            
+            if has_res:
+                try:
+                    y_out = self.evaluate_with_resolution(xx, y_out)
+                except Exception:
+                    pass
+            
+            return y_out
+
+        # Import iterative worker
+        try:
+            from worker.fit_worker import IterativeFitWorker
+        except Exception as e:
+            log_exception("Failed to import IterativeFitWorker", e, vm=self)
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        worker = IterativeFitWorker(
+            x, y, wrapped_func, params, err, bounds,
+            max_steps=num_steps,
+            step_mode=live_preview
+        )
+        self._fit_worker = worker
+
+        # Connect progress
+        worker.progress.connect(lambda p: self.fit_progress.emit(p))
+
+        # Connect step completed for live preview
+        if live_preview:
+            def on_step_completed(step_num, result, y_fit):
+                if result is None:
+                    return
+                try:
+                    self.fit_step_completed.emit(step_num, result, y_fit)
+                    # Update parameters temporarily for preview
+                    spec = getattr(self.state, "model_spec", None)
+                    if spec is not None:
+                        for k, v in result.items():
+                            try:
+                                if k in spec.params:
+                                    spec.params[k].value = v
+                            except Exception:
+                                pass
+                    # Update plot
+                    try:
+                        self.update_plot()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log_exception("Error in step completed handler", e, vm=self)
+            
+            worker.step_completed.connect(on_step_completed)
+
+        # Connect finished
+        def on_finished(result, y_fit):
+            try:
+                if result:
+                    self.state.fit_result = result
+                    # Apply final result
+                    spec = getattr(self.state, "model_spec", None)
+                    if spec is not None:
+                        for k, v in result.items():
+                            try:
+                                if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                    spec.set_param_value(k, v)
+                                elif hasattr(spec, "params") and k in spec.params:
+                                    spec.params[k].value = v
+                            except Exception:
+                                pass
+                    
+                    # Update model object
+                    mdl = getattr(self.state, "model", None)
+                    if mdl is not None:
+                        for k, v in result.items():
+                            try:
+                                setattr(mdl, k, v)
+                            except Exception:
+                                pass
+                    
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
+                    
+                    try:
+                        self.update_plot()
+                    except Exception:
+                        pass
+                    
+                    self._log_message(f"Fit completed ({num_steps} step(s)).")
+                    
+                    try:
+                        self._schedule_fit_save()
+                    except Exception:
+                        pass
+                    
+                    try:
+                        self.fit_finished.emit(True)
+                    except Exception:
+                        pass
+                else:
+                    self._log_message("Fit failed.")
+                    try:
+                        self.fit_finished.emit(False)
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    self._fit_worker = None
+                except Exception:
+                    pass
+
+        worker.finished.connect(on_finished)
+        worker.start()
+        self._log_message(f"Fit started ({num_steps} step(s))...")
+
+    def run_fit_to_completion(self, live_preview: bool = True):
+        """Run fit until convergence with optional live preview.
+        
+        Args:
+            live_preview: If True, update plot during fitting
+        """
+        # Use the original run_fit for completion, but store pre-fit state first
+        self._store_pre_fit_state()
+        try:
+            self.fit_started.emit()
+        except Exception:
+            pass
+        self.run_fit()
+
+    def set_parameter_bounds(self, name: str, min_val, max_val):
+        """Set min/max bounds for a parameter.
+        
+        Args:
+            name: Parameter name
+            min_val: Minimum value or None for no limit
+            max_val: Maximum value or None for no limit
+        """
+        try:
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return
+            
+            params = getattr(model_spec, "params", {}) or {}
+            if name not in params:
+                return
+            
+            param = params[name]
+            if min_val is not None:
+                param.min = float(min_val)
+            else:
+                param.min = None
+            
+            if max_val is not None:
+                param.max = float(max_val)
+            else:
+                param.max = None
+            
+            self._log_message(f"Bounds for '{name}' set to [{min_val}, {max_val}]")
+        except Exception as e:
+            log_exception(f"Failed to set bounds for '{name}'", e, vm=self)
+
+    def get_parameter_bounds(self) -> dict:
+        """Get the current bounds for all parameters.
+        
+        Returns:
+            Dict mapping parameter names to (min, max) tuples
+        """
+        bounds = {}
+        try:
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return bounds
+            
+            params = getattr(model_spec, "params", {}) or {}
+            for name, param in params.items():
+                try:
+                    min_val = getattr(param, "min", None)
+                    max_val = getattr(param, "max", None)
+                    bounds[name] = (min_val, max_val)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return bounds
+
+    def is_fit_running(self) -> bool:
+        """Check if a fit is currently running."""
+        return getattr(self, "_fit_worker", None) is not None
 
     def update_plot(self):
         """Update plot without running a fit."""
