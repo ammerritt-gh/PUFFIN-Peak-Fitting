@@ -1155,6 +1155,11 @@ class FitterViewModel(QObject):
         # Connect progress
         worker.progress.connect(lambda p: self.fit_progress.emit(p))
 
+        # Connect error signal for user feedback
+        def on_error(error_msg):
+            self._log_message(f"Fit error: {error_msg}")
+        worker.error_occurred.connect(on_error)
+
         # Connect step completed for live preview
         if live_preview:
             def on_step_completed(step_num, result, y_fit):
@@ -1282,6 +1287,22 @@ class FitterViewModel(QObject):
                 param.max = float(max_val)
             else:
                 param.max = None
+            
+            # For CompositeModelSpec, also update the component's underlying spec
+            # to ensure bounds persist across _rebuild_flat_params calls
+            if isinstance(model_spec, CompositeModelSpec):
+                try:
+                    param_links = getattr(model_spec, "_param_links", {})
+                    if name in param_links:
+                        component, orig_name = param_links[name]
+                        if hasattr(component, "spec") and hasattr(component.spec, "params"):
+                            orig_param = component.spec.params.get(orig_name)
+                            if orig_param is not None:
+                                orig_param.min = param.min
+                                orig_param.max = param.max
+                except (AttributeError, KeyError, TypeError):
+                    # Component spec structure may vary; silently skip if bounds can't be propagated
+                    pass
             
             self._log_message(f"Bounds for '{name}' set to [{min_val}, {max_val}]")
         except Exception as e:

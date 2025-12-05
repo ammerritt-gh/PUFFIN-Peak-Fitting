@@ -7,6 +7,7 @@ from scipy.optimize import curve_fit, least_squares
 class FitWorker(QThread):
     progress = Signal(float)
     finished = Signal(object, object)  # emits (fit_result, y_fit)
+    error_occurred = Signal(str)  # emits error message for user feedback
 
     def __init__(self, x, y, model_func, params, err=None, bounds=None):
         """
@@ -67,23 +68,26 @@ class FitWorker(QThread):
             self.finished.emit(fit_result, y_fit)
 
         except Exception as e:
-            print(f"[FitWorker] Error: {e}")
+            error_msg = str(e)
+            print(f"[FitWorker] Error: {error_msg}")
+            self.error_occurred.emit(error_msg)
             self.finished.emit(None, None)
 
 
 class IterativeFitWorker(QThread):
     """Fitting worker that supports iterative (step-by-step) fitting with live updates.
     
-    Uses least_squares with limited max_nfev for predictable step-by-step behavior.
+    Uses least_squares with limited max_nfev for true step-by-step control where 
+    each "step" is approximately one iteration of the trust-region algorithm.
     """
     
     progress = Signal(float)  # Progress 0.0 to 1.0
     step_completed = Signal(int, object, object)  # step_num, fit_result, y_fit
     finished = Signal(object, object)  # emits (fit_result, y_fit)
+    error_occurred = Signal(str)  # emits error message for user feedback
 
-    # Number of function evaluations per "step" - this controls how much work
-    # is done per iteration. Higher values = more progress per step.
-    EVALS_PER_STEP = 30
+    # Convergence threshold for early stopping
+    OPTIMALITY_THRESHOLD = 1e-8
 
     def __init__(self, x, y, model_func, params, err=None, bounds=None, 
                  max_steps=None, step_mode=False):
@@ -128,6 +132,20 @@ class IterativeFitWorker(QThread):
         """Request stop."""
         self._stop = True
 
+    def _check_bounds_feasibility(self, params):
+        """Check if initial parameters are within bounds.
+        
+        Returns:
+            tuple: (is_feasible, error_message)
+        """
+        lower, upper = self.bounds
+        for p, lo, hi, name in zip(params, lower, upper, self.param_names):
+            if p < lo:
+                return False, f"Parameter '{name}' value {p:.4g} is below minimum bound {lo:.4g}"
+            if p > hi:
+                return False, f"Parameter '{name}' value {p:.4g} is above maximum bound {hi:.4g}"
+        return True, ""
+
     def _residuals(self, params):
         """Compute residuals for least_squares optimization."""
         try:
@@ -137,31 +155,54 @@ class IterativeFitWorker(QThread):
             return np.full_like(self.y, np.inf)
 
     def run(self):
-        """Perform iterative fitting in background using least_squares with limited max_nfev."""
+        """Perform iterative fitting in background.
+        
+        Each "step" runs least_squares with max_nfev=1, which means exactly
+        one iteration of the trust region algorithm.
+        """
         try:
             current_params = self.p0.copy()
             max_iter = self.max_steps if self.max_steps else 100
             
+            # Check bounds feasibility first
+            is_feasible, error_msg = self._check_bounds_feasibility(current_params)
+            if not is_feasible:
+                self.error_occurred.emit(f"Initial parameters infeasible: {error_msg}")
+                self.finished.emit(None, None)
+                return
+            
             self.progress.emit(0.0)
             
-            # Run least_squares iterations, each with limited function evaluations
+            # Run least_squares iterations, each with exactly 1 iteration
+            # Using max_nfev to limit function evaluations per step
+            # A single trust-region iteration typically needs ~2-3 function evals
             for step in range(max_iter):
                 if self._stop:
                     break
                 
-                # Use least_squares with limited max_nfev for each step
-                # This gives predictable step-by-step improvement and always returns
-                # the best parameters found so far
-                result = least_squares(
-                    self._residuals,
-                    current_params,
-                    bounds=self.bounds,
-                    max_nfev=self.EVALS_PER_STEP,
-                    verbose=0
-                )
-                
-                # Update current_params with the result (always makes progress)
-                current_params = result.x
+                try:
+                    # Use least_squares with very limited max_nfev for true single iteration
+                    # max_nfev=3 gives roughly one iteration of trust-region
+                    result = least_squares(
+                        self._residuals,
+                        current_params,
+                        bounds=self.bounds,
+                        max_nfev=3,  # ~1 iteration
+                        verbose=0
+                    )
+                    
+                    # Update current_params with the result
+                    current_params = result.x
+                    
+                except ValueError as e:
+                    # Handle infeasible bounds gracefully
+                    error_msg = str(e)
+                    if "infeasible" in error_msg.lower() or "x0" in error_msg.lower():
+                        self.error_occurred.emit(f"Bounds error: {error_msg}. Check that parameter values are within min/max bounds.")
+                    else:
+                        self.error_occurred.emit(f"Fitting error: {error_msg}")
+                    self.finished.emit(None, None)
+                    return
                 
                 step_num = step + 1
                 progress = min(1.0, step_num / max_iter)
@@ -175,8 +216,8 @@ class IterativeFitWorker(QThread):
                     except Exception:
                         pass
                 
-                # Check if converged early
-                if result.success and result.optimality < 1e-8:
+                # Check if converged early (optimality < threshold)
+                if hasattr(result, 'optimality') and result.optimality < self.OPTIMALITY_THRESHOLD:
                     break
             
             # Compute final fit
@@ -186,7 +227,16 @@ class IterativeFitWorker(QThread):
             self.progress.emit(1.0)
             self.finished.emit(fit_result, y_fit)
 
+        except ValueError as e:
+            error_msg = str(e)
+            if "infeasible" in error_msg.lower() or "x0" in error_msg.lower():
+                self.error_occurred.emit(f"Bounds error: {error_msg}. Check that parameter values are within min/max bounds.")
+            else:
+                self.error_occurred.emit(f"Fitting error: {error_msg}")
+            self.finished.emit(None, None)
         except Exception as e:
-            print(f"[IterativeFitWorker] Error: {e}")
+            error_msg = str(e)
+            print(f"[IterativeFitWorker] Error: {error_msg}")
+            self.error_occurred.emit(f"Fitting error: {error_msg}")
             self.finished.emit(None, None)
 
