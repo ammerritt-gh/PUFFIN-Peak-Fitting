@@ -589,72 +589,109 @@ class FitterViewModel(QObject):
 
         # build initial parameter value map and separate free (optimised) parameters
         try:
-            full_values = {k: getattr(v, "value", None) for k, v in getattr(model_spec, "params", {}).items()}
+            model_params_map = getattr(model_spec, "params", {}) or {}
+            model_full_values = {k: getattr(v, "value", None) for k, v in model_params_map.items()}
             # Determine which parameters are free (not fixed)
-            free_keys = [k for k, v in getattr(model_spec, "params", {}).items() if not bool(getattr(v, "fixed", False))]
-            if not free_keys:
-                self._log_message("No free parameters to fit (all parameters are fixed).")
-                return
-
+            model_free_keys = [k for k, v in model_params_map.items() if not bool(getattr(v, "fixed", False))]
             # Build link_group mapping: for linked parameters, only fit one representative
-            link_groups = {}  # link_group -> [param_names]
-            link_representatives = {}  # param_name -> representative_name (for linked params)
+            model_link_groups = {}  # link_group -> [param_names]
+            model_link_representatives = {}  # param_name -> representative_name (for linked params)
             
-            for k in free_keys:
+            for k in model_free_keys:
                 try:
-                    lg = getattr(model_spec.params[k], "link_group", None)
+                    lg = getattr(model_params_map[k], "link_group", None)
                     if lg and lg > 0:
-                        if lg not in link_groups:
-                            link_groups[lg] = []
-                        link_groups[lg].append(k)
+                        model_link_groups.setdefault(lg, []).append(k)
                 except Exception:
                     pass
             
             # For each link group, choose the first parameter as the representative
-            for lg, param_names in link_groups.items():
+            for lg, param_names in model_link_groups.items():
                 if len(param_names) > 1:
                     representative = param_names[0]
                     for pname in param_names:
-                        link_representatives[pname] = representative
+                        model_link_representatives[pname] = representative
             
             # Build unique free parameter list (only one param per link group)
-            unique_free_keys = []
+            model_unique_free_keys = []
             seen_representatives = set()
-            for k in free_keys:
-                rep = link_representatives.get(k, k)
+            for k in model_free_keys:
+                rep = model_link_representatives.get(k, k)
                 if rep not in seen_representatives:
-                    unique_free_keys.append(rep)
+                    model_unique_free_keys.append(rep)
                     seen_representatives.add(rep)
             
-            if not unique_free_keys:
-                self._log_message("No free parameters to fit (all parameters are fixed or linked).")
-                return
+            if not model_unique_free_keys and not self.has_resolution():
+                self._log_message("No free model parameters to fit (all model parameters are fixed or linked).")
 
-            # initial values for unique free params
-            params = {k: full_values.get(k) for k in unique_free_keys}
-            # bounds for unique free params (ordered to match unique_free_keys)
-            lower = [getattr(model_spec.params[k], "min", None) if getattr(model_spec.params[k], "min", None) is not None else -np.inf for k in unique_free_keys]
-            upper = [getattr(model_spec.params[k], "max", None) if getattr(model_spec.params[k], "max", None) is not None else np.inf for k in unique_free_keys]
-            bounds = (lower, upper)
+            # bounds for unique free params (ordered to match model_unique_free_keys)
+            model_lower = [getattr(model_params_map[k], "min", None) if getattr(model_params_map[k], "min", None) is not None else -np.inf for k in model_unique_free_keys]
+            model_upper = [getattr(model_params_map[k], "max", None) if getattr(model_params_map[k], "max", None) is not None else np.inf for k in model_unique_free_keys]
         except Exception as e:
             log_exception("Failed to build parameter/bounds list", e, vm=self)
             return
 
-        # wrap evaluate(x, **params) into curve_fit-style f(x, *args)
-        param_keys = list(params.keys())
-        
+        # Resolution parameter handling (optional)
+        res_spec = self._resolution_spec if self.has_resolution() else None
+        res_params_map = getattr(res_spec, "params", {}) or {}
+        res_name_map = {}  # prefixed name -> base name
+        res_full_values = {}
+        res_link_groups = {}
+        res_link_representatives = {}
+        res_unique_free_keys = []
+        res_lower = []
+        res_upper = []
+        if res_spec is not None:
+            try:
+                # Build prefixed names to avoid collisions with model parameters
+                res_full_values = {f"res__{k}": getattr(v, "value", None) for k, v in res_params_map.items()}
+                for base_name, param in res_params_map.items():
+                    prefixed = f"res__{base_name}"
+                    res_name_map[prefixed] = base_name
+                    if not bool(getattr(param, "fixed", False)):
+                        res_unique_free_keys.append(prefixed)
+                        lg = getattr(param, "link_group", None)
+                        if lg and lg > 0:
+                            res_link_groups.setdefault(lg, []).append(base_name)
+                # pick representatives per link group (prefixed)
+                for lg, names in res_link_groups.items():
+                    if len(names) > 1:
+                        rep_pref = f"res__{names[0]}"
+                        for n in names:
+                            res_link_representatives[f"res__{n}"] = rep_pref
+                res_lower = [getattr(res_params_map[res_name_map[k]], "min", None) if getattr(res_params_map[res_name_map[k]], "min", None) is not None else -np.inf for k in res_unique_free_keys]
+                res_upper = [getattr(res_params_map[res_name_map[k]], "max", None) if getattr(res_params_map[res_name_map[k]], "max", None) is not None else np.inf for k in res_unique_free_keys]
+            except Exception as e:
+                log_exception("Failed to build resolution parameter list", e, vm=self)
+                res_unique_free_keys = []
+                res_lower = []
+                res_upper = []
+
+        # Combine model + resolution parameters for fitting
+        param_keys = list(model_unique_free_keys) + list(res_unique_free_keys)
+        if not param_keys:
+            self._log_message("No free parameters to fit (model and resolution are fixed).")
+            return
+        combined_full_values = dict(model_full_values)
+        combined_full_values.update(res_full_values)
+        params = {k: combined_full_values.get(k) for k in param_keys}
+        bounds = (list(model_lower) + list(res_lower), list(model_upper) + list(res_upper))
+
         # Capture resolution state for use inside wrapped_func
-        has_res = self.has_resolution()
+        has_res = res_spec is not None
         evaluate_with_res = self.evaluate_with_resolution if has_res else None
 
         def wrapped_func(xx, *args):
             # start from the full map (including fixed values) and overwrite free keys
-            p = dict(full_values)
+            p = dict(combined_full_values)
             try:
                 for k, val in zip(param_keys, args):
                     p[k] = val
                     # If this parameter is a representative for linked params, propagate value
-                    for orig_k, rep_k in link_representatives.items():
+                    for orig_k, rep_k in model_link_representatives.items():
+                        if rep_k == k:
+                            p[orig_k] = val
+                    for orig_k, rep_k in res_link_representatives.items():
                         if rep_k == k:
                             p[orig_k] = val
             except Exception:
@@ -662,14 +699,24 @@ class FitterViewModel(QObject):
             # IMPORTANT: some ModelSpec.evaluate implementations expect a single 'params' dict
             # as the second positional argument (evaluate(x, params)). Others accept **kwargs.
             # Pass the params dict positionally to support evaluate(x, params).
+            model_param_values = {k: p.get(k) for k in model_full_values.keys()}
             try:
-                y_out = model_func(xx, p)
+                y_out = model_func(xx, model_param_values)
             except TypeError:
                 # fallback: try as kwargs (in case evaluate accepts keyword args)
-                y_out = model_func(xx, **p)
+                y_out = model_func(xx, **model_param_values)
             
             # Apply resolution convolution if enabled
             if has_res and evaluate_with_res is not None:
+                # Update resolution spec values with current params for this evaluation
+                try:
+                    res_spec_local = getattr(self, "_resolution_spec", None)
+                    if res_spec_local is not None and hasattr(res_spec_local, "params"):
+                        for pref_name, base_name in res_name_map.items():
+                            if pref_name in p and base_name in res_spec_local.params:
+                                res_spec_local.params[base_name].value = p[pref_name]
+                except Exception:
+                    pass
                 try:
                     y_out = evaluate_with_res(xx, y_out)
                 except Exception:
@@ -693,16 +740,20 @@ class FitterViewModel(QObject):
         # finished handler
         def on_finished(result, y_fit):
             try:
-                if result is not None:
+                combined_result = result or {}
+                model_result = {k: v for k, v in combined_result.items() if not (isinstance(k, str) and k.startswith("res__"))}
+                resolution_result = {res_name_map.get(k, k): v for k, v in combined_result.items() if isinstance(k, str) and k.startswith("res__")}
+
+                if combined_result:
                     # store fit result on state and update plot
-                    self.state.fit_result = result
+                    self.state.fit_result = model_result
 
                     # Apply fit result back into model_spec.params where possible so UI will reflect fitted values
                     # Also propagate values to linked parameters
                     try:
                         spec = getattr(self.state, "model_spec", None)
                         if spec is not None:
-                            for k, v in result.items():
+                            for k, v in model_result.items():
                                 try:
                                     if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
                                         spec.set_param_value(k, v)
@@ -710,7 +761,7 @@ class FitterViewModel(QObject):
                                         spec.params[k].value = v
                                     
                                     # Propagate to linked parameters
-                                    for orig_k, rep_k in link_representatives.items():
+                                    for orig_k, rep_k in model_link_representatives.items():
                                         if rep_k == k and orig_k != k:
                                             try:
                                                 if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
@@ -728,11 +779,11 @@ class FitterViewModel(QObject):
                     try:
                         mdl = getattr(self.state, "model", None)
                         if mdl is not None:
-                            for k, v in result.items():
+                            for k, v in model_result.items():
                                 try:
                                     setattr(mdl, k, v)
                                     # Propagate to linked parameters
-                                    for orig_k, rep_k in link_representatives.items():
+                                    for orig_k, rep_k in model_link_representatives.items():
                                         if rep_k == k and orig_k != k:
                                             try:
                                                 setattr(mdl, orig_k, v)
@@ -740,6 +791,28 @@ class FitterViewModel(QObject):
                                                 pass
                                 except Exception:
                                     pass
+                    except Exception:
+                        pass
+
+                    # Apply fitted resolution parameters back to the resolution spec
+                    try:
+                        if resolution_result and res_spec is not None:
+                            res_params = getattr(res_spec, "params", {}) or {}
+                            for base_name, val in resolution_result.items():
+                                if base_name in res_params:
+                                    try:
+                                        res_params[base_name].value = val
+                                        lg = getattr(res_params[base_name], "link_group", None)
+                                        if lg and lg in res_link_groups:
+                                            for linked_base in res_link_groups[lg]:
+                                                if linked_base != base_name and linked_base in res_params:
+                                                    res_params[linked_base].value = val
+                                    except Exception:
+                                        pass
+                            try:
+                                self.resolution_updated.emit()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
@@ -766,9 +839,9 @@ class FitterViewModel(QObject):
                                 full_params = spec.get_param_values()
                             else:
                                 # fall back to merging captured full_values with result
-                                full_params = dict(full_values)
+                                full_params = dict(model_full_values)
                                 try:
-                                    full_params.update(result or {})
+                                    full_params.update(model_result or {})
                                 except Exception:
                                     pass
 
