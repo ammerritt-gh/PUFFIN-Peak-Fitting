@@ -24,6 +24,7 @@ class ControlsDock(QDockWidget):
     file_selected = Signal(int)  # row number
     remove_file_clicked = Signal()
     clear_files_clicked = Signal()
+    resolution_clicked = Signal()  # Open resolution window
 
     def __init__(self, parent=None):
         """
@@ -46,6 +47,7 @@ class ControlsDock(QDockWidget):
         self.fit_btn = QPushButton("Run Fit")
         self.update_btn = QPushButton("Update Plot")
         self.config_btn = QPushButton("Edit Config")
+        self.resolution_btn = QPushButton("Resolution...")
 
         layout.addWidget(QLabel("Data Controls"))
         layout.addWidget(self.load_btn)
@@ -53,6 +55,7 @@ class ControlsDock(QDockWidget):
         layout.addWidget(self.fit_btn)
         layout.addWidget(self.config_btn)
         layout.addWidget(self.update_btn)
+        layout.addWidget(self.resolution_btn)
 
         # Exclude toggle (click to enable box/point exclusion)
         self.exclude_btn = QPushButton("Exclude")
@@ -87,6 +90,7 @@ class ControlsDock(QDockWidget):
         self.fit_btn.clicked.connect(self._on_fit_clicked)
         self.update_btn.clicked.connect(self._on_update_clicked)
         self.config_btn.clicked.connect(self._on_config_clicked)
+        self.resolution_btn.clicked.connect(self._on_resolution_clicked)
         self.exclude_btn.toggled.connect(self._on_exclude_toggled)
         self.include_all_btn.clicked.connect(self._on_include_all_clicked)
         self.file_list.currentRowChanged.connect(self._on_file_selected)
@@ -112,6 +116,10 @@ class ControlsDock(QDockWidget):
     def _on_config_clicked(self):
         """Handle config button click."""
         self.edit_config_clicked.emit()
+
+    def _on_resolution_clicked(self):
+        """Handle resolution button click."""
+        self.resolution_clicked.emit()
 
     def _on_exclude_toggled(self, checked):
         """Handle exclude button toggle."""

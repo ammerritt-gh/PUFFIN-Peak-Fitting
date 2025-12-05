@@ -145,11 +145,30 @@ def main():
                     # Try to load the saved fit for this file
                     try:
                         if has_fit_for_file(last):
-                            load_fit_for_file(model_state, last, apply_excluded=True)
-                            viewmodel.log_message.emit(f"Restored fit for: {os.path.basename(last)}")
+                            result = load_fit_for_file(model_state, last, apply_excluded=True)
+                            # Handle both old (bool) and new (tuple) return formats
+                            if isinstance(result, tuple):
+                                success, resolution_state = result
+                            else:
+                                success, resolution_state = result, None
+                            if success:
+                                viewmodel.log_message.emit(f"Restored fit for: {os.path.basename(last)}")
+                                # Restore resolution state if present
+                                if resolution_state:
+                                    try:
+                                        viewmodel.set_resolution_state(resolution_state)
+                                    except Exception:
+                                        pass
                         else:
                             # Fall back to default fit
-                            load_default_fit(model_state, apply_excluded=False)
+                            result = load_default_fit(model_state, apply_excluded=False)
+                            if isinstance(result, tuple):
+                                success, resolution_state = result
+                                if success and resolution_state:
+                                    try:
+                                        viewmodel.set_resolution_state(resolution_state)
+                                    except Exception:
+                                        pass
                     except Exception as fit_exc:
                         viewmodel.log_message.emit(f"Failed to restore fit for file '{os.path.basename(last)}': {fit_exc}")
                     # notify via viewmodel and update plot
@@ -192,8 +211,20 @@ def main():
                 # No queued files and no last_loaded_file - using default data
                 # Try to load the default fit to apply last used model/parameters
                 try:
-                    if load_default_fit(model_state, apply_excluded=False):
+                    result = load_default_fit(model_state, apply_excluded=False)
+                    # Handle both old (bool) and new (tuple) return formats
+                    if isinstance(result, tuple):
+                        success, resolution_state = result
+                    else:
+                        success, resolution_state = result, None
+                    if success:
                         viewmodel.log_message.emit("Loaded default fit for startup data.")
+                        # Restore resolution state if present
+                        if resolution_state:
+                            try:
+                                viewmodel.set_resolution_state(resolution_state)
+                            except Exception:
+                                pass
                         try:
                             viewmodel.parameters_updated.emit()
                         except Exception as e:

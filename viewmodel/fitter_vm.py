@@ -11,6 +11,11 @@ from dataio.data_saver import save_dataset
 import typing as _typing
 from .logging_helpers import log_exception, log_message
 
+# Constants for resolution convolution
+DEFAULT_RESOLUTION_RANGE = 20.0  # Range for resolution kernel evaluation (symmetric around 0)
+RESOLUTION_PREVIEW_RANGE = 5.0  # Range for preview plot display
+PREVIEW_VISIBLE_MARGIN = 2.0  # Visible margin beyond data range (smaller than calculation padding)
+
 
 class FitterViewModel(QObject):
     """
@@ -22,6 +27,7 @@ class FitterViewModel(QObject):
     log_message = Signal(str)
     parameters_updated = Signal()
     files_updated = Signal(object)                          # list of queued file metadata
+    resolution_updated = Signal()                           # emitted when resolution changes
 
 
     def __init__(self, model_state=None):
@@ -34,6 +40,10 @@ class FitterViewModel(QObject):
         self.curves: dict = {}
         self._last_blocked_drag = None  # tracks last drag ignored due to fixed params
         self._last_blocked_value_update = None
+        
+        # Resolution model state
+        self._resolution_model_name = "None"  # "None" means no resolution convolution
+        self._resolution_spec = None  # BaseModelSpec or None
         
         # Debounce timer for auto-saving fit state after parameter changes
         self._fit_save_timer = QTimer()
@@ -579,68 +589,109 @@ class FitterViewModel(QObject):
 
         # build initial parameter value map and separate free (optimised) parameters
         try:
-            full_values = {k: getattr(v, "value", None) for k, v in getattr(model_spec, "params", {}).items()}
+            model_params_map = getattr(model_spec, "params", {}) or {}
+            model_full_values = {k: getattr(v, "value", None) for k, v in model_params_map.items()}
             # Determine which parameters are free (not fixed)
-            free_keys = [k for k, v in getattr(model_spec, "params", {}).items() if not bool(getattr(v, "fixed", False))]
-            if not free_keys:
-                self._log_message("No free parameters to fit (all parameters are fixed).")
-                return
-
+            model_free_keys = [k for k, v in model_params_map.items() if not bool(getattr(v, "fixed", False))]
             # Build link_group mapping: for linked parameters, only fit one representative
-            link_groups = {}  # link_group -> [param_names]
-            link_representatives = {}  # param_name -> representative_name (for linked params)
+            model_link_groups = {}  # link_group -> [param_names]
+            model_link_representatives = {}  # param_name -> representative_name (for linked params)
             
-            for k in free_keys:
+            for k in model_free_keys:
                 try:
-                    lg = getattr(model_spec.params[k], "link_group", None)
+                    lg = getattr(model_params_map[k], "link_group", None)
                     if lg and lg > 0:
-                        if lg not in link_groups:
-                            link_groups[lg] = []
-                        link_groups[lg].append(k)
+                        model_link_groups.setdefault(lg, []).append(k)
                 except Exception:
                     pass
             
             # For each link group, choose the first parameter as the representative
-            for lg, param_names in link_groups.items():
+            for lg, param_names in model_link_groups.items():
                 if len(param_names) > 1:
                     representative = param_names[0]
                     for pname in param_names:
-                        link_representatives[pname] = representative
+                        model_link_representatives[pname] = representative
             
             # Build unique free parameter list (only one param per link group)
-            unique_free_keys = []
+            model_unique_free_keys = []
             seen_representatives = set()
-            for k in free_keys:
-                rep = link_representatives.get(k, k)
+            for k in model_free_keys:
+                rep = model_link_representatives.get(k, k)
                 if rep not in seen_representatives:
-                    unique_free_keys.append(rep)
+                    model_unique_free_keys.append(rep)
                     seen_representatives.add(rep)
             
-            if not unique_free_keys:
-                self._log_message("No free parameters to fit (all parameters are fixed or linked).")
-                return
+            if not model_unique_free_keys and not self.has_resolution():
+                self._log_message("No free model parameters to fit (all model parameters are fixed or linked).")
 
-            # initial values for unique free params
-            params = {k: full_values.get(k) for k in unique_free_keys}
-            # bounds for unique free params (ordered to match unique_free_keys)
-            lower = [getattr(model_spec.params[k], "min", None) if getattr(model_spec.params[k], "min", None) is not None else -np.inf for k in unique_free_keys]
-            upper = [getattr(model_spec.params[k], "max", None) if getattr(model_spec.params[k], "max", None) is not None else np.inf for k in unique_free_keys]
-            bounds = (lower, upper)
+            # bounds for unique free params (ordered to match model_unique_free_keys)
+            model_lower = [getattr(model_params_map[k], "min", None) if getattr(model_params_map[k], "min", None) is not None else -np.inf for k in model_unique_free_keys]
+            model_upper = [getattr(model_params_map[k], "max", None) if getattr(model_params_map[k], "max", None) is not None else np.inf for k in model_unique_free_keys]
         except Exception as e:
             log_exception("Failed to build parameter/bounds list", e, vm=self)
             return
 
-        # wrap evaluate(x, **params) into curve_fit-style f(x, *args)
-        param_keys = list(params.keys())
+        # Resolution parameter handling (optional)
+        res_spec = self._resolution_spec if self.has_resolution() else None
+        res_params_map = getattr(res_spec, "params", {}) or {}
+        res_name_map = {}  # prefixed name -> base name
+        res_full_values = {}
+        res_link_groups = {}
+        res_link_representatives = {}
+        res_unique_free_keys = []
+        res_lower = []
+        res_upper = []
+        if res_spec is not None:
+            try:
+                # Build prefixed names to avoid collisions with model parameters
+                res_full_values = {f"res__{k}": getattr(v, "value", None) for k, v in res_params_map.items()}
+                for base_name, param in res_params_map.items():
+                    prefixed = f"res__{base_name}"
+                    res_name_map[prefixed] = base_name
+                    if not bool(getattr(param, "fixed", False)):
+                        res_unique_free_keys.append(prefixed)
+                        lg = getattr(param, "link_group", None)
+                        if lg and lg > 0:
+                            res_link_groups.setdefault(lg, []).append(base_name)
+                # pick representatives per link group (prefixed)
+                for lg, names in res_link_groups.items():
+                    if len(names) > 1:
+                        rep_pref = f"res__{names[0]}"
+                        for n in names:
+                            res_link_representatives[f"res__{n}"] = rep_pref
+                res_lower = [getattr(res_params_map[res_name_map[k]], "min", None) if getattr(res_params_map[res_name_map[k]], "min", None) is not None else -np.inf for k in res_unique_free_keys]
+                res_upper = [getattr(res_params_map[res_name_map[k]], "max", None) if getattr(res_params_map[res_name_map[k]], "max", None) is not None else np.inf for k in res_unique_free_keys]
+            except Exception as e:
+                log_exception("Failed to build resolution parameter list", e, vm=self)
+                res_unique_free_keys = []
+                res_lower = []
+                res_upper = []
+
+        # Combine model + resolution parameters for fitting
+        param_keys = list(model_unique_free_keys) + list(res_unique_free_keys)
+        if not param_keys:
+            self._log_message("No free parameters to fit (model and resolution are fixed).")
+            return
+        combined_full_values = dict(model_full_values)
+        combined_full_values.update(res_full_values)
+        params = {k: combined_full_values.get(k) for k in param_keys}
+        bounds = (list(model_lower) + list(res_lower), list(model_upper) + list(res_upper))
+
+        # Capture resolution state for use inside wrapped_func
+        has_res = res_spec is not None
+        evaluate_with_res = self.evaluate_with_resolution if has_res else None
 
         def wrapped_func(xx, *args):
             # start from the full map (including fixed values) and overwrite free keys
-            p = dict(full_values)
+            p = dict(combined_full_values)
             try:
                 for k, val in zip(param_keys, args):
                     p[k] = val
                     # If this parameter is a representative for linked params, propagate value
-                    for orig_k, rep_k in link_representatives.items():
+                    for orig_k, rep_k in model_link_representatives.items():
+                        if rep_k == k:
+                            p[orig_k] = val
+                    for orig_k, rep_k in res_link_representatives.items():
                         if rep_k == k:
                             p[orig_k] = val
             except Exception:
@@ -648,11 +699,30 @@ class FitterViewModel(QObject):
             # IMPORTANT: some ModelSpec.evaluate implementations expect a single 'params' dict
             # as the second positional argument (evaluate(x, params)). Others accept **kwargs.
             # Pass the params dict positionally to support evaluate(x, params).
+            model_param_values = {k: p.get(k) for k in model_full_values.keys()}
             try:
-                return model_func(xx, p)
+                y_out = model_func(xx, model_param_values)
             except TypeError:
                 # fallback: try as kwargs (in case evaluate accepts keyword args)
-                return model_func(xx, **p)
+                y_out = model_func(xx, **model_param_values)
+            
+            # Apply resolution convolution if enabled
+            if has_res and evaluate_with_res is not None:
+                # Update resolution spec values with current params for this evaluation
+                try:
+                    res_spec_local = getattr(self, "_resolution_spec", None)
+                    if res_spec_local is not None and hasattr(res_spec_local, "params"):
+                        for pref_name, base_name in res_name_map.items():
+                            if pref_name in p and base_name in res_spec_local.params:
+                                res_spec_local.params[base_name].value = p[pref_name]
+                except Exception:
+                    pass
+                try:
+                    y_out = evaluate_with_res(xx, y_out)
+                except Exception:
+                    pass
+            
+            return y_out
 
         # lazy import of FitWorker to reduce module-time coupling
         try:
@@ -670,16 +740,20 @@ class FitterViewModel(QObject):
         # finished handler
         def on_finished(result, y_fit):
             try:
-                if result is not None:
+                combined_result = result or {}
+                model_result = {k: v for k, v in combined_result.items() if not (isinstance(k, str) and k.startswith("res__"))}
+                resolution_result = {res_name_map.get(k, k): v for k, v in combined_result.items() if isinstance(k, str) and k.startswith("res__")}
+
+                if combined_result:
                     # store fit result on state and update plot
-                    self.state.fit_result = result
+                    self.state.fit_result = model_result
 
                     # Apply fit result back into model_spec.params where possible so UI will reflect fitted values
                     # Also propagate values to linked parameters
                     try:
                         spec = getattr(self.state, "model_spec", None)
                         if spec is not None:
-                            for k, v in result.items():
+                            for k, v in model_result.items():
                                 try:
                                     if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
                                         spec.set_param_value(k, v)
@@ -687,7 +761,7 @@ class FitterViewModel(QObject):
                                         spec.params[k].value = v
                                     
                                     # Propagate to linked parameters
-                                    for orig_k, rep_k in link_representatives.items():
+                                    for orig_k, rep_k in model_link_representatives.items():
                                         if rep_k == k and orig_k != k:
                                             try:
                                                 if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
@@ -705,11 +779,11 @@ class FitterViewModel(QObject):
                     try:
                         mdl = getattr(self.state, "model", None)
                         if mdl is not None:
-                            for k, v in result.items():
+                            for k, v in model_result.items():
                                 try:
                                     setattr(mdl, k, v)
                                     # Propagate to linked parameters
-                                    for orig_k, rep_k in link_representatives.items():
+                                    for orig_k, rep_k in model_link_representatives.items():
                                         if rep_k == k and orig_k != k:
                                             try:
                                                 setattr(mdl, orig_k, v)
@@ -717,6 +791,28 @@ class FitterViewModel(QObject):
                                                 pass
                                 except Exception:
                                     pass
+                    except Exception:
+                        pass
+
+                    # Apply fitted resolution parameters back to the resolution spec
+                    try:
+                        if resolution_result and res_spec is not None:
+                            res_params = getattr(res_spec, "params", {}) or {}
+                            for base_name, val in resolution_result.items():
+                                if base_name in res_params:
+                                    try:
+                                        res_params[base_name].value = val
+                                        lg = getattr(res_params[base_name], "link_group", None)
+                                        if lg and lg in res_link_groups:
+                                            for linked_base in res_link_groups[lg]:
+                                                if linked_base != base_name and linked_base in res_params:
+                                                    res_params[linked_base].value = val
+                                    except Exception:
+                                        pass
+                            try:
+                                self.resolution_updated.emit()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
@@ -743,9 +839,9 @@ class FitterViewModel(QObject):
                                 full_params = spec.get_param_values()
                             else:
                                 # fall back to merging captured full_values with result
-                                full_params = dict(full_values)
+                                full_params = dict(model_full_values)
                                 try:
-                                    full_params.update(result or {})
+                                    full_params.update(model_result or {})
                                 except Exception:
                                     pass
 
@@ -874,6 +970,42 @@ class FitterViewModel(QObject):
                 fit_y = np.asarray(total, dtype=float)
                 preview_complete = False
 
+            # Apply resolution convolution if enabled
+            if self.has_resolution():
+                try:
+                    fit_y = self.evaluate_with_resolution(fit_x, fit_y)
+                    # Also apply to component displays
+                    for comp_data in components_for_view:
+                        comp_y = comp_data.get("y")
+                        comp_x = comp_data.get("x")
+                        if comp_y is not None and comp_x is not None:
+                            comp_data["y"] = self.evaluate_with_resolution(comp_x, comp_y)
+                    # Update total for data_y
+                    total = self.evaluate_with_resolution(x_arr, total)
+                    
+                    # Trim preview to visible range (data range + small margin)
+                    # to hide edge artifacts while keeping the plot focused on data
+                    data_min, data_max = float(np.min(x_arr)), float(np.max(x_arr))
+                    fit_x, fit_y = self._trim_to_visible_range(fit_x, fit_y, data_min, data_max)
+                    for comp_data in components_for_view:
+                        comp_x = comp_data.get("x")
+                        comp_y = comp_data.get("y")
+                        if comp_x is not None and comp_y is not None:
+                            comp_data["x"], comp_data["y"] = self._trim_to_visible_range(
+                                comp_x, comp_y, data_min, data_max
+                            )
+                except Exception as e:
+                    log_exception("Failed to apply resolution in update_plot", e, vm=self)
+
+            # Update curves_payload for components with trimmed data
+            for comp_data in components_for_view:
+                prefix = comp_data.get("prefix")
+                if prefix:
+                    curves_payload[f"component:{prefix}"] = (
+                        np.asarray(comp_data.get("x", np.array([])), dtype=float),
+                        np.asarray(comp_data.get("y", np.array([])), dtype=float),
+                    )
+            
             curves_payload["fit"] = (fit_x, fit_y)
             y_fit_payload = {
                 "total": {"x": fit_x, "y": fit_y, "data_y": total},
@@ -888,8 +1020,18 @@ class FitterViewModel(QObject):
                     y_fit = None
             if y_fit is not None:
                 arr = np.asarray(y_fit, dtype=float)
+                # Apply resolution convolution if enabled
+                if self.has_resolution():
+                    try:
+                        arr = self.evaluate_with_resolution(np.asarray(x, dtype=float), arr)
+                    except Exception as e:
+                        log_exception("Failed to apply resolution in update_plot (non-composite)", e, vm=self)
                 curves_payload["fit"] = (np.asarray(x, dtype=float), arr)
-            y_fit_payload = y_fit
+            # Determine fit payload: use convolved array if resolution is active, otherwise original
+            if self.has_resolution() and y_fit is not None:
+                y_fit_payload = arr
+            else:
+                y_fit_payload = y_fit
 
         self.curves = curves_payload
         errs = getattr(self.state, "errors", None)
@@ -897,7 +1039,11 @@ class FitterViewModel(QObject):
         self.plot_updated.emit(x, y, y_fit_payload, errs)
 
     def _build_preview_grid(self, x: np.ndarray) -> np.ndarray:
-        """Return a smoother grid for previewing fits/components."""
+        """Return a smoother grid for previewing fits/components.
+        
+        When resolution convolution is active, the grid is extended beyond the
+        data range to avoid edge artifacts in the convolution.
+        """
         try:
             x_arr = np.asarray(x, dtype=float)
         except Exception:
@@ -912,14 +1058,59 @@ class FitterViewModel(QObject):
         if not np.isfinite(span_min) or not np.isfinite(span_max) or span_max <= span_min:
             return x_arr
 
-        target_samples = max(400, min(8000, int(finite.size * 4)))
+        # Extend grid beyond data range if resolution is active to avoid edge effects
+        padding = 0.0
+        if self.has_resolution():
+            # Add padding equal to the resolution range on each side
+            padding = DEFAULT_RESOLUTION_RANGE
+        
+        extended_min = span_min - padding
+        extended_max = span_max + padding
+        
+        # Calculate target samples for the extended range
+        data_range = span_max - span_min
+        extended_range = extended_max - extended_min
+        base_samples = max(400, min(8000, int(finite.size * 4)))
+        
+        # Scale samples proportionally for extended range
+        if data_range > 0:
+            target_samples = int(base_samples * extended_range / data_range)
+            target_samples = max(base_samples, min(12000, target_samples))
+        else:
+            target_samples = base_samples
+        
         if target_samples <= finite.size:
             return x_arr
 
         try:
-            return np.linspace(span_min, span_max, target_samples)
+            return np.linspace(extended_min, extended_max, target_samples)
         except Exception:
             return x_arr
+
+    def _trim_to_visible_range(self, x_arr: np.ndarray, y_arr: np.ndarray, 
+                                data_min: float, data_max: float) -> _typing.Tuple[np.ndarray, np.ndarray]:
+        """Trim preview arrays to visible range (data range plus small margin).
+        
+        This hides edge artifacts from convolution while keeping previews
+        slightly larger than the data for visual appeal.
+        
+        Args:
+            x_arr: X values of preview
+            y_arr: Y values of preview
+            data_min: Minimum of original data range
+            data_max: Maximum of original data range
+            
+        Returns:
+            Tuple of (trimmed_x, trimmed_y)
+        """
+        try:
+            visible_min = data_min - PREVIEW_VISIBLE_MARGIN
+            visible_max = data_max + PREVIEW_VISIBLE_MARGIN
+            
+            mask = (x_arr >= visible_min) & (x_arr <= visible_max)
+            return x_arr[mask], y_arr[mask]
+        except Exception:
+            return x_arr, y_arr
 
     def compute_statistics(self, y_fit=None, n_params: int = 0) -> dict:
         """Compute common fit statistics (reduced chi-squared, Cash) for current state.
@@ -958,18 +1149,19 @@ class FitterViewModel(QObject):
             from dataio import save_default_fit, save_fit_for_file
 
             filepath = self._get_current_file_path()
+            resolution_state = self.get_resolution_state()
 
             if filepath:
                 # When working with a real data file, keep the default fit untouched
                 try:
-                    if save_fit_for_file(self.state, filepath):
+                    if save_fit_for_file(self.state, filepath, resolution_state):
                         self._log_message(f"Saved fit for: {os.path.basename(filepath)}")
                 except Exception as e:
                     self._log_message(f"Failed to save fit for file: {e}")
             else:
                 # Only update the default fit when no external file is active
                 try:
-                    if save_default_fit(self.state):
+                    if save_default_fit(self.state, resolution_state):
                         self._log_message("Saved default fit.")
                 except Exception as e:
                     self._log_message(f"Failed to save default fit: {e}")
@@ -1007,8 +1199,18 @@ class FitterViewModel(QObject):
             if not has_fit_for_file(filepath):
                 return False
 
-            if load_fit_for_file(self.state, filepath, apply_excluded=True):
+            result = load_fit_for_file(self.state, filepath, apply_excluded=True)
+            # Handle both old (bool) and new (tuple) return formats
+            if isinstance(result, tuple):
+                success, resolution_state = result
+            else:
+                success, resolution_state = result, None
+            
+            if success:
                 self._log_message(f"Restored fit for: {os.path.basename(filepath)}")
+                # Restore resolution state if present
+                if resolution_state:
+                    self.set_resolution_state(resolution_state)
                 return True
         except Exception as e:
             log_exception("Failed to load fit for file", e, vm=self)
@@ -1022,8 +1224,18 @@ class FitterViewModel(QObject):
         try:
             from dataio import load_default_fit
 
-            if load_default_fit(self.state, apply_excluded=False):
+            result = load_default_fit(self.state, apply_excluded=False)
+            # Handle both old (bool) and new (tuple) return formats
+            if isinstance(result, tuple):
+                success, resolution_state = result
+            else:
+                success, resolution_state = result, None
+            
+            if success:
                 self._log_message("Loaded default fit parameters.")
+                # Restore resolution state if present
+                if resolution_state:
+                    self.set_resolution_state(resolution_state)
                 return True
         except Exception as e:
             log_exception("Failed to load default fit", e, vm=self)
@@ -1934,3 +2146,320 @@ class FitterViewModel(QObject):
             self.log_message.emit(f"Peak center updated -> {val} ({target})")
         except Exception:
             pass
+
+    # --------------------------
+    # Resolution model management
+    # --------------------------
+    def set_resolution_model(self, model_name: str):
+        """Set the resolution model to use for convolution.
+        
+        Args:
+            model_name: Name of the model to use, or "None" for no resolution
+        """
+        try:
+            model_name = (model_name or "").strip()
+            if not model_name or model_name.lower() == "none":
+                self._resolution_model_name = "None"
+                self._resolution_spec = None
+                self._log_message("Resolution convolution disabled.")
+            else:
+                # Create a model spec for the resolution
+                spec = get_model_spec(model_name)
+                if spec is None:
+                    self._log_message(f"Failed to create resolution model: {model_name}")
+                    return
+                
+                # Initialize the resolution spec centered at 0 (since it's a kernel)
+                try:
+                    # Create a symmetric x range for initialization
+                    x_init = np.linspace(-10, 10, 100)
+                    y_init = np.ones_like(x_init)
+                    spec.initialize(x_init, y_init)
+                except Exception:
+                    pass
+                
+                # Set default center to 0 for resolution functions
+                try:
+                    if hasattr(spec, "params") and "Center" in spec.params:
+                        spec.params["Center"].value = 0.0
+                except Exception:
+                    pass
+                
+                self._resolution_model_name = model_name
+                self._resolution_spec = spec
+                self._log_message(f"Resolution model set to: {model_name}")
+            
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+            
+            # Schedule fit save when resolution model changes
+            try:
+                self._schedule_fit_save()
+            except Exception:
+                pass
+        except Exception as e:
+            log_exception(f"Failed to set resolution model '{model_name}'", e, vm=self)
+
+    def get_resolution_model_name(self) -> str:
+        """Get the current resolution model name."""
+        return self._resolution_model_name or "None"
+
+    def get_resolution_parameters(self) -> dict:
+        """Get the resolution model parameters for the UI.
+        
+        Returns:
+            Dict of parameter specs (same format as get_parameters())
+        """
+        if self._resolution_spec is None:
+            return {}
+        
+        try:
+            if hasattr(self._resolution_spec, "get_parameters"):
+                return self._resolution_spec.get_parameters()
+            elif hasattr(self._resolution_spec, "params"):
+                return {name: p.to_spec() for name, p in self._resolution_spec.params.items()}
+        except Exception as e:
+            log_exception("Failed to get resolution parameters", e, vm=self)
+        return {}
+
+    def apply_resolution_parameters(self, params: dict):
+        """Apply parameter updates to the resolution model.
+        
+        Args:
+            params: Dict mapping parameter names to values
+        """
+        if self._resolution_spec is None or not params:
+            return
+        
+        try:
+            fixed_suffix = "__fixed"
+            link_suffix = "__link"
+            
+            for k, v in params.items():
+                try:
+                    if isinstance(k, str) and k.endswith(fixed_suffix):
+                        base = k[: -len(fixed_suffix)]
+                        if base in self._resolution_spec.params:
+                            self._resolution_spec.params[base].fixed = bool(v)
+                    elif isinstance(k, str) and k.endswith(link_suffix):
+                        base = k[: -len(link_suffix)]
+                        if base in self._resolution_spec.params:
+                            try:
+                                self._resolution_spec.params[base].link_group = int(v) if v else None
+                            except Exception:
+                                self._resolution_spec.params[base].link_group = None
+                    else:
+                        if k in self._resolution_spec.params:
+                            self._resolution_spec.params[k].value = v
+                except Exception:
+                    pass
+            
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+            
+            # Schedule fit save when resolution parameters change
+            try:
+                self._schedule_fit_save()
+            except Exception:
+                pass
+        except Exception as e:
+            log_exception("Failed to apply resolution parameters", e, vm=self)
+
+    def get_resolution_preview(self) -> _typing.Tuple[np.ndarray, np.ndarray]:
+        """Get the resolution function preview data.
+        
+        Returns:
+            Tuple of (x_data, y_data) for the preview plot
+        """
+        if self._resolution_spec is None:
+            return np.array([]), np.array([])
+        
+        try:
+            # Create a symmetric grid centered at 0
+            x = np.linspace(-RESOLUTION_PREVIEW_RANGE, RESOLUTION_PREVIEW_RANGE, 200)
+            
+            # Evaluate the resolution function
+            if hasattr(self._resolution_spec, "evaluate"):
+                y = self._resolution_spec.evaluate(x)
+            else:
+                y = np.zeros_like(x)
+            
+            # Normalize so peak is at 1 for display
+            y_max = np.max(np.abs(y))
+            if y_max > 0:
+                y = y / y_max
+            
+            return x, y
+        except Exception as e:
+            log_exception("Failed to generate resolution preview", e, vm=self)
+            return np.array([]), np.array([])
+
+    def evaluate_with_resolution(self, x: np.ndarray, y_model: np.ndarray) -> np.ndarray:
+        """Apply resolution convolution to a model output.
+        
+        The convolution is performed on a uniform grid centered at 0 with proper
+        padding to avoid edge effects. The result is interpolated back to the
+        original x values. This approach matches `convolute_voigt_dho()`.
+        
+        Args:
+            x: X values (used to determine spacing for convolution)
+            y_model: Model output to convolve
+            
+        Returns:
+            Convolved model output, or original if no resolution set
+        """
+        if self._resolution_spec is None:
+            return y_model
+        
+        try:
+            from scipy.signal import fftconvolve
+            from scipy.interpolate import interp1d
+            
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y_model, dtype=float)
+            
+            if x_arr.size < 2 or y_arr.size != x_arr.size:
+                return y_model
+            
+            # Use a fixed step size for the uniform grid (like convolute_voigt_dho)
+            dx = 0.05
+            pad_range = DEFAULT_RESOLUTION_RANGE
+            
+            # Create a uniform grid centered at 0 that spans the data range plus padding
+            x_min, x_max = np.min(x_arr), np.max(x_arr)
+            x_span = max(abs(x_min), abs(x_max)) + pad_range
+            x_uniform = np.arange(-x_span, x_span, dx)
+            
+            # Interpolate the input signal onto the uniform grid
+            signal_interp = interp1d(x_arr, y_arr, kind='linear',
+                                     bounds_error=False, fill_value=0.0)
+            signal_uniform = signal_interp(x_uniform)
+            
+            # Evaluate the resolution function on the uniform grid (centered at 0)
+            try:
+                res_y = self._resolution_spec.evaluate(x_uniform)
+            except Exception:
+                return y_model
+            
+            # Normalize the resolution function (area = 1 for proper convolution)
+            area = np.trapz(res_y, x_uniform)
+            if abs(area) > 1e-12:
+                res_y = res_y / area
+            
+            # Perform convolution on the uniform grid
+            convolved = fftconvolve(signal_uniform, res_y, mode='same') * dx
+            
+            # Interpolate the convolved result back to original x values
+            result_interp = interp1d(x_uniform, convolved, kind='linear',
+                                     bounds_error=False, fill_value=0.0)
+            result = result_interp(x_arr)
+            
+            return result
+        except Exception as e:
+            log_exception("Failed to apply resolution convolution", e, vm=self)
+            return y_model
+
+    def has_resolution(self) -> bool:
+        """Check if a resolution model is active."""
+        return self._resolution_spec is not None
+
+    def get_resolution_state(self) -> _typing.Optional[dict]:
+        """Get the current resolution state for persistence.
+        
+        Returns:
+            Dict containing resolution model name and parameters, or None if no resolution
+        """
+        if self._resolution_spec is None or self._resolution_model_name == "None":
+            return None
+        
+        try:
+            params = {}
+            spec_params = getattr(self._resolution_spec, "params", {}) or {}
+            for name, param in spec_params.items():
+                try:
+                    lg = getattr(param, "link_group", None)
+                    params[name] = {
+                        "value": getattr(param, "value", None),
+                        "fixed": bool(getattr(param, "fixed", False)),
+                        "link_group": int(lg) if lg else None
+                    }
+                except Exception:
+                    params[name] = {"value": None, "fixed": False, "link_group": None}
+            
+            return {
+                "model_name": self._resolution_model_name,
+                "parameters": params
+            }
+        except Exception as e:
+            log_exception("Failed to get resolution state", e, vm=self)
+            return None
+
+    def set_resolution_state(self, state: _typing.Optional[dict]) -> bool:
+        """Restore resolution state from persistence.
+        
+        Args:
+            state: Dict containing resolution model name and parameters, or None to clear
+            
+        Returns:
+            True if state was applied successfully
+        """
+        if state is None:
+            self._resolution_model_name = "None"
+            self._resolution_spec = None
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+            return True
+        
+        try:
+            model_name = state.get("model_name", "None")
+            if not model_name or model_name == "None":
+                self._resolution_model_name = "None"
+                self._resolution_spec = None
+                try:
+                    self.resolution_updated.emit()
+                except Exception:
+                    pass
+                return True
+            
+            # Set the model (this creates the spec)
+            self.set_resolution_model(model_name)
+            
+            if self._resolution_spec is None:
+                return False
+            
+            # Apply saved parameters
+            params = state.get("parameters", {})
+            spec_params = getattr(self._resolution_spec, "params", {}) or {}
+            
+            for name, param_info in params.items():
+                if name in spec_params:
+                    try:
+                        # Apply value
+                        value = param_info.get("value")
+                        if value is not None:
+                            spec_params[name].value = value
+                        
+                        # Apply fixed state
+                        spec_params[name].fixed = bool(param_info.get("fixed", False))
+                        
+                        # Apply link group
+                        link_group = param_info.get("link_group")
+                        spec_params[name].link_group = int(link_group) if link_group else None
+                    except Exception:
+                        pass
+            
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+            
+            return True
+        except Exception as e:
+            log_exception("Failed to set resolution state", e, vm=self)
+            return False

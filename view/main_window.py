@@ -23,6 +23,7 @@ from view.docks.controls_dock import ControlsDock
 from view.docks.parameters_dock import ParametersDock
 from view.docks.elements_dock import ElementsDock
 from view.docks.log_dock import LogDock
+from view.docks.resolution_dock import ResolutionDock
 from models import CompositeModelSpec
 
 # -- color palette (change these) --
@@ -279,6 +280,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
+        # Create resolution dock (floating, initially hidden)
+        self.resolution_dock = ResolutionDock(self)
+        self.resolution_dock.hide()  # Start hidden; button reopens it
+        
         # Set up backward compatibility aliases for old attribute names
         self.left_dock = self.controls_dock
         self.right_dock = self.parameters_dock
@@ -355,6 +360,7 @@ class MainWindow(QMainWindow):
         
         self.controls_dock.edit_config_clicked.connect(self._on_edit_config_clicked)
         self.controls_dock.exclude_toggled.connect(self._on_exclude_toggled)
+        self.controls_dock.resolution_clicked.connect(self._on_resolution_clicked)
         
         try:
             if hasattr(self.viewmodel, "handle_action"):
@@ -401,6 +407,18 @@ class MainWindow(QMainWindow):
         self.elements_dock.element_add_clicked.connect(self._on_element_added_clicked)
         self.elements_dock.element_remove_clicked.connect(self._on_element_remove_clicked)
         self.elements_dock.element_rows_moved.connect(self._on_element_rows_moved)
+        
+        # Resolution dock signals
+        self.resolution_dock.resolution_model_changed.connect(self._on_resolution_model_changed)
+        self.resolution_dock.resolution_parameter_changed.connect(self._on_resolution_parameter_changed)
+        self.resolution_dock.resolution_apply_clicked.connect(self._on_resolution_apply_clicked)
+        
+        # Connect viewmodel resolution_updated to refresh resolution dock UI
+        try:
+            if hasattr(self.viewmodel, "resolution_updated"):
+                self.viewmodel.resolution_updated.connect(self._on_resolution_state_changed)
+        except Exception:
+            pass
         
         # Initial population
         try:
@@ -1700,6 +1718,109 @@ class MainWindow(QMainWindow):
                     self.append_log("Configuration save failed.")
             except Exception as e:
                 self.append_log(f"Error saving configuration: {e}")
+
+    # --------------------------
+    # Resolution dock handlers
+    # --------------------------
+    def _on_resolution_clicked(self):
+        """Open/show the resolution dock window."""
+        try:
+            if hasattr(self, "resolution_dock") and self.resolution_dock is not None:
+                self.resolution_dock.show()
+                self.resolution_dock.raise_()
+                self.resolution_dock.activateWindow()
+                self.append_log("Resolution settings window opened.")
+                
+                # Refresh parameters if viewmodel has resolution state
+                self._refresh_resolution_parameters()
+        except Exception as e:
+            self.append_log(f"Failed to open resolution window: {e}")
+
+    def _on_resolution_model_changed(self, model_name):
+        """Handle resolution model selection change."""
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "set_resolution_model"):
+                self.viewmodel.set_resolution_model(model_name)
+                self.append_log(f"Resolution model changed to: {model_name}")
+                self._refresh_resolution_parameters()
+                try:
+                    self.viewmodel.update_plot()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.append_log(f"Failed to change resolution model: {e}")
+
+    def _on_resolution_parameter_changed(self, name, value):
+        """Handle resolution parameter change."""
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "apply_resolution_parameters"):
+                self.viewmodel.apply_resolution_parameters({name: value})
+                # Update preview
+                self._update_resolution_preview()
+                # Update main plot immediately (like other parameters)
+                try:
+                    self.viewmodel.update_plot()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.append_log(f"Failed to update resolution parameter '{name}': {e}")
+
+    def _on_resolution_apply_clicked(self):
+        """Handle resolution apply button click."""
+        try:
+            if not self.viewmodel:
+                return
+            params = self.resolution_dock.get_parameter_values()
+            if hasattr(self.viewmodel, "apply_resolution_parameters"):
+                self.viewmodel.apply_resolution_parameters(params)
+                self.append_log("Resolution parameters applied.")
+                try:
+                    self.viewmodel.update_plot()
+                except Exception:
+                    pass
+        except Exception as e:
+            self.append_log(f"Failed to apply resolution parameters: {e}")
+
+    def _refresh_resolution_parameters(self):
+        """Refresh the resolution dock parameter form."""
+        try:
+            if not self.viewmodel or not hasattr(self, "resolution_dock"):
+                return
+            
+            if hasattr(self.viewmodel, "get_resolution_parameters"):
+                specs = self.viewmodel.get_resolution_parameters()
+                self.resolution_dock.populate_parameters(specs or {})
+                self._update_resolution_preview()
+        except Exception as e:
+            self.append_log(f"Failed to refresh resolution parameters: {e}")
+
+    def _update_resolution_preview(self):
+        """Update the resolution preview plot."""
+        try:
+            if not self.viewmodel or not hasattr(self, "resolution_dock"):
+                return
+            
+            if hasattr(self.viewmodel, "get_resolution_preview"):
+                x, y = self.viewmodel.get_resolution_preview()
+                if x is not None and y is not None:
+                    self.resolution_dock.update_preview(x, y)
+        except Exception:
+            pass
+
+    def _on_resolution_state_changed(self):
+        """Handle resolution state changes (e.g., from persistence restore)."""
+        try:
+            if not self.viewmodel or not hasattr(self, "resolution_dock"):
+                return
+            
+            # Update the model selector to match the current resolution model
+            model_name = self.viewmodel.get_resolution_model_name()
+            self.resolution_dock.set_model_selector(model_name)
+            
+            # Refresh parameters and preview
+            self._refresh_resolution_parameters()
+        except Exception as e:
+            self.append_log(f"Failed to update resolution dock state: {e}")
 
     def _on_curve_clicked(self, event, curve_id):
         """Handle mouse click on a curve."""
