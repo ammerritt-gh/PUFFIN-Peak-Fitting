@@ -15,12 +15,12 @@ from PySide6.QtWidgets import (
     QLineEdit, QHBoxLayout, QGroupBox, QProgressBar, QFrame
 )
 from PySide6.QtCore import Qt, Signal
-import math
 from functools import partial
 
 
 # Constants
-FLOAT_COMPARISON_TOLERANCE = 1e-9  # Tolerance for float equality comparisons
+# Threshold for considering a bound as "effectively unlimited"
+BOUNDS_UNLIMITED_THRESHOLD = 1e9
 
 
 class FitDock(QDockWidget):
@@ -253,7 +253,7 @@ class FitDock(QDockWidget):
                     min_edit = QLineEdit()
                     min_edit.setPlaceholderText("Min")
                     min_edit.setMaximumWidth(80)
-                    if current_min is not None and current_min > -1e9:
+                    if current_min is not None and current_min > -BOUNDS_UNLIMITED_THRESHOLD:
                         min_edit.setText(str(current_min))
                     min_edit.setToolTip(f"Minimum value for {name} (leave blank for no limit)")
                     
@@ -261,7 +261,7 @@ class FitDock(QDockWidget):
                     max_edit = QLineEdit()
                     max_edit.setPlaceholderText("Max")
                     max_edit.setMaximumWidth(80)
-                    if current_max is not None and current_max < 1e9:
+                    if current_max is not None and current_max < BOUNDS_UNLIMITED_THRESHOLD:
                         max_edit.setText(str(current_max))
                     max_edit.setToolTip(f"Maximum value for {name} (leave blank for no limit)")
 
@@ -371,12 +371,12 @@ class FitDock(QDockWidget):
             min_edit.blockSignals(True)
             max_edit.blockSignals(True)
             
-            if min_val is not None and min_val > -1e9:
+            if min_val is not None and min_val > -BOUNDS_UNLIMITED_THRESHOLD:
                 min_edit.setText(str(min_val))
             else:
                 min_edit.setText("")
             
-            if max_val is not None and max_val < 1e9:
+            if max_val is not None and max_val < BOUNDS_UNLIMITED_THRESHOLD:
                 max_edit.setText(str(max_val))
             else:
                 max_edit.setText("")

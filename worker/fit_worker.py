@@ -134,19 +134,22 @@ class IterativeFitWorker(QThread):
         """Perform iterative fitting in background."""
         try:
             current_params = self.p0.copy()
-            step = 0
             max_iter = self.max_steps if self.max_steps else 100
             
             self.progress.emit(0.0)
             
             # Use scipy.optimize.minimize with BFGS for iterative control
-            # We'll use a callback to emit updates after each step
+            # Track the last valid parameters from callbacks
             callback_step = [0]  # Use list to allow modification in nested function
+            last_valid_params = [current_params.copy()]  # Track last valid params
             
             def callback(xk):
                 """Called after each iteration."""
                 callback_step[0] += 1
                 step_num = callback_step[0]
+                
+                # Store the current parameters as the last valid ones
+                last_valid_params[0] = xk.copy()
                 
                 if self._stop:
                     raise StopIteration("Fitting stopped by user")
@@ -184,12 +187,8 @@ class IterativeFitWorker(QThread):
                 final_params = result.x
             except StopIteration:
                 # This is expected when max_steps is reached or user stops
-                # Get the current parameters from the last callback
-                final_params = current_params if callback_step[0] == 0 else None
-                if final_params is None:
-                    # Use the result from the last successful iteration
-                    # (We need to track this better, for now use current_params)
-                    final_params = current_params
+                # Use the last valid parameters from the callback
+                final_params = last_valid_params[0]
             
             # Compute final fit
             y_fit = self.model_func(self.x, *final_params)

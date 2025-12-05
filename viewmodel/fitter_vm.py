@@ -1074,9 +1074,15 @@ class FitterViewModel(QObject):
                     pass
                 return
             
-            # Build bounds
-            model_lower = [getattr(model_params_map[k], "min", None) if getattr(model_params_map[k], "min", None) is not None else -np.inf for k in model_free_keys]
-            model_upper = [getattr(model_params_map[k], "max", None) if getattr(model_params_map[k], "max", None) is not None else np.inf for k in model_free_keys]
+            # Build bounds - extract min/max values with proper None handling
+            model_lower = []
+            model_upper = []
+            for k in model_free_keys:
+                param = model_params_map[k]
+                min_val = getattr(param, "min", None)
+                max_val = getattr(param, "max", None)
+                model_lower.append(min_val if min_val is not None else -np.inf)
+                model_upper.append(max_val if max_val is not None else np.inf)
             
             params = {k: model_full_values.get(k) for k in model_free_keys}
             bounds = (model_lower, model_upper)
@@ -1161,7 +1167,7 @@ class FitterViewModel(QObject):
         # Connect finished
         def on_finished(result, y_fit):
             try:
-                if result:
+                if result is not None:
                     self.state.fit_result = result
                     # Apply final result
                     spec = getattr(self.state, "model_spec", None)
