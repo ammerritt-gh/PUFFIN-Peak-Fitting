@@ -443,6 +443,9 @@ class MainWindow(QMainWindow):
                 self.viewmodel.fit_finished.connect(self._on_fit_finished)
             if hasattr(self.viewmodel, "revert_available_changed"):
                 self.viewmodel.revert_available_changed.connect(self._on_revert_available_changed)
+            # Refresh fit bounds when parameters change (e.g., fixing/unfixing)
+            if hasattr(self.viewmodel, "parameters_updated"):
+                self.viewmodel.parameters_updated.connect(self._on_parameters_updated_for_fit_dock)
         except Exception:
             pass
         
@@ -1960,6 +1963,14 @@ class MainWindow(QMainWindow):
                 self.fit_dock.populate_bounds(specs)
         except Exception as e:
             self.append_log(f"Failed to refresh fit bounds: {e}")
+
+    def _on_parameters_updated_for_fit_dock(self):
+        """Refresh fit dock bounds when parameters change (e.g., fixing/unfixing)."""
+        try:
+            if hasattr(self, "fit_dock") and self.fit_dock.isVisible():
+                self._refresh_fit_bounds()
+        except Exception:
+            pass
 
     def _on_curve_clicked(self, event, curve_id):
         """Handle mouse click on a curve."""

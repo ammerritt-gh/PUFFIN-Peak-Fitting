@@ -1,8 +1,7 @@
 ﻿# worker/fit_worker.py
 from PySide6.QtCore import QThread, Signal
 import numpy as np
-from scipy.optimize import curve_fit, minimize
-import time
+from scipy.optimize import curve_fit, least_squares
 
 
 class FitWorker(QThread):
@@ -73,11 +72,18 @@ class FitWorker(QThread):
 
 
 class IterativeFitWorker(QThread):
-    """Fitting worker that supports iterative (step-by-step) fitting with live updates."""
+    """Fitting worker that supports iterative (step-by-step) fitting with live updates.
+    
+    Uses least_squares with limited max_nfev for predictable step-by-step behavior.
+    """
     
     progress = Signal(float)  # Progress 0.0 to 1.0
     step_completed = Signal(int, object, object)  # step_num, fit_result, y_fit
     finished = Signal(object, object)  # emits (fit_result, y_fit)
+
+    # Number of function evaluations per "step" - this controls how much work
+    # is done per iteration. Higher values = more progress per step.
+    EVALS_PER_STEP = 30
 
     def __init__(self, x, y, model_func, params, err=None, bounds=None, 
                  max_steps=None, step_mode=False):
@@ -112,87 +118,70 @@ class IterativeFitWorker(QThread):
         self.step_mode = step_mode
         self._stop = False
         
-        # Convert bounds to scipy minimize format
-        lower = bounds[0] if bounds else [-np.inf] * len(self.p0)
-        upper = bounds[1] if bounds else [np.inf] * len(self.p0)
-        self.scipy_bounds = list(zip(lower, upper))
+        # Store bounds in least_squares format (lower, upper)
+        self.bounds = bounds or (
+            [-np.inf] * len(self.p0),
+            [np.inf] * len(self.p0)
+        )
 
     def stop(self):
         """Request stop."""
         self._stop = True
 
-    def _chi_squared(self, params):
-        """Compute chi-squared for the current parameters."""
+    def _residuals(self, params):
+        """Compute residuals for least_squares optimization."""
         try:
             y_model = self.model_func(self.x, *params)
-            residuals = (self.y - y_model) / self.err
-            return np.sum(residuals ** 2)
+            return (self.y - y_model) / self.err
         except Exception:
-            return np.inf
+            return np.full_like(self.y, np.inf)
 
     def run(self):
-        """Perform iterative fitting in background."""
+        """Perform iterative fitting in background using least_squares with limited max_nfev."""
         try:
             current_params = self.p0.copy()
             max_iter = self.max_steps if self.max_steps else 100
             
             self.progress.emit(0.0)
             
-            # Use scipy.optimize.minimize with BFGS for iterative control
-            # Track the last valid parameters from callbacks
-            callback_step = [0]  # Use list to allow modification in nested function
-            last_valid_params = [current_params.copy()]  # Track last valid params
-            
-            def callback(xk):
-                """Called after each iteration."""
-                callback_step[0] += 1
-                step_num = callback_step[0]
-                
-                # Store the current parameters as the last valid ones
-                last_valid_params[0] = xk.copy()
-                
+            # Run least_squares iterations, each with limited function evaluations
+            for step in range(max_iter):
                 if self._stop:
-                    raise StopIteration("Fitting stopped by user")
+                    break
                 
+                # Use least_squares with limited max_nfev for each step
+                # This gives predictable step-by-step improvement and always returns
+                # the best parameters found so far
+                result = least_squares(
+                    self._residuals,
+                    current_params,
+                    bounds=self.bounds,
+                    max_nfev=self.EVALS_PER_STEP,
+                    verbose=0
+                )
+                
+                # Update current_params with the result (always makes progress)
+                current_params = result.x
+                
+                step_num = step + 1
                 progress = min(1.0, step_num / max_iter)
                 self.progress.emit(progress)
                 
                 if self.step_mode:
                     try:
-                        y_fit = self.model_func(self.x, *xk)
-                        fit_result = dict(zip(self.param_names, xk))
+                        y_fit = self.model_func(self.x, *current_params)
+                        fit_result = dict(zip(self.param_names, current_params))
                         self.step_completed.emit(step_num, fit_result, y_fit)
                     except Exception:
                         pass
                 
-                # Stop if we've reached max_steps
-                if self.max_steps and step_num >= self.max_steps:
-                    raise StopIteration("Max steps reached")
-            
-            try:
-                # Use L-BFGS-B for bounded optimization
-                result = minimize(
-                    self._chi_squared,
-                    current_params,
-                    method='L-BFGS-B',
-                    bounds=self.scipy_bounds,
-                    callback=callback,
-                    options={
-                        'maxiter': max_iter,
-                        'disp': False,
-                        'ftol': 1e-10,
-                        'gtol': 1e-8,
-                    }
-                )
-                final_params = result.x
-            except StopIteration:
-                # This is expected when max_steps is reached or user stops
-                # Use the last valid parameters from the callback
-                final_params = last_valid_params[0]
+                # Check if converged early
+                if result.success and result.optimality < 1e-8:
+                    break
             
             # Compute final fit
-            y_fit = self.model_func(self.x, *final_params)
-            fit_result = dict(zip(self.param_names, final_params))
+            y_fit = self.model_func(self.x, *current_params)
+            fit_result = dict(zip(self.param_names, current_params))
 
             self.progress.emit(1.0)
             self.finished.emit(fit_result, y_fit)

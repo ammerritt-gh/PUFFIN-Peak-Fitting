@@ -565,6 +565,12 @@ class FitterViewModel(QObject):
             self._log_message("A fit is already running.")
             return
 
+        # Emit fit_started signal so UI can disable buttons
+        try:
+            self.fit_started.emit()
+        except Exception:
+            pass
+
         # basic data checks
         # Use masked (included) data for fitting so excluded points are ignored
         try:
@@ -874,8 +880,19 @@ class FitterViewModel(QObject):
                         self._schedule_fit_save()
                     except Exception as e:
                         log_exception("Auto-save fit failed", e)
+                    
+                    # Emit fit_finished signal so UI can re-enable buttons
+                    try:
+                        self.fit_finished.emit(True)
+                    except Exception:
+                        pass
                 else:
                     self._log_message("Fit failed.")
+                    # Emit fit_finished signal even on failure so UI can re-enable buttons
+                    try:
+                        self.fit_finished.emit(False)
+                    except Exception:
+                        pass
             finally:
                 # always clear the worker reference
                 try:
@@ -1235,10 +1252,7 @@ class FitterViewModel(QObject):
         """
         # Use the original run_fit for completion, but store pre-fit state first
         self._store_pre_fit_state()
-        try:
-            self.fit_started.emit()
-        except Exception:
-            pass
+        # run_fit emits fit_started at the beginning and fit_finished in its worker callback
         self.run_fit()
 
     def set_parameter_bounds(self, name: str, min_val, max_val):
