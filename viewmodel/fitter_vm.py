@@ -1103,22 +1103,14 @@ class FitterViewModel(QObject):
             return
 
         try:
+            # Build model parameter maps
             model_params_map = getattr(model_spec, "params", {}) or {}
             model_full_values = {k: getattr(v, "value", None) for k, v in model_params_map.items()}
             model_free_keys = [k for k, v in model_params_map.items() if not bool(getattr(v, "fixed", False))]
-            
-            if not model_free_keys:
-                self._log_message("No free parameters to fit.")
-                try:
-                    self.fit_finished.emit(False)
-                except Exception:
-                    pass
-                return
-            
-            # Build link_group mapping: for linked parameters, only fit one representative
-            model_link_groups = {}  # link_group -> [param_names]
-            model_link_representatives = {}  # param_name -> representative_name (for linked params)
-            
+
+            # Link groups for model params
+            model_link_groups = {}
+            model_link_representatives = {}
             for k in model_free_keys:
                 try:
                     lg = getattr(model_params_map[k], "link_group", None)
@@ -1126,35 +1118,71 @@ class FitterViewModel(QObject):
                         model_link_groups.setdefault(lg, []).append(k)
                 except Exception:
                     pass
-            
-            # For each link group, choose the first parameter as the representative
-            for lg, param_names in model_link_groups.items():
-                if len(param_names) > 1:
-                    representative = param_names[0]
-                    for pname in param_names:
-                        model_link_representatives[pname] = representative
-            
-            # Build unique free parameter list (only one param per link group)
+            for lg, names in model_link_groups.items():
+                if len(names) > 1:
+                    rep = names[0]
+                    for n in names:
+                        model_link_representatives[n] = rep
+
             model_unique_free_keys = []
-            seen_representatives = set()
+            seen = set()
             for k in model_free_keys:
                 rep = model_link_representatives.get(k, k)
-                if rep not in seen_representatives:
+                if rep not in seen:
                     model_unique_free_keys.append(rep)
-                    seen_representatives.add(rep)
-            
-            # Build bounds - extract min/max values with proper None handling
-            model_lower = []
-            model_upper = []
-            for k in model_unique_free_keys:
-                param = model_params_map[k]
-                min_val = getattr(param, "min", None)
-                max_val = getattr(param, "max", None)
-                model_lower.append(min_val if min_val is not None else -np.inf)
-                model_upper.append(max_val if max_val is not None else np.inf)
-            
-            params = {k: model_full_values.get(k) for k in model_unique_free_keys}
-            bounds = (model_lower, model_upper)
+                    seen.add(rep)
+
+            model_lower = [getattr(model_params_map[k], "min", None) if getattr(model_params_map[k], "min", None) is not None else -np.inf for k in model_unique_free_keys]
+            model_upper = [getattr(model_params_map[k], "max", None) if getattr(model_params_map[k], "max", None) is not None else np.inf for k in model_unique_free_keys]
+
+            # Resolution parameters (optional)
+            res_spec = self._resolution_spec if self.has_resolution() else None
+            res_params_map = getattr(res_spec, "params", {}) or {}
+            res_name_map = {}
+            res_full_values = {}
+            res_link_groups = {}
+            res_link_representatives = {}
+            res_unique_free_keys = []
+            res_lower = []
+            res_upper = []
+            if res_spec is not None:
+                try:
+                    res_full_values = {f"res__{k}": getattr(v, "value", None) for k, v in res_params_map.items()}
+                    for base_name, param in res_params_map.items():
+                        pref = f"res__{base_name}"
+                        res_name_map[pref] = base_name
+                        if not bool(getattr(param, "fixed", False)):
+                            res_unique_free_keys.append(pref)
+                            lg = getattr(param, "link_group", None)
+                            if lg and lg > 0:
+                                res_link_groups.setdefault(lg, []).append(base_name)
+                    for lg, names in res_link_groups.items():
+                        if len(names) > 1:
+                            rep_pref = f"res__{names[0]}"
+                            for n in names:
+                                res_link_representatives[f"res__{n}"] = rep_pref
+                    res_lower = [getattr(res_params_map[res_name_map[k]], "min", None) if getattr(res_params_map[res_name_map[k]], "min", None) is not None else -np.inf for k in res_unique_free_keys]
+                    res_upper = [getattr(res_params_map[res_name_map[k]], "max", None) if getattr(res_params_map[res_name_map[k]], "max", None) is not None else np.inf for k in res_unique_free_keys]
+                except Exception as e:
+                    log_exception("Failed to build resolution parameter list", e, vm=self)
+                    res_unique_free_keys = []
+                    res_lower = []
+                    res_upper = []
+
+            # Combine model + resolution free keys
+            param_keys = list(model_unique_free_keys) + list(res_unique_free_keys)
+            if not param_keys:
+                self._log_message("No free parameters to fit.")
+                try:
+                    self.fit_finished.emit(False)
+                except Exception:
+                    pass
+                return
+
+            combined_full_values = dict(model_full_values)
+            combined_full_values.update(res_full_values)
+            params = {k: combined_full_values.get(k) for k in param_keys}
+            bounds = (list(model_lower) + list(res_lower), list(model_upper) + list(res_upper))
         except Exception as e:
             log_exception("Failed to build parameter list", e, vm=self)
             try:
@@ -1163,32 +1191,55 @@ class FitterViewModel(QObject):
                 pass
             return
 
-        # Create wrapped function that handles linked parameters
+        # Create wrapped function that maps positional args into the combined
+        # parameter map and evaluates model (+ resolution convolution if active)
         has_res = self.has_resolution()
-        
+
         def wrapped_func(xx, *args):
-            p = dict(model_full_values)
+            p = dict(combined_full_values)
             try:
-                # Set values for unique params
-                for k, val in zip(model_unique_free_keys, args):
+                for k, val in zip(param_keys, args):
                     p[k] = val
-                # Propagate values to linked params
+                # propagate model-linked representatives
                 for linked_param, representative in model_link_representatives.items():
                     if linked_param != representative and representative in p:
                         p[linked_param] = p[representative]
+                # propagate resolution-linked representatives
+                for linked_pref, rep_pref in res_link_representatives.items():
+                    if linked_pref != rep_pref and rep_pref in p:
+                        p[linked_pref] = p[rep_pref]
             except Exception:
                 pass
+
+            # Build model-only param dict to pass to evaluate(x, params)
+            model_param_values = {k: p.get(k) for k in model_full_values.keys()}
             try:
-                y_out = model_func(xx, p)
+                y_out = model_func(xx, model_param_values)
             except TypeError:
-                y_out = model_func(xx, **p)
-            
+                try:
+                    y_out = model_func(xx, **model_param_values)
+                except Exception:
+                    y_out = np.zeros_like(xx)
+
+            # Update resolution spec with current trial params before convolution
             if has_res:
+                try:
+                    res_spec_local = getattr(self, "_resolution_spec", None)
+                    if res_spec_local is not None and hasattr(res_spec_local, "params"):
+                        for pref_name, base_name in res_name_map.items():
+                            if pref_name in p and base_name in res_spec_local.params:
+                                try:
+                                    res_spec_local.params[base_name].value = p[pref_name]
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
                 try:
                     y_out = self.evaluate_with_resolution(xx, y_out)
                 except Exception:
                     pass
-            
+
             return y_out
 
         # Import iterative worker
@@ -1227,24 +1278,84 @@ class FitterViewModel(QObject):
                     # Log chi-squared for user feedback
                     if chi_squared is not None:
                         self._log_message(f"Step {step_num}: χ² = {chi_squared:.4g}")
-                    # Update parameters temporarily for preview
+
+                    # Separate model vs resolution results (resolution keys start with 'res__')
+                    combined_result = result or {}
+                    model_result = {k: v for k, v in combined_result.items() if not (isinstance(k, str) and k.startswith("res__"))}
+                    resolution_result = {res_name_map.get(k, k): v for k, v in combined_result.items() if isinstance(k, str) and k.startswith("res__")}
+
+                    # Update model spec parameters for preview
                     spec = getattr(self.state, "model_spec", None)
                     if spec is not None:
-                        # Apply to fitted params
-                        for k, v in result.items():
+                        is_comp = isinstance(spec, CompositeModelSpec)
+                        for k, v in model_result.items():
                             try:
-                                if k in spec.params:
-                                    spec.params[k].value = v
+                                if is_comp and hasattr(spec, "set_param_value"):
+                                    try:
+                                        spec.set_param_value(k, v)
+                                    except Exception:
+                                        if k in getattr(spec, "params", {}):
+                                            spec.params[k].value = v
+                                else:
+                                    if k in getattr(spec, "params", {}):
+                                        spec.params[k].value = v
                             except Exception:
                                 pass
-                        # Propagate to linked params
-                        for linked_param, representative in model_link_representatives.items():
-                            if linked_param != representative and representative in result:
-                                try:
-                                    if linked_param in spec.params:
-                                        spec.params[linked_param].value = result[representative]
-                                except Exception:
-                                    pass
+
+                    # Also update concrete model attributes so evaluate() sees the temporary change
+                    mdl = getattr(self.state, "model", None)
+                    if mdl is not None:
+                        for k, v in model_result.items():
+                            try:
+                                setattr(mdl, k, v)
+                            except Exception:
+                                pass
+
+                    # Propagate linked model params
+                    for linked_param, representative in model_link_representatives.items():
+                        if linked_param != representative and representative in model_result:
+                            try:
+                                val = model_result[representative]
+                                if spec is not None:
+                                    if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                        try:
+                                            spec.set_param_value(linked_param, val)
+                                        except Exception:
+                                            if linked_param in getattr(spec, "params", {}):
+                                                spec.params[linked_param].value = val
+                                    else:
+                                        if linked_param in getattr(spec, "params", {}):
+                                            spec.params[linked_param].value = val
+                                if mdl is not None:
+                                    try:
+                                        setattr(mdl, linked_param, val)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                    # Apply resolution preview updates to resolution spec
+                    try:
+                        if resolution_result and res_spec is not None:
+                            res_params = getattr(res_spec, "params", {}) or {}
+                            for base_name, val in resolution_result.items():
+                                if base_name in res_params:
+                                    try:
+                                        res_params[base_name].value = val
+                                        lg = getattr(res_params[base_name], "link_group", None)
+                                        if lg and lg in res_link_groups:
+                                            for linked_base in res_link_groups[lg]:
+                                                if linked_base != base_name and linked_base in res_params:
+                                                    res_params[linked_base].value = val
+                                    except Exception:
+                                        pass
+                            try:
+                                self.resolution_updated.emit()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
                     # Update plot
                     try:
                         self.update_plot()
@@ -1252,7 +1363,7 @@ class FitterViewModel(QObject):
                         pass
                 except Exception as e:
                     log_exception("Error in step completed handler", e, vm=self)
-            
+
             worker.step_completed.connect(on_step_completed)
 
         # Connect finished
@@ -1342,10 +1453,27 @@ class FitterViewModel(QObject):
         Args:
             live_preview: If True, update plot during fitting
         """
-        # Use the original run_fit for completion, but store pre-fit state first
+        # Store pre-fit state first
         self._store_pre_fit_state()
-        # run_fit emits fit_started at the beginning and fit_finished in its worker callback
-        self.run_fit()
+
+        # If live preview is requested, prefer the iterative worker so each step
+        # can be emitted and the GUI updated. Otherwise fall back to the fast
+        # non-iterative `run_fit` implementation.
+        if live_preview:
+            try:
+                # Choose a reasonably large max steps; the IterativeFitWorker will
+                # stop early on convergence. This keeps the behavior responsive.
+                max_steps = 1000
+                self.run_fit_steps(num_steps=max_steps, live_preview=True)
+            except Exception:
+                # Fallback to original behavior on error
+                try:
+                    self.run_fit()
+                except Exception:
+                    pass
+        else:
+            # run_fit emits fit_started and fit_finished in its worker callback
+            self.run_fit()
 
     def set_parameter_bounds(self, name: str, min_val, max_val):
         """Set min/max bounds for a parameter.

@@ -96,6 +96,12 @@ class IterativeFitWorker(QThread):
     # Tolerance for chi^2 comparison when rejecting worse fits
     # Steps where chi^2 increases by more than this fraction are rejected
     CHI2_TOLERANCE = 0.001  # 0.1%
+    # If chi^2 stops improving by more than this relative tolerance for
+    # several consecutive steps, treat as stalled and stop early.
+    CHI2_STALL_TOL = 1e-6
+    STALL_ITERS = 3
+    # Small parameter-change threshold to detect parameter stagnation
+    PARAM_STALL_TOL = 1e-8
 
     def __init__(self, x, y, model_func, params, err=None, bounds=None, 
                  max_steps=None, step_mode=False, reject_worse_chi2=True):
@@ -197,6 +203,7 @@ class IterativeFitWorker(QThread):
             best_params = current_params.copy()
             
             # Run least_squares iterations, each with minimal function evaluations
+            stall_count = 0
             for step in range(max_iter):
                 if self._stop:
                     break
@@ -213,7 +220,13 @@ class IterativeFitWorker(QThread):
                     
                     new_params = result.x
                     new_chi2 = self._compute_chi_squared(new_params)
-                    
+                    # Check if fit improved or if we should reject worse fits
+                    # Compute parameter change magnitude (before accepting)
+                    try:
+                        param_change = float(np.linalg.norm(new_params - current_params))
+                    except Exception:
+                        param_change = float(np.linalg.norm(new_params - current_params + 0.0)) if hasattr(new_params, '__array__') else 0.0
+
                     # Check if fit improved or if we should reject worse fits
                     if self.reject_worse_chi2 and new_chi2 > best_chi2 * (1.0 + self.CHI2_TOLERANCE):
                         # Reject this step - chi^2 got worse
@@ -221,10 +234,22 @@ class IterativeFitWorker(QThread):
                         current_params = best_params.copy()
                     else:
                         # Accept this step
+                        prev_best = best_chi2
                         current_params = new_params
                         if new_chi2 < best_chi2:
                             best_chi2 = new_chi2
                             best_params = new_params.copy()
+
+                        # Detect stall: tiny chi2 improvement and tiny parameter change
+                        rel_improve = abs(prev_best - best_chi2) / (abs(prev_best) + 1e-30)
+                        if rel_improve < self.CHI2_STALL_TOL and param_change < self.PARAM_STALL_TOL:
+                            stall_count += 1
+                        else:
+                            stall_count = 0
+
+                        if stall_count >= self.STALL_ITERS:
+                            # Consider converged/stalled; break early
+                            break
                     
                 except ValueError as e:
                     # Handle infeasible bounds gracefully

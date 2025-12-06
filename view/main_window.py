@@ -1877,7 +1877,13 @@ class MainWindow(QMainWindow):
         """Handle fit one step request."""
         try:
             if self.viewmodel and hasattr(self.viewmodel, "run_fit_steps"):
-                self.viewmodel.run_fit_steps(num_steps=1, live_preview=True)
+                live = True
+                try:
+                    if hasattr(self, "fit_dock"):
+                        live = self.fit_dock.is_live_preview_enabled()
+                except Exception:
+                    live = True
+                self.viewmodel.run_fit_steps(num_steps=1, live_preview=live)
         except Exception as e:
             self.append_log(f"Failed to run fit step: {e}")
 
@@ -1885,7 +1891,13 @@ class MainWindow(QMainWindow):
         """Handle fit N steps request."""
         try:
             if self.viewmodel and hasattr(self.viewmodel, "run_fit_steps"):
-                self.viewmodel.run_fit_steps(num_steps=n, live_preview=True)
+                live = True
+                try:
+                    if hasattr(self, "fit_dock"):
+                        live = self.fit_dock.is_live_preview_enabled()
+                except Exception:
+                    live = True
+                self.viewmodel.run_fit_steps(num_steps=n, live_preview=live)
         except Exception as e:
             self.append_log(f"Failed to run {n} fit steps: {e}")
 
@@ -1893,7 +1905,13 @@ class MainWindow(QMainWindow):
         """Handle fit to completion request."""
         try:
             if self.viewmodel and hasattr(self.viewmodel, "run_fit_to_completion"):
-                self.viewmodel.run_fit_to_completion(live_preview=True)
+                live = True
+                try:
+                    if hasattr(self, "fit_dock"):
+                        live = self.fit_dock.is_live_preview_enabled()
+                except Exception:
+                    live = True
+                self.viewmodel.run_fit_to_completion(live_preview=live)
             elif self.viewmodel and hasattr(self.viewmodel, "run_fit"):
                 # Fallback to regular fit
                 self.viewmodel.run_fit()

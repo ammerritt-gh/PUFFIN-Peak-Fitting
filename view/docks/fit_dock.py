@@ -66,6 +66,12 @@ class FitDock(QDockWidget):
         fit_layout = QVBoxLayout(fit_group)
         fit_layout.setSpacing(8)
 
+        # Live preview toggle
+        self.live_preview_chk = QCheckBox("Live Preview (show each step)")
+        self.live_preview_chk.setChecked(True)
+        self.live_preview_chk.setToolTip("When enabled, show the model update after each fit step")
+        fit_layout.addWidget(self.live_preview_chk)
+
         # Fit one step button
         self.fit_one_step_btn = QPushButton("Fit One Step")
         self.fit_one_step_btn.setToolTip("Run one iteration of the fitting process")
@@ -209,6 +215,13 @@ class FitDock(QDockWidget):
         else:
             self.revert_status_label.setText("No previous fit to revert to")
             self.revert_status_label.setStyleSheet("color: gray; font-style: italic;")
+
+    def is_live_preview_enabled(self) -> bool:
+        """Return whether live preview is enabled in the Fit dock."""
+        try:
+            return bool(self.live_preview_chk.isChecked())
+        except Exception:
+            return True
 
     def populate_bounds(self, param_specs: dict):
         """
