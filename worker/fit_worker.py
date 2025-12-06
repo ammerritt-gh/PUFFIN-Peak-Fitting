@@ -91,7 +91,7 @@ class IterativeFitWorker(QThread):
     
     # Maximum number of function evaluations per step
     # 5 gives roughly one trust-region iteration for most problems
-    EVALS_PER_STEP = 5
+    EVALS_PER_STEP = 2
     
     # Tolerance for chi^2 comparison when rejecting worse fits
     # Steps where chi^2 increases by more than this fraction are rejected

@@ -565,6 +565,12 @@ class FitterViewModel(QObject):
             self._log_message("A fit is already running.")
             return
 
+        # Store pre-fit state so Run Fit behaves like Fit Dock and can be reverted
+        try:
+            self._store_pre_fit_state()
+        except Exception:
+            pass
+
         # Emit fit_started signal so UI can disable buttons
         try:
             self.fit_started.emit()
