@@ -10,8 +10,8 @@ This dock provides controls for fitting with options like:
 """
 
 from PySide6.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QPushButton, QLabel, QComboBox,
-    QFormLayout, QDoubleSpinBox, QScrollArea, QSpinBox, QCheckBox,
+    QDockWidget, QWidget, QVBoxLayout, QPushButton, QLabel,
+    QFormLayout, QScrollArea, QSpinBox, QCheckBox,
     QLineEdit, QHBoxLayout, QGroupBox, QProgressBar, QFrame
 )
 from PySide6.QtCore import Qt, Signal

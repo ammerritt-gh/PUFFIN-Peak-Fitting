@@ -220,12 +220,12 @@ class IterativeFitWorker(QThread):
                     
                     new_params = result.x
                     new_chi2 = self._compute_chi_squared(new_params)
-                    # Check if fit improved or if we should reject worse fits
+
                     # Compute parameter change magnitude (before accepting)
                     try:
                         param_change = float(np.linalg.norm(new_params - current_params))
                     except Exception:
-                        param_change = float(np.linalg.norm(new_params - current_params + 0.0)) if hasattr(new_params, '__array__') else 0.0
+                        param_change = 0.0
 
                     # Check if fit improved or if we should reject worse fits
                     if self.reject_worse_chi2 and new_chi2 > best_chi2 * (1.0 + self.CHI2_TOLERANCE):
