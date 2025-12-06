@@ -25,6 +25,7 @@ class ControlsDock(QDockWidget):
     remove_file_clicked = Signal()
     clear_files_clicked = Signal()
     resolution_clicked = Signal()  # Open resolution window
+    fit_settings_clicked = Signal()  # Open fit settings window
 
     def __init__(self, parent=None):
         """
@@ -45,6 +46,7 @@ class ControlsDock(QDockWidget):
         self.load_btn = QPushButton("Load Data")
         self.save_btn = QPushButton("Save Data")
         self.fit_btn = QPushButton("Run Fit")
+        self.fit_settings_btn = QPushButton("Fit Settings...")
         self.update_btn = QPushButton("Update Plot")
         self.config_btn = QPushButton("Edit Config")
         self.resolution_btn = QPushButton("Resolution...")
@@ -53,6 +55,7 @@ class ControlsDock(QDockWidget):
         layout.addWidget(self.load_btn)
         layout.addWidget(self.save_btn)
         layout.addWidget(self.fit_btn)
+        layout.addWidget(self.fit_settings_btn)
         layout.addWidget(self.config_btn)
         layout.addWidget(self.update_btn)
         layout.addWidget(self.resolution_btn)
@@ -88,6 +91,7 @@ class ControlsDock(QDockWidget):
         self.load_btn.clicked.connect(self._on_load_clicked)
         self.save_btn.clicked.connect(self._on_save_clicked)
         self.fit_btn.clicked.connect(self._on_fit_clicked)
+        self.fit_settings_btn.clicked.connect(self._on_fit_settings_clicked)
         self.update_btn.clicked.connect(self._on_update_clicked)
         self.config_btn.clicked.connect(self._on_config_clicked)
         self.resolution_btn.clicked.connect(self._on_resolution_clicked)
@@ -120,6 +124,10 @@ class ControlsDock(QDockWidget):
     def _on_resolution_clicked(self):
         """Handle resolution button click."""
         self.resolution_clicked.emit()
+
+    def _on_fit_settings_clicked(self):
+        """Handle fit settings button click."""
+        self.fit_settings_clicked.emit()
 
     def _on_exclude_toggled(self, checked):
         """Handle exclude button toggle."""

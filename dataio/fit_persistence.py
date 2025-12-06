@@ -151,16 +151,22 @@ def _extract_fit_state(model_state, resolution_state: Optional[Dict[str, Any]] =
                             base_name = name[len(comp.prefix):]
                             try:
                                 lg = getattr(param, "link_group", None)
+                                min_val = getattr(param, "min", None)
+                                max_val = getattr(param, "max", None)
                                 element["parameters"][base_name] = {
                                     "value": getattr(param, "value", None),
                                     "fixed": bool(getattr(param, "fixed", False)),
-                                    "link_group": int(lg) if lg else None
+                                    "link_group": int(lg) if lg else None,
+                                    "min": float(min_val) if min_val is not None else None,
+                                    "max": float(max_val) if max_val is not None else None,
                                 }
                             except Exception:
                                 element["parameters"][base_name] = {
                                     "value": None,
                                     "fixed": False,
-                                    "link_group": None
+                                    "link_group": None,
+                                    "min": None,
+                                    "max": None,
                                 }
                     
                     elements.append(element)
@@ -179,16 +185,22 @@ def _extract_fit_state(model_state, resolution_state: Optional[Dict[str, Any]] =
             for name, param in spec_params.items():
                 try:
                     lg = getattr(param, "link_group", None)
+                    min_val = getattr(param, "min", None)
+                    max_val = getattr(param, "max", None)
                     element["parameters"][name] = {
                         "value": getattr(param, "value", None),
                         "fixed": bool(getattr(param, "fixed", False)),
-                        "link_group": int(lg) if lg else None
+                        "link_group": int(lg) if lg else None,
+                        "min": float(min_val) if min_val is not None else None,
+                        "max": float(max_val) if max_val is not None else None,
                     }
                 except Exception:
                     element["parameters"][name] = {
                         "value": None,
                         "fixed": False,
-                        "link_group": None
+                        "link_group": None,
+                        "min": None,
+                        "max": None,
                     }
             
             if element["parameters"]:
@@ -369,6 +381,22 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                     except Exception:
                         pass
                     _update_component_attr(full_name, "link_group", link_value)
+                    
+                    # Apply bounds (min/max)
+                    min_val = param_info.get("min")
+                    max_val = param_info.get("max")
+                    if min_val is not None:
+                        try:
+                            spec_params[full_name].min = float(min_val)
+                        except Exception:
+                            pass
+                        _update_component_attr(full_name, "min", float(min_val))
+                    if max_val is not None:
+                        try:
+                            spec_params[full_name].max = float(max_val)
+                        except Exception:
+                            pass
+                        _update_component_attr(full_name, "max", float(max_val))
 
         # Apply fit_result
         fit_result = fit_data.get("fit_result")

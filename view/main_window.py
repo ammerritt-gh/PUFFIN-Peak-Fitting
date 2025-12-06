@@ -24,6 +24,7 @@ from view.docks.parameters_dock import ParametersDock
 from view.docks.elements_dock import ElementsDock
 from view.docks.log_dock import LogDock
 from view.docks.resolution_dock import ResolutionDock
+from view.docks.fit_dock import FitDock
 from models import CompositeModelSpec
 
 # -- color palette (change these) --
@@ -284,6 +285,10 @@ class MainWindow(QMainWindow):
         self.resolution_dock = ResolutionDock(self)
         self.resolution_dock.hide()  # Start hidden; button reopens it
         
+        # Create fit dock (floating, initially hidden)
+        self.fit_dock = FitDock(self)
+        self.fit_dock.hide()  # Start hidden; button reopens it
+        
         # Set up backward compatibility aliases for old attribute names
         self.left_dock = self.controls_dock
         self.right_dock = self.parameters_dock
@@ -361,6 +366,7 @@ class MainWindow(QMainWindow):
         self.controls_dock.edit_config_clicked.connect(self._on_edit_config_clicked)
         self.controls_dock.exclude_toggled.connect(self._on_exclude_toggled)
         self.controls_dock.resolution_clicked.connect(self._on_resolution_clicked)
+        self.controls_dock.fit_settings_clicked.connect(self._on_fit_settings_clicked)
         
         try:
             if hasattr(self.viewmodel, "handle_action"):
@@ -417,6 +423,29 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self.viewmodel, "resolution_updated"):
                 self.viewmodel.resolution_updated.connect(self._on_resolution_state_changed)
+        except Exception:
+            pass
+        
+        # Fit dock signals
+        self.fit_dock.fit_one_step_clicked.connect(self._on_fit_one_step)
+        self.fit_dock.fit_n_steps_clicked.connect(self._on_fit_n_steps)
+        self.fit_dock.fit_to_completion_clicked.connect(self._on_fit_to_completion)
+        self.fit_dock.revert_clicked.connect(self._on_fit_revert)
+        self.fit_dock.bounds_changed.connect(self._on_bounds_changed)
+        
+        # Connect viewmodel fit signals to fit dock
+        try:
+            if hasattr(self.viewmodel, "fit_progress"):
+                self.viewmodel.fit_progress.connect(self._on_fit_progress)
+            if hasattr(self.viewmodel, "fit_started"):
+                self.viewmodel.fit_started.connect(self._on_fit_started)
+            if hasattr(self.viewmodel, "fit_finished"):
+                self.viewmodel.fit_finished.connect(self._on_fit_finished)
+            if hasattr(self.viewmodel, "revert_available_changed"):
+                self.viewmodel.revert_available_changed.connect(self._on_revert_available_changed)
+            # Refresh fit bounds when parameters change (e.g., fixing/unfixing)
+            if hasattr(self.viewmodel, "parameters_updated"):
+                self.viewmodel.parameters_updated.connect(self._on_parameters_updated_for_fit_dock)
         except Exception:
             pass
         
@@ -1821,6 +1850,148 @@ class MainWindow(QMainWindow):
             self._refresh_resolution_parameters()
         except Exception as e:
             self.append_log(f"Failed to update resolution dock state: {e}")
+
+    # --------------------------
+    # Fit dock handlers
+    # --------------------------
+    def _on_fit_settings_clicked(self):
+        """Open/show the fit settings dock window."""
+        try:
+            if hasattr(self, "fit_dock") and self.fit_dock is not None:
+                self.fit_dock.show()
+                self.fit_dock.raise_()
+                self.fit_dock.activateWindow()
+                self.append_log("Fit settings window opened.")
+                
+                # Refresh bounds parameters
+                self._refresh_fit_bounds()
+                
+                # Update revert state
+                if self.viewmodel and hasattr(self.viewmodel, "has_revert_state"):
+                    has_revert = self.viewmodel.has_revert_state()
+                    self.fit_dock.set_revert_available(has_revert)
+        except Exception as e:
+            self.append_log(f"Failed to open fit settings window: {e}")
+
+    def _on_fit_one_step(self):
+        """Handle fit one step request."""
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "run_fit_steps"):
+                live = True
+                try:
+                    if hasattr(self, "fit_dock"):
+                        live = self.fit_dock.is_live_preview_enabled()
+                except Exception:
+                    live = True
+                self.viewmodel.run_fit_steps(num_steps=1, live_preview=live)
+        except Exception as e:
+            self.append_log(f"Failed to run fit step: {e}")
+
+    def _on_fit_n_steps(self, n):
+        """Handle fit N steps request."""
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "run_fit_steps"):
+                live = True
+                try:
+                    if hasattr(self, "fit_dock"):
+                        live = self.fit_dock.is_live_preview_enabled()
+                except Exception:
+                    live = True
+                self.viewmodel.run_fit_steps(num_steps=n, live_preview=live)
+        except Exception as e:
+            self.append_log(f"Failed to run {n} fit steps: {e}")
+
+    def _on_fit_to_completion(self):
+        """Handle fit to completion request."""
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "run_fit_to_completion"):
+                live = True
+                try:
+                    if hasattr(self, "fit_dock"):
+                        live = self.fit_dock.is_live_preview_enabled()
+                except Exception:
+                    live = True
+                self.viewmodel.run_fit_to_completion(live_preview=live)
+            elif self.viewmodel and hasattr(self.viewmodel, "run_fit"):
+                # Fallback to regular fit
+                self.viewmodel.run_fit()
+        except Exception as e:
+            self.append_log(f"Failed to run fit to completion: {e}")
+
+    def _on_fit_revert(self):
+        """Handle fit revert request."""
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "revert_to_pre_fit"):
+                success = self.viewmodel.revert_to_pre_fit()
+                if success:
+                    self.append_log("Reverted to pre-fit parameters.")
+                else:
+                    self.append_log("Failed to revert: no pre-fit state available.")
+        except Exception as e:
+            self.append_log(f"Failed to revert: {e}")
+
+    def _on_bounds_changed(self, name, min_val, max_val):
+        """Handle parameter bounds change."""
+        try:
+            if self.viewmodel and hasattr(self.viewmodel, "set_parameter_bounds"):
+                self.viewmodel.set_parameter_bounds(name, min_val, max_val)
+        except Exception as e:
+            self.append_log(f"Failed to set bounds for '{name}': {e}")
+
+    def _on_fit_progress(self, progress):
+        """Handle fit progress update."""
+        try:
+            if hasattr(self, "fit_dock"):
+                self.fit_dock.update_progress(progress)
+        except Exception:
+            pass
+
+    def _on_fit_started(self):
+        """Handle fit started event."""
+        try:
+            if hasattr(self, "fit_dock"):
+                self.fit_dock.set_fit_in_progress(True)
+        except Exception:
+            pass
+
+    def _on_fit_finished(self, success):
+        """Handle fit finished event."""
+        try:
+            if hasattr(self, "fit_dock"):
+                self.fit_dock.set_fit_in_progress(False)
+        except Exception:
+            pass
+
+    def _on_revert_available_changed(self, available):
+        """Handle revert availability change."""
+        try:
+            if hasattr(self, "fit_dock"):
+                stack_depth = 0
+                if self.viewmodel and hasattr(self.viewmodel, "get_revert_stack_depth"):
+                    stack_depth = self.viewmodel.get_revert_stack_depth()
+                self.fit_dock.set_revert_available(available, stack_depth=stack_depth)
+        except Exception:
+            pass
+
+    def _refresh_fit_bounds(self):
+        """Refresh the fit dock bounds form with current parameter specs."""
+        try:
+            if not self.viewmodel or not hasattr(self, "fit_dock"):
+                return
+            
+            specs = getattr(self.viewmodel, "get_parameters", lambda: {})()
+            if specs:
+                self.fit_dock.populate_bounds(specs)
+        except Exception as e:
+            self.append_log(f"Failed to refresh fit bounds: {e}")
+
+    def _on_parameters_updated_for_fit_dock(self):
+        """Refresh fit dock bounds when parameters change (e.g., fixing/unfixing)."""
+        try:
+            if hasattr(self, "fit_dock") and self.fit_dock.isVisible():
+                self._refresh_fit_bounds()
+        except Exception:
+            pass
 
     def _on_curve_clicked(self, event, curve_id):
         """Handle mouse click on a curve."""

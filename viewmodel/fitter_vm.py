@@ -28,6 +28,11 @@ class FitterViewModel(QObject):
     parameters_updated = Signal()
     files_updated = Signal(object)                          # list of queued file metadata
     resolution_updated = Signal()                           # emitted when resolution changes
+    fit_progress = Signal(float)                            # fit progress 0.0 to 1.0
+    fit_step_completed = Signal(int, object, object)        # step_num, fit_result, y_fit
+    fit_started = Signal()                                  # emitted when fit begins
+    fit_finished = Signal(bool)                             # emitted when fit ends (success)
+    revert_available_changed = Signal(bool)                 # emitted when revert state changes
 
 
     def __init__(self, model_state=None):
@@ -44,6 +49,10 @@ class FitterViewModel(QObject):
         # Resolution model state
         self._resolution_model_name = "None"  # "None" means no resolution convolution
         self._resolution_spec = None  # BaseModelSpec or None
+        
+        # Pre-fit state storage for revert functionality (stack for multiple undos)
+        self._pre_fit_stack = []  # list of dicts with "params" and "resolution" keys
+        self._max_revert_stack_size = 20  # Maximum number of states to keep
         
         # Debounce timer for auto-saving fit state after parameter changes
         self._fit_save_timer = QTimer()
@@ -556,6 +565,18 @@ class FitterViewModel(QObject):
             self._log_message("A fit is already running.")
             return
 
+        # Store pre-fit state so Run Fit behaves like Fit Dock and can be reverted
+        try:
+            self._store_pre_fit_state()
+        except Exception:
+            pass
+
+        # Emit fit_started signal so UI can disable buttons
+        try:
+            self.fit_started.emit()
+        except Exception:
+            pass
+
         # basic data checks
         # Use masked (included) data for fitting so excluded points are ignored
         try:
@@ -865,8 +886,19 @@ class FitterViewModel(QObject):
                         self._schedule_fit_save()
                     except Exception as e:
                         log_exception("Auto-save fit failed", e)
+                    
+                    # Emit fit_finished signal so UI can re-enable buttons
+                    try:
+                        self.fit_finished.emit(True)
+                    except Exception:
+                        pass
                 else:
                     self._log_message("Fit failed.")
+                    # Emit fit_finished signal even on failure so UI can re-enable buttons
+                    try:
+                        self.fit_finished.emit(False)
+                    except Exception:
+                        pass
             finally:
                 # always clear the worker reference
                 try:
@@ -877,6 +909,647 @@ class FitterViewModel(QObject):
         worker.finished.connect(on_finished)
         worker.start()
         self._log_message("Fit started in background...")
+
+    def _store_pre_fit_state(self):
+        """Store the current parameter state before fitting for revert functionality."""
+        try:
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return
+            
+            # Store current parameter values
+            pre_fit_params = {}
+            params = getattr(model_spec, "params", {}) or {}
+            for name, param in params.items():
+                try:
+                    pre_fit_params[name] = {
+                        "value": getattr(param, "value", None),
+                        "fixed": bool(getattr(param, "fixed", False)),
+                        "link_group": getattr(param, "link_group", None),
+                        "min": getattr(param, "min", None),
+                        "max": getattr(param, "max", None),
+                    }
+                except Exception:
+                    pass
+            
+            # Store resolution state
+            pre_fit_resolution = self.get_resolution_state()
+            
+            # Push to stack
+            state_entry = {
+                "params": pre_fit_params,
+                "resolution": pre_fit_resolution
+            }
+            self._pre_fit_stack.append(state_entry)
+            
+            # Trim stack if too large
+            while len(self._pre_fit_stack) > self._max_revert_stack_size:
+                self._pre_fit_stack.pop(0)
+            
+            try:
+                self.revert_available_changed.emit(True)
+            except Exception:
+                pass
+            
+            self._log_message(f"Pre-fit parameters stored ({len(self._pre_fit_stack)} states available).")
+        except Exception as e:
+            log_exception("Failed to store pre-fit state", e, vm=self)
+
+    def has_revert_state(self) -> bool:
+        """Check if there's a pre-fit state available for revert."""
+        return len(self._pre_fit_stack) > 0
+    
+    def get_revert_stack_depth(self) -> int:
+        """Get the number of states available for revert."""
+        return len(self._pre_fit_stack)
+
+    def revert_to_pre_fit(self) -> bool:
+        """Revert parameters to their pre-fit values.
+        
+        Returns:
+            True if revert was successful
+        """
+        try:
+            if not self.has_revert_state():
+                self._log_message("No pre-fit state available to revert to.")
+                return False
+            
+            # Pop the most recent state from the stack
+            state_entry = self._pre_fit_stack.pop()
+            pre_fit_params = state_entry.get("params", {})
+            pre_fit_resolution = state_entry.get("resolution")
+            
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                self._log_message("No model spec available for revert.")
+                return False
+            
+            params = getattr(model_spec, "params", {}) or {}
+            mdl = getattr(self.state, "model", None)
+            is_composite = isinstance(model_spec, CompositeModelSpec)
+            
+            # Restore parameter values
+            for name, stored in pre_fit_params.items():
+                try:
+                    if name in params:
+                        params[name].value = stored.get("value")
+                        params[name].fixed = stored.get("fixed", False)
+                        params[name].link_group = stored.get("link_group")
+                        if stored.get("min") is not None:
+                            params[name].min = stored.get("min")
+                        if stored.get("max") is not None:
+                            params[name].max = stored.get("max")
+                        
+                        # Update model object if present
+                        if mdl is not None:
+                            try:
+                                setattr(mdl, name, stored.get("value"))
+                            except Exception:
+                                pass
+                        
+                        # Update composite spec if applicable
+                        if is_composite and hasattr(model_spec, "set_param_value"):
+                            try:
+                                model_spec.set_param_value(name, stored.get("value"))
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            
+            # Restore resolution state
+            if pre_fit_resolution is not None:
+                self.set_resolution_state(pre_fit_resolution)
+            
+            # Update revert availability
+            try:
+                self.revert_available_changed.emit(self.has_revert_state())
+            except Exception:
+                pass
+            
+            # Notify views
+            try:
+                self.parameters_updated.emit()
+            except Exception:
+                pass
+            
+            try:
+                self.update_plot()
+            except Exception:
+                pass
+            
+            remaining = len(self._pre_fit_stack)
+            self._log_message(f"Reverted to pre-fit parameters ({remaining} more states available).")
+            return True
+        except Exception as e:
+            log_exception("Failed to revert to pre-fit state", e, vm=self)
+            return False
+
+    def run_fit_steps(self, num_steps: int = 1, live_preview: bool = True):
+        """Run a limited number of fit iterations with optional live preview.
+        
+        Args:
+            num_steps: Number of fitting iterations to run
+            live_preview: If True, update plot after each step
+        """
+        # Prevent multiple concurrent fits
+        if getattr(self, "_fit_worker", None) is not None:
+            self._log_message("A fit is already running.")
+            return
+        
+        # Store pre-fit state
+        self._store_pre_fit_state()
+        
+        # Emit fit started signal
+        try:
+            self.fit_started.emit()
+        except Exception:
+            pass
+
+        # Get data
+        try:
+            x_incl, y_incl, err_incl = self.state.get_masked_data()
+        except Exception:
+            x_incl, y_incl, err_incl = None, None, None
+        x = x_incl if x_incl is not None else getattr(self.state, "x_data", None)
+        y = y_incl if y_incl is not None else getattr(self.state, "y_data", None)
+        if x is None or y is None:
+            self._log_message("No data available to fit.")
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        err = err_incl if err_incl is not None else getattr(self.state, "errors", None)
+
+        # Get model spec
+        model_spec = getattr(self.state, "model_spec", None)
+        if model_spec is None:
+            self._log_message("No model available to fit.")
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        # Build parameter info (same as run_fit)
+        model_func = getattr(model_spec, "evaluate", None)
+        if model_func is None:
+            self._log_message("Selected model does not provide an evaluate function.")
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        try:
+            # Build model parameter maps
+            model_params_map = getattr(model_spec, "params", {}) or {}
+            model_full_values = {k: getattr(v, "value", None) for k, v in model_params_map.items()}
+            model_free_keys = [k for k, v in model_params_map.items() if not bool(getattr(v, "fixed", False))]
+
+            # Link groups for model params
+            model_link_groups = {}
+            model_link_representatives = {}
+            for k in model_free_keys:
+                try:
+                    lg = getattr(model_params_map[k], "link_group", None)
+                    if lg and lg > 0:
+                        model_link_groups.setdefault(lg, []).append(k)
+                except Exception:
+                    pass
+            for lg, names in model_link_groups.items():
+                if len(names) > 1:
+                    rep = names[0]
+                    for n in names:
+                        model_link_representatives[n] = rep
+
+            model_unique_free_keys = []
+            seen = set()
+            for k in model_free_keys:
+                rep = model_link_representatives.get(k, k)
+                if rep not in seen:
+                    model_unique_free_keys.append(rep)
+                    seen.add(rep)
+
+            model_lower = [getattr(model_params_map[k], "min", None) if getattr(model_params_map[k], "min", None) is not None else -np.inf for k in model_unique_free_keys]
+            model_upper = [getattr(model_params_map[k], "max", None) if getattr(model_params_map[k], "max", None) is not None else np.inf for k in model_unique_free_keys]
+
+            # Resolution parameters (optional)
+            res_spec = self._resolution_spec if self.has_resolution() else None
+            res_params_map = getattr(res_spec, "params", {}) or {}
+            res_name_map = {}
+            res_full_values = {}
+            res_link_groups = {}
+            res_link_representatives = {}
+            res_unique_free_keys = []
+            res_lower = []
+            res_upper = []
+            if res_spec is not None:
+                try:
+                    res_full_values = {f"res__{k}": getattr(v, "value", None) for k, v in res_params_map.items()}
+                    for base_name, param in res_params_map.items():
+                        pref = f"res__{base_name}"
+                        res_name_map[pref] = base_name
+                        if not bool(getattr(param, "fixed", False)):
+                            res_unique_free_keys.append(pref)
+                            lg = getattr(param, "link_group", None)
+                            if lg and lg > 0:
+                                res_link_groups.setdefault(lg, []).append(base_name)
+                    for lg, names in res_link_groups.items():
+                        if len(names) > 1:
+                            rep_pref = f"res__{names[0]}"
+                            for n in names:
+                                res_link_representatives[f"res__{n}"] = rep_pref
+                    res_lower = [getattr(res_params_map[res_name_map[k]], "min", None) if getattr(res_params_map[res_name_map[k]], "min", None) is not None else -np.inf for k in res_unique_free_keys]
+                    res_upper = [getattr(res_params_map[res_name_map[k]], "max", None) if getattr(res_params_map[res_name_map[k]], "max", None) is not None else np.inf for k in res_unique_free_keys]
+                except Exception as e:
+                    log_exception("Failed to build resolution parameter list", e, vm=self)
+                    res_unique_free_keys = []
+                    res_lower = []
+                    res_upper = []
+
+            # Combine model + resolution free keys
+            param_keys = list(model_unique_free_keys) + list(res_unique_free_keys)
+            if not param_keys:
+                self._log_message("No free parameters to fit.")
+                try:
+                    self.fit_finished.emit(False)
+                except Exception:
+                    pass
+                return
+
+            combined_full_values = dict(model_full_values)
+            combined_full_values.update(res_full_values)
+            params = {k: combined_full_values.get(k) for k in param_keys}
+            bounds = (list(model_lower) + list(res_lower), list(model_upper) + list(res_upper))
+        except Exception as e:
+            log_exception("Failed to build parameter list", e, vm=self)
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        # Create wrapped function that maps positional args into the combined
+        # parameter map and evaluates model (+ resolution convolution if active)
+        has_res = self.has_resolution()
+
+        def wrapped_func(xx, *args):
+            p = dict(combined_full_values)
+            try:
+                for k, val in zip(param_keys, args):
+                    p[k] = val
+                # propagate model-linked representatives
+                for linked_param, representative in model_link_representatives.items():
+                    if linked_param != representative and representative in p:
+                        p[linked_param] = p[representative]
+                # propagate resolution-linked representatives
+                for linked_pref, rep_pref in res_link_representatives.items():
+                    if linked_pref != rep_pref and rep_pref in p:
+                        p[linked_pref] = p[rep_pref]
+            except Exception:
+                pass
+
+            # Build model-only param dict to pass to evaluate(x, params)
+            model_param_values = {k: p.get(k) for k in model_full_values.keys()}
+            try:
+                y_out = model_func(xx, model_param_values)
+            except TypeError:
+                try:
+                    y_out = model_func(xx, **model_param_values)
+                except Exception:
+                    y_out = np.zeros_like(xx)
+
+            # Update resolution spec with current trial params before convolution
+            if has_res:
+                try:
+                    res_spec_local = getattr(self, "_resolution_spec", None)
+                    if res_spec_local is not None and hasattr(res_spec_local, "params"):
+                        for pref_name, base_name in res_name_map.items():
+                            if pref_name in p and base_name in res_spec_local.params:
+                                try:
+                                    res_spec_local.params[base_name].value = p[pref_name]
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+                try:
+                    y_out = self.evaluate_with_resolution(xx, y_out)
+                except Exception:
+                    pass
+
+            return y_out
+
+        # Import iterative worker
+        try:
+            from worker.fit_worker import IterativeFitWorker
+        except Exception as e:
+            log_exception("Failed to import IterativeFitWorker", e, vm=self)
+            try:
+                self.fit_finished.emit(False)
+            except Exception:
+                pass
+            return
+
+        worker = IterativeFitWorker(
+            x, y, wrapped_func, params, err, bounds,
+            max_steps=num_steps,
+            step_mode=live_preview
+        )
+        self._fit_worker = worker
+
+        # Connect progress
+        worker.progress.connect(lambda p: self.fit_progress.emit(p))
+
+        # Connect error signal for user feedback
+        def on_error(error_msg):
+            self._log_message(f"Fit error: {error_msg}")
+        worker.error_occurred.connect(on_error)
+
+        # Connect step completed for live preview
+        if live_preview:
+            def on_step_completed(step_num, result, y_fit, chi_squared=None):
+                if result is None:
+                    return
+                try:
+                    self.fit_step_completed.emit(step_num, result, y_fit)
+                    # Log chi-squared for user feedback
+                    if chi_squared is not None:
+                        self._log_message(f"Step {step_num}: χ² = {chi_squared:.4g}")
+
+                    # Separate model vs resolution results (resolution keys start with 'res__')
+                    combined_result = result or {}
+                    model_result = {k: v for k, v in combined_result.items() if not (isinstance(k, str) and k.startswith("res__"))}
+                    resolution_result = {res_name_map.get(k, k): v for k, v in combined_result.items() if isinstance(k, str) and k.startswith("res__")}
+
+                    # Update model spec parameters for preview
+                    spec = getattr(self.state, "model_spec", None)
+                    if spec is not None:
+                        is_comp = isinstance(spec, CompositeModelSpec)
+                        for k, v in model_result.items():
+                            try:
+                                if is_comp and hasattr(spec, "set_param_value"):
+                                    try:
+                                        spec.set_param_value(k, v)
+                                    except Exception:
+                                        if k in getattr(spec, "params", {}):
+                                            spec.params[k].value = v
+                                else:
+                                    if k in getattr(spec, "params", {}):
+                                        spec.params[k].value = v
+                            except Exception:
+                                pass
+
+                    # Also update concrete model attributes so evaluate() sees the temporary change
+                    mdl = getattr(self.state, "model", None)
+                    if mdl is not None:
+                        for k, v in model_result.items():
+                            try:
+                                setattr(mdl, k, v)
+                            except Exception:
+                                pass
+
+                    # Propagate linked model params
+                    for linked_param, representative in model_link_representatives.items():
+                        if linked_param != representative and representative in model_result:
+                            try:
+                                val = model_result[representative]
+                                if spec is not None:
+                                    if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                        try:
+                                            spec.set_param_value(linked_param, val)
+                                        except Exception:
+                                            if linked_param in getattr(spec, "params", {}):
+                                                spec.params[linked_param].value = val
+                                    else:
+                                        if linked_param in getattr(spec, "params", {}):
+                                            spec.params[linked_param].value = val
+                                if mdl is not None:
+                                    try:
+                                        setattr(mdl, linked_param, val)
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+
+                    # Apply resolution preview updates to resolution spec
+                    try:
+                        if resolution_result and res_spec is not None:
+                            res_params = getattr(res_spec, "params", {}) or {}
+                            for base_name, val in resolution_result.items():
+                                if base_name in res_params:
+                                    try:
+                                        res_params[base_name].value = val
+                                        lg = getattr(res_params[base_name], "link_group", None)
+                                        if lg and lg in res_link_groups:
+                                            for linked_base in res_link_groups[lg]:
+                                                if linked_base != base_name and linked_base in res_params:
+                                                    res_params[linked_base].value = val
+                                    except Exception:
+                                        pass
+                            try:
+                                self.resolution_updated.emit()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    # Update plot
+                    try:
+                        self.update_plot()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    log_exception("Error in step completed handler", e, vm=self)
+
+            worker.step_completed.connect(on_step_completed)
+
+        # Connect finished
+        def on_finished(result, y_fit):
+            try:
+                if result is not None:
+                    self.state.fit_result = result
+                    # Apply final result including linked parameters
+                    spec = getattr(self.state, "model_spec", None)
+                    if spec is not None:
+                        # Apply to fitted params
+                        for k, v in result.items():
+                            try:
+                                if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                    spec.set_param_value(k, v)
+                                elif hasattr(spec, "params") and k in spec.params:
+                                    spec.params[k].value = v
+                            except Exception:
+                                pass
+                        # Propagate to linked params
+                        for linked_param, representative in model_link_representatives.items():
+                            if linked_param != representative and representative in result:
+                                try:
+                                    if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                        spec.set_param_value(linked_param, result[representative])
+                                    elif hasattr(spec, "params") and linked_param in spec.params:
+                                        spec.params[linked_param].value = result[representative]
+                                except Exception:
+                                    pass
+                    
+                    # Update model object
+                    mdl = getattr(self.state, "model", None)
+                    if mdl is not None:
+                        for k, v in result.items():
+                            try:
+                                setattr(mdl, k, v)
+                            except Exception:
+                                pass
+                        # Also set linked params on model
+                        for linked_param, representative in model_link_representatives.items():
+                            if linked_param != representative and representative in result:
+                                try:
+                                    setattr(mdl, linked_param, result[representative])
+                                except Exception:
+                                    pass
+                    
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
+                    
+                    try:
+                        self.update_plot()
+                    except Exception:
+                        pass
+                    
+                    self._log_message(f"Fit completed ({num_steps} step(s)).")
+                    
+                    try:
+                        self._schedule_fit_save()
+                    except Exception:
+                        pass
+                    
+                    try:
+                        self.fit_finished.emit(True)
+                    except Exception:
+                        pass
+                else:
+                    self._log_message("Fit failed.")
+                    try:
+                        self.fit_finished.emit(False)
+                    except Exception:
+                        pass
+            finally:
+                try:
+                    self._fit_worker = None
+                except Exception:
+                    pass
+
+        worker.finished.connect(on_finished)
+        worker.start()
+        self._log_message(f"Fit started ({num_steps} step(s))...")
+
+    def run_fit_to_completion(self, live_preview: bool = True):
+        """Run fit until convergence with optional live preview.
+        
+        Args:
+            live_preview: If True, update plot during fitting
+        """
+        # Store pre-fit state first
+        self._store_pre_fit_state()
+
+        # If live preview is requested, prefer the iterative worker so each step
+        # can be emitted and the GUI updated. Otherwise fall back to the fast
+        # non-iterative `run_fit` implementation.
+        if live_preview:
+            try:
+                # Choose a reasonably large max steps; the IterativeFitWorker will
+                # stop early on convergence. This keeps the behavior responsive.
+                max_steps = 1000
+                self.run_fit_steps(num_steps=max_steps, live_preview=True)
+            except Exception:
+                # Fallback to original behavior on error
+                try:
+                    self.run_fit()
+                except Exception:
+                    pass
+        else:
+            # run_fit emits fit_started and fit_finished in its worker callback
+            self.run_fit()
+
+    def set_parameter_bounds(self, name: str, min_val, max_val):
+        """Set min/max bounds for a parameter.
+        
+        Args:
+            name: Parameter name
+            min_val: Minimum value or None for no limit
+            max_val: Maximum value or None for no limit
+        """
+        try:
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return
+            
+            params = getattr(model_spec, "params", {}) or {}
+            if name not in params:
+                return
+            
+            param = params[name]
+            if min_val is not None:
+                param.min = float(min_val)
+            else:
+                param.min = None
+            
+            if max_val is not None:
+                param.max = float(max_val)
+            else:
+                param.max = None
+            
+            # For CompositeModelSpec, also update the component's underlying spec
+            # to ensure bounds persist across _rebuild_flat_params calls
+            if isinstance(model_spec, CompositeModelSpec):
+                try:
+                    param_links = getattr(model_spec, "_param_links", {})
+                    if name in param_links:
+                        component, orig_name = param_links[name]
+                        if hasattr(component, "spec") and hasattr(component.spec, "params"):
+                            orig_param = component.spec.params.get(orig_name)
+                            if orig_param is not None:
+                                orig_param.min = param.min
+                                orig_param.max = param.max
+                except (AttributeError, KeyError, TypeError):
+                    # Component spec structure may vary; silently skip if bounds can't be propagated
+                    pass
+            
+            self._log_message(f"Bounds for '{name}' set to [{min_val}, {max_val}]")
+        except Exception as e:
+            log_exception(f"Failed to set bounds for '{name}'", e, vm=self)
+
+    def get_parameter_bounds(self) -> dict:
+        """Get the current bounds for all parameters.
+        
+        Returns:
+            Dict mapping parameter names to (min, max) tuples
+        """
+        bounds = {}
+        try:
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return bounds
+            
+            params = getattr(model_spec, "params", {}) or {}
+            for name, param in params.items():
+                try:
+                    min_val = getattr(param, "min", None)
+                    max_val = getattr(param, "max", None)
+                    bounds[name] = (min_val, max_val)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return bounds
+
+    def is_fit_running(self) -> bool:
+        """Check if a fit is currently running."""
+        return getattr(self, "_fit_worker", None) is not None
 
     def update_plot(self):
         """Update plot without running a fit."""
