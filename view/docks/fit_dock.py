@@ -130,23 +130,22 @@ class FitDock(QDockWidget):
         bounds_label.setStyleSheet("font-weight: bold;")
         vlayout.addWidget(bounds_label)
 
-        # Scrollable bounds area
+        # Scrollable bounds area - make it larger to show more parameters
         self.bounds_scroll = QScrollArea()
         self.bounds_scroll.setWidgetResizable(True)
+        self.bounds_scroll.setMinimumHeight(250)  # Show more parameters at once
         self.bounds_form_widget = QWidget()
         self.bounds_form = QFormLayout(self.bounds_form_widget)
         self.bounds_form.setContentsMargins(6, 6, 6, 6)
         self.bounds_form.setSpacing(6)
         self.bounds_scroll.setWidget(self.bounds_form_widget)
-        vlayout.addWidget(self.bounds_scroll)
-
-        vlayout.addStretch(1)
+        vlayout.addWidget(self.bounds_scroll, stretch=1)  # Give it stretch priority
 
         self.setWidget(container)
         
-        # Reasonable default size
+        # Reasonable default size - taller to accommodate more bounds
         self.setMinimumWidth(350)
-        self.resize(380, 500)
+        self.resize(400, 600)
 
         # Connect signals
         self.fit_one_step_btn.clicked.connect(self._on_fit_one_step)
@@ -190,18 +189,22 @@ class FitDock(QDockWidget):
         """
         self.progress_bar.setValue(int(progress * 100))
 
-    def set_revert_available(self, available: bool, message: str = None):
+    def set_revert_available(self, available: bool, message: str = None, stack_depth: int = 0):
         """Enable/disable the revert button.
         
         Args:
             available: Whether revert is available
             message: Optional status message
+            stack_depth: Number of states available for revert
         """
         self.revert_btn.setEnabled(available)
         if message:
             self.revert_status_label.setText(message)
         elif available:
-            self.revert_status_label.setText("Previous fit available for revert")
+            if stack_depth > 1:
+                self.revert_status_label.setText(f"{stack_depth} previous fits available")
+            else:
+                self.revert_status_label.setText("Previous fit available for revert")
             self.revert_status_label.setStyleSheet("color: green;")
         else:
             self.revert_status_label.setText("No previous fit to revert to")

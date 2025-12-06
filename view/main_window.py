@@ -1948,7 +1948,10 @@ class MainWindow(QMainWindow):
         """Handle revert availability change."""
         try:
             if hasattr(self, "fit_dock"):
-                self.fit_dock.set_revert_available(available)
+                stack_depth = 0
+                if self.viewmodel and hasattr(self.viewmodel, "get_revert_stack_depth"):
+                    stack_depth = self.viewmodel.get_revert_stack_depth()
+                self.fit_dock.set_revert_available(available, stack_depth=stack_depth)
         except Exception:
             pass
 

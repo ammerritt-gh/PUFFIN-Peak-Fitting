@@ -50,9 +50,9 @@ class FitterViewModel(QObject):
         self._resolution_model_name = "None"  # "None" means no resolution convolution
         self._resolution_spec = None  # BaseModelSpec or None
         
-        # Pre-fit state storage for revert functionality
-        self._pre_fit_params = None  # dict of parameter values before fit
-        self._pre_fit_resolution = None  # resolution state before fit
+        # Pre-fit state storage for revert functionality (stack for multiple undos)
+        self._pre_fit_stack = []  # list of dicts with "params" and "resolution" keys
+        self._max_revert_stack_size = 20  # Maximum number of states to keep
         
         # Debounce timer for auto-saving fit state after parameter changes
         self._fit_save_timer = QTimer()
@@ -912,11 +912,11 @@ class FitterViewModel(QObject):
                 return
             
             # Store current parameter values
-            self._pre_fit_params = {}
+            pre_fit_params = {}
             params = getattr(model_spec, "params", {}) or {}
             for name, param in params.items():
                 try:
-                    self._pre_fit_params[name] = {
+                    pre_fit_params[name] = {
                         "value": getattr(param, "value", None),
                         "fixed": bool(getattr(param, "fixed", False)),
                         "link_group": getattr(param, "link_group", None),
@@ -927,20 +927,35 @@ class FitterViewModel(QObject):
                     pass
             
             # Store resolution state
-            self._pre_fit_resolution = self.get_resolution_state()
+            pre_fit_resolution = self.get_resolution_state()
+            
+            # Push to stack
+            state_entry = {
+                "params": pre_fit_params,
+                "resolution": pre_fit_resolution
+            }
+            self._pre_fit_stack.append(state_entry)
+            
+            # Trim stack if too large
+            while len(self._pre_fit_stack) > self._max_revert_stack_size:
+                self._pre_fit_stack.pop(0)
             
             try:
                 self.revert_available_changed.emit(True)
             except Exception:
                 pass
             
-            self._log_message("Pre-fit parameters stored for revert.")
+            self._log_message(f"Pre-fit parameters stored ({len(self._pre_fit_stack)} states available).")
         except Exception as e:
             log_exception("Failed to store pre-fit state", e, vm=self)
 
     def has_revert_state(self) -> bool:
         """Check if there's a pre-fit state available for revert."""
-        return self._pre_fit_params is not None and len(self._pre_fit_params) > 0
+        return len(self._pre_fit_stack) > 0
+    
+    def get_revert_stack_depth(self) -> int:
+        """Get the number of states available for revert."""
+        return len(self._pre_fit_stack)
 
     def revert_to_pre_fit(self) -> bool:
         """Revert parameters to their pre-fit values.
@@ -953,6 +968,11 @@ class FitterViewModel(QObject):
                 self._log_message("No pre-fit state available to revert to.")
                 return False
             
+            # Pop the most recent state from the stack
+            state_entry = self._pre_fit_stack.pop()
+            pre_fit_params = state_entry.get("params", {})
+            pre_fit_resolution = state_entry.get("resolution")
+            
             model_spec = getattr(self.state, "model_spec", None)
             if model_spec is None:
                 self._log_message("No model spec available for revert.")
@@ -963,7 +983,7 @@ class FitterViewModel(QObject):
             is_composite = isinstance(model_spec, CompositeModelSpec)
             
             # Restore parameter values
-            for name, stored in self._pre_fit_params.items():
+            for name, stored in pre_fit_params.items():
                 try:
                     if name in params:
                         params[name].value = stored.get("value")
@@ -991,15 +1011,12 @@ class FitterViewModel(QObject):
                     pass
             
             # Restore resolution state
-            if self._pre_fit_resolution is not None:
-                self.set_resolution_state(self._pre_fit_resolution)
+            if pre_fit_resolution is not None:
+                self.set_resolution_state(pre_fit_resolution)
             
-            # Clear pre-fit state
-            self._pre_fit_params = None
-            self._pre_fit_resolution = None
-            
+            # Update revert availability
             try:
-                self.revert_available_changed.emit(False)
+                self.revert_available_changed.emit(self.has_revert_state())
             except Exception:
                 pass
             
@@ -1014,7 +1031,8 @@ class FitterViewModel(QObject):
             except Exception:
                 pass
             
-            self._log_message("Reverted to pre-fit parameters.")
+            remaining = len(self._pre_fit_stack)
+            self._log_message(f"Reverted to pre-fit parameters ({remaining} more states available).")
             return True
         except Exception as e:
             log_exception("Failed to revert to pre-fit state", e, vm=self)
@@ -1091,17 +1109,45 @@ class FitterViewModel(QObject):
                     pass
                 return
             
+            # Build link_group mapping: for linked parameters, only fit one representative
+            model_link_groups = {}  # link_group -> [param_names]
+            model_link_representatives = {}  # param_name -> representative_name (for linked params)
+            
+            for k in model_free_keys:
+                try:
+                    lg = getattr(model_params_map[k], "link_group", None)
+                    if lg and lg > 0:
+                        model_link_groups.setdefault(lg, []).append(k)
+                except Exception:
+                    pass
+            
+            # For each link group, choose the first parameter as the representative
+            for lg, param_names in model_link_groups.items():
+                if len(param_names) > 1:
+                    representative = param_names[0]
+                    for pname in param_names:
+                        model_link_representatives[pname] = representative
+            
+            # Build unique free parameter list (only one param per link group)
+            model_unique_free_keys = []
+            seen_representatives = set()
+            for k in model_free_keys:
+                rep = model_link_representatives.get(k, k)
+                if rep not in seen_representatives:
+                    model_unique_free_keys.append(rep)
+                    seen_representatives.add(rep)
+            
             # Build bounds - extract min/max values with proper None handling
             model_lower = []
             model_upper = []
-            for k in model_free_keys:
+            for k in model_unique_free_keys:
                 param = model_params_map[k]
                 min_val = getattr(param, "min", None)
                 max_val = getattr(param, "max", None)
                 model_lower.append(min_val if min_val is not None else -np.inf)
                 model_upper.append(max_val if max_val is not None else np.inf)
             
-            params = {k: model_full_values.get(k) for k in model_free_keys}
+            params = {k: model_full_values.get(k) for k in model_unique_free_keys}
             bounds = (model_lower, model_upper)
         except Exception as e:
             log_exception("Failed to build parameter list", e, vm=self)
@@ -1111,14 +1157,19 @@ class FitterViewModel(QObject):
                 pass
             return
 
-        # Create wrapped function
+        # Create wrapped function that handles linked parameters
         has_res = self.has_resolution()
         
         def wrapped_func(xx, *args):
             p = dict(model_full_values)
             try:
-                for k, val in zip(model_free_keys, args):
+                # Set values for unique params
+                for k, val in zip(model_unique_free_keys, args):
                     p[k] = val
+                # Propagate values to linked params
+                for linked_param, representative in model_link_representatives.items():
+                    if linked_param != representative and representative in p:
+                        p[linked_param] = p[representative]
             except Exception:
                 pass
             try:
@@ -1162,20 +1213,32 @@ class FitterViewModel(QObject):
 
         # Connect step completed for live preview
         if live_preview:
-            def on_step_completed(step_num, result, y_fit):
+            def on_step_completed(step_num, result, y_fit, chi_squared=None):
                 if result is None:
                     return
                 try:
                     self.fit_step_completed.emit(step_num, result, y_fit)
+                    # Log chi-squared for user feedback
+                    if chi_squared is not None:
+                        self._log_message(f"Step {step_num}: χ² = {chi_squared:.4g}")
                     # Update parameters temporarily for preview
                     spec = getattr(self.state, "model_spec", None)
                     if spec is not None:
+                        # Apply to fitted params
                         for k, v in result.items():
                             try:
                                 if k in spec.params:
                                     spec.params[k].value = v
                             except Exception:
                                 pass
+                        # Propagate to linked params
+                        for linked_param, representative in model_link_representatives.items():
+                            if linked_param != representative and representative in result:
+                                try:
+                                    if linked_param in spec.params:
+                                        spec.params[linked_param].value = result[representative]
+                                except Exception:
+                                    pass
                     # Update plot
                     try:
                         self.update_plot()
@@ -1191,9 +1254,10 @@ class FitterViewModel(QObject):
             try:
                 if result is not None:
                     self.state.fit_result = result
-                    # Apply final result
+                    # Apply final result including linked parameters
                     spec = getattr(self.state, "model_spec", None)
                     if spec is not None:
+                        # Apply to fitted params
                         for k, v in result.items():
                             try:
                                 if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
@@ -1202,6 +1266,16 @@ class FitterViewModel(QObject):
                                     spec.params[k].value = v
                             except Exception:
                                 pass
+                        # Propagate to linked params
+                        for linked_param, representative in model_link_representatives.items():
+                            if linked_param != representative and representative in result:
+                                try:
+                                    if isinstance(spec, CompositeModelSpec) and hasattr(spec, "set_param_value"):
+                                        spec.set_param_value(linked_param, result[representative])
+                                    elif hasattr(spec, "params") and linked_param in spec.params:
+                                        spec.params[linked_param].value = result[representative]
+                                except Exception:
+                                    pass
                     
                     # Update model object
                     mdl = getattr(self.state, "model", None)
@@ -1211,6 +1285,13 @@ class FitterViewModel(QObject):
                                 setattr(mdl, k, v)
                             except Exception:
                                 pass
+                        # Also set linked params on model
+                        for linked_param, representative in model_link_representatives.items():
+                            if linked_param != representative and representative in result:
+                                try:
+                                    setattr(mdl, linked_param, result[representative])
+                                except Exception:
+                                    pass
                     
                     try:
                         self.parameters_updated.emit()

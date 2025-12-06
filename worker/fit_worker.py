@@ -82,15 +82,23 @@ class IterativeFitWorker(QThread):
     """
     
     progress = Signal(float)  # Progress 0.0 to 1.0
-    step_completed = Signal(int, object, object)  # step_num, fit_result, y_fit
+    step_completed = Signal(int, object, object, float)  # step_num, fit_result, y_fit, chi_squared
     finished = Signal(object, object)  # emits (fit_result, y_fit)
     error_occurred = Signal(str)  # emits error message for user feedback
 
     # Convergence threshold for early stopping
     OPTIMALITY_THRESHOLD = 1e-8
+    
+    # Maximum number of function evaluations per step
+    # 5 gives roughly one trust-region iteration for most problems
+    EVALS_PER_STEP = 5
+    
+    # Tolerance for chi^2 comparison when rejecting worse fits
+    # Steps where chi^2 increases by more than this fraction are rejected
+    CHI2_TOLERANCE = 0.001  # 0.1%
 
     def __init__(self, x, y, model_func, params, err=None, bounds=None, 
-                 max_steps=None, step_mode=False):
+                 max_steps=None, step_mode=False, reject_worse_chi2=True):
         """
         Iterative fitting worker with live updates.
 
@@ -110,6 +118,8 @@ class IterativeFitWorker(QThread):
             Maximum number of iterations. None for fit to completion.
         step_mode : bool
             If True, emit step_completed after each iteration for live preview.
+        reject_worse_chi2 : bool
+            If True, reject fit steps that increase chi-squared value.
         """
         super().__init__()
         self.x = np.asarray(x)
@@ -120,6 +130,7 @@ class IterativeFitWorker(QThread):
         self.p0 = np.array([params[k] for k in self.param_names], dtype=float)
         self.max_steps = max_steps
         self.step_mode = step_mode
+        self.reject_worse_chi2 = reject_worse_chi2
         self._stop = False
         
         # Store bounds in least_squares format (lower, upper)
@@ -154,11 +165,19 @@ class IterativeFitWorker(QThread):
         except Exception:
             return np.full_like(self.y, np.inf)
 
+    def _compute_chi_squared(self, params):
+        """Compute chi-squared value for given parameters."""
+        try:
+            residuals = self._residuals(params)
+            return np.sum(residuals ** 2)
+        except Exception:
+            return np.inf
+
     def run(self):
         """Perform iterative fitting in background.
         
-        Each "step" runs least_squares with max_nfev=1, which means exactly
-        one iteration of the trust region algorithm.
+        Each "step" runs least_squares with max_nfev=EVALS_PER_STEP, which means
+        minimal progress per step for fine-grained control.
         """
         try:
             current_params = self.p0.copy()
@@ -173,26 +192,39 @@ class IterativeFitWorker(QThread):
             
             self.progress.emit(0.0)
             
-            # Run least_squares iterations, each with exactly 1 iteration
-            # Using max_nfev to limit function evaluations per step
-            # A single trust-region iteration typically needs ~2-3 function evals
+            # Compute initial chi-squared
+            best_chi2 = self._compute_chi_squared(current_params)
+            best_params = current_params.copy()
+            
+            # Run least_squares iterations, each with minimal function evaluations
             for step in range(max_iter):
                 if self._stop:
                     break
                 
                 try:
                     # Use least_squares with very limited max_nfev for true single iteration
-                    # max_nfev=3 gives roughly one iteration of trust-region
                     result = least_squares(
                         self._residuals,
                         current_params,
                         bounds=self.bounds,
-                        max_nfev=3,  # ~1 iteration
+                        max_nfev=self.EVALS_PER_STEP,
                         verbose=0
                     )
                     
-                    # Update current_params with the result
-                    current_params = result.x
+                    new_params = result.x
+                    new_chi2 = self._compute_chi_squared(new_params)
+                    
+                    # Check if fit improved or if we should reject worse fits
+                    if self.reject_worse_chi2 and new_chi2 > best_chi2 * (1.0 + self.CHI2_TOLERANCE):
+                        # Reject this step - chi^2 got worse
+                        # Keep using best params silently (this is normal behavior)
+                        current_params = best_params.copy()
+                    else:
+                        # Accept this step
+                        current_params = new_params
+                        if new_chi2 < best_chi2:
+                            best_chi2 = new_chi2
+                            best_params = new_params.copy()
                     
                 except ValueError as e:
                     # Handle infeasible bounds gracefully
@@ -212,7 +244,8 @@ class IterativeFitWorker(QThread):
                     try:
                         y_fit = self.model_func(self.x, *current_params)
                         fit_result = dict(zip(self.param_names, current_params))
-                        self.step_completed.emit(step_num, fit_result, y_fit)
+                        current_chi2 = self._compute_chi_squared(current_params)
+                        self.step_completed.emit(step_num, fit_result, y_fit, current_chi2)
                     except Exception:
                         pass
                 
@@ -220,9 +253,12 @@ class IterativeFitWorker(QThread):
                 if hasattr(result, 'optimality') and result.optimality < self.OPTIMALITY_THRESHOLD:
                     break
             
+            # Use best parameters found
+            final_params = best_params
+            
             # Compute final fit
-            y_fit = self.model_func(self.x, *current_params)
-            fit_result = dict(zip(self.param_names, current_params))
+            y_fit = self.model_func(self.x, *final_params)
+            fit_result = dict(zip(self.param_names, final_params))
 
             self.progress.emit(1.0)
             self.finished.emit(fit_result, y_fit)
