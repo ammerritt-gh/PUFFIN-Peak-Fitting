@@ -167,6 +167,12 @@ def _validate_element_definition(definition: Dict[str, Any], filepath: Path) -> 
     Raises:
         ModelElementValidationError: If validation fails
     """
+    # Skip saved custom models (they belong in custom_models directory, not here)
+    if definition.get('category') == 'saved_custom_model':
+        raise ModelElementValidationError(
+            f"File '{filepath.name}' is a saved custom model and should not be in model_elements directory"
+        )
+    
     # Name is always required
     if "name" not in definition:
         raise ModelElementValidationError(

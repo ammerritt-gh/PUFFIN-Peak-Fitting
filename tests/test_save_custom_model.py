@@ -97,8 +97,7 @@ def test_save_and_load_custom_model():
         'description': 'Custom model with two peaks (Gaussian + Voigt) and a linear background',
         'version': 1,
         'author': 'Test User',
-        'category': 'composite',
-        'is_composite': True,
+        'category': 'saved_custom_model',  # Mark as saved custom model
         'components': []
     }
     
@@ -129,8 +128,9 @@ def test_save_and_load_custom_model():
         
         yaml_data['components'].append(component_def)
     
-    # Save to a temporary file in models/model_elements/
-    models_dir = Path(__file__).parent.parent / 'models' / 'model_elements'
+    # Save to models/custom_models/ directory
+    models_dir = Path(__file__).parent.parent / 'models' / 'custom_models'
+    models_dir.mkdir(parents=True, exist_ok=True)
     test_file = models_dir / 'two_peaks_with_background.yaml'
     
     with open(test_file, 'w', encoding='utf-8') as f:
@@ -139,55 +139,71 @@ def test_save_and_load_custom_model():
     
     print(f"   ✓ Saved to: {test_file.name}")
     
-    # Step 4: Reload model elements
-    print("\n4. Reloading model elements...")
-    reload_model_elements()
-    print("   ✓ Model elements reloaded")
+    # Step 4: Test listing saved custom models (without UI dependencies)
+    print("\n4. Testing list saved custom models...")
+    # Manually check for saved models in custom_models directory
+    saved_model_files = list(models_dir.glob("*.yaml"))
+    saved_model_names = []
+    for yaml_file in saved_model_files:
+        with open(yaml_file, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        if data and data.get('category') == 'saved_custom_model':
+            saved_model_names.append(data.get('name'))
     
-    # Step 5: Load the saved model
-    print("\n5. Loading saved model...")
-    loaded_model = get_model_spec('Two Peaks with Background')
-    print(f"   ✓ Loaded: {loaded_model.__class__.__name__}")
-    print(f"   ✓ Is composite: {getattr(loaded_model, 'is_composite', False)}")
-    print(f"   ✓ Components: {len(loaded_model.list_components())}")
+    assert 'Two Peaks with Background' in saved_model_names, "Saved model should be in list"
+    print(f"   ✓ Model appears in saved models list: {saved_model_names}")
     
-    # Step 6: Verify all properties
-    print("\n6. Verifying parameter properties...")
-    params = loaded_model.get_parameters()
+    # Step 5: Test loading the saved model (simulate the load process)
+    print("\n5. Simulating load of saved custom model...")
+    with open(test_file, 'r', encoding='utf-8') as f:
+        loaded_yaml = yaml.safe_load(f)
+    
+    assert loaded_yaml['name'] == 'Two Peaks with Background', "Model name should match"
+    assert loaded_yaml['category'] == 'saved_custom_model', "Should be marked as saved custom model"
+    assert len(loaded_yaml['components']) == 3, "Should have 3 components"
+    print("   ✓ YAML structure verified")
+    
+    # Step 6: Verify component structure
+    print("\n6. Verifying component structure...")
+    comp1 = loaded_yaml['components'][0]
+    assert comp1['element'] == 'Gaussian', "First component should be Gaussian"
+    assert comp1['prefix'] == 'peak1_', "First component prefix should be peak1_"
+    print("   ✓ Component structure correct")
+    
+    # Step 7: Verify all properties in saved YAML
+    print("\n7. Verifying parameter properties in saved YAML...")
+    params = comp1['default_parameters']
     
     # Check fixed parameters
-    assert params['peak1_Area']['fixed'] == True, "peak1_Area should be fixed"
-    assert params['peak2_Center']['fixed'] == True, "peak2_Center should be fixed"
+    assert params['Area']['fixed'] == True, "Area should be fixed"
     print("   ✓ Fixed parameters preserved")
     
-    # Check link groups
-    assert params['peak1_Width']['link_group'] == 1, "peak1_Width should be in link group 1"
-    assert params['peak2_Gauss FWHM']['link_group'] == 1, "peak2_Gauss FWHM should be in link group 1"
+    # Check link groups  
+    assert params['Width']['link_group'] == 1, "Width should be in link group 1"
     print("   ✓ Link groups preserved")
     
     # Check bounds
-    assert params['peak1_Area']['min'] == 0.0, "peak1_Area min should be 0.0"
-    assert params['peak1_Area']['max'] == 1000.0, "peak1_Area max should be 1000.0"
-    assert params['peak1_Width']['min'] == 0.1, "peak1_Width min should be 0.1"
+    assert params['Area']['min'] == 0.0, "Area min should be 0.0"
+    assert params['Area']['max'] == 1000.0, "Area max should be 1000.0"
+    assert params['Width']['min'] == 0.1, "Width min should be 0.1"
     print("   ✓ Parameter bounds preserved")
     
     # Check values
-    assert abs(params['peak1_Area']['value'] - 100.0) < 0.01, "peak1_Area value should be 100.0"
-    assert abs(params['peak1_Width']['value'] - 2.5) < 0.01, "peak1_Width value should be 2.5"
-    assert abs(params['peak2_Center']['value'] - 5.0) < 0.01, "peak2_Center value should be 5.0"
-    print("   ✓ Parameter values preserved")
+    assert abs(params['Area']['value'] - 100.0) < 0.01, "Area value should be 100.0"
+    assert abs(params['Width']['value'] - 2.5) < 0.01, "Width value should be 2.5"
+    assert abs(params['Center']['value'] - 0.0) < 0.01, "Center value should be 0.0"
     
-    # Step 7: Test that the model appears in available models
-    print("\n7. Checking model availability...")
-    from models import get_available_model_names
-    available = get_available_model_names()
-    assert 'TwoPeakswithBackgroundModelSpec' in available, "Saved model should appear in available models"
-    print(f"   ✓ Model appears in available models list")
+    # Check second component
+    comp2 = loaded_yaml['components'][1]
+    assert comp2['element'] == 'Voigt', "Second component should be Voigt"
+    comp2_params = comp2['default_parameters']
+    assert comp2_params['Center']['fixed'] == True, "Voigt Center should be fixed"
+    assert comp2_params['Gauss FWHM']['link_group'] == 1, "Gauss FWHM should be in link group 1"
+    print("   ✓ All parameter values and properties preserved")
     
     # Step 8: Clean up
     print("\n8. Cleaning up...")
     test_file.unlink()
-    reload_model_elements()  # Reload to remove the test model
     print("   ✓ Test file removed")
     
     print("\n" + "=" * 70)
@@ -195,11 +211,12 @@ def test_save_and_load_custom_model():
     print("=" * 70)
     print("\nFeature Summary:")
     print("  • Custom composite models can be saved to YAML files")
+    print("  • Saved models go to models/custom_models/ directory")
     print("  • Fixed parameter states are preserved")
     print("  • Parameter linking (link groups) is preserved")
     print("  • Parameter bounds (min/max) are preserved")
-    print("  • Saved models automatically appear in the model selector")
-    print("  • Models can be loaded and used like built-in models")
+    print("  • Saved models are loaded via 'Load Custom Model...' button")
+    print("  • Loading switches to Custom Model and adds components with properties")
     print("=" * 70)
 
 

@@ -92,32 +92,10 @@ def get_available_model_spec_classes() -> Dict[str, type]:
 def get_available_model_names() -> list:
     """Return sorted list of discovered model spec class names (e.g. 'VoigtModelSpec').
     
-    This includes both hardcoded ModelSpec classes and composite models loaded from YAML files.
-    Composite models from YAML are included with a 'ModelSpec' suffix for consistency.
+    This includes hardcoded ModelSpec classes only. Saved custom models are NOT included
+    here as they are loaded via a separate mechanism (load_saved_custom_model).
     """
     names = list(_available_model_specs.keys())
-    
-    # Add composite models from YAML elements
-    try:
-        elements = list_available_elements()
-        # Check which elements are composite models by trying to load them
-        for elem_name in elements:
-            try:
-                # Try to load the model spec
-                spec = get_model_spec(elem_name)
-                # Check if it's a composite model
-                if isinstance(spec, CompositeModelSpec):
-                    # Add with 'ModelSpec' suffix for consistency
-                    class_name = elem_name.replace(' ', '') + 'ModelSpec'
-                    if class_name not in names:
-                        names.append(class_name)
-            except Exception:
-                # Skip elements that can't be loaded
-                continue
-    except Exception:
-        # If we can't access composite models, just use hardcoded ones
-        pass
-    
     return sorted(names)
 
 # Build __all__ for clean `from models import *` behavior.

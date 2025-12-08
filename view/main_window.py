@@ -364,6 +364,7 @@ class MainWindow(QMainWindow):
                 pass
         
         self.controls_dock.edit_config_clicked.connect(self._on_edit_config_clicked)
+        self.controls_dock.load_custom_model_clicked.connect(self._on_load_custom_model_clicked)
         self.controls_dock.exclude_toggled.connect(self._on_exclude_toggled)
         self.controls_dock.resolution_clicked.connect(self._on_resolution_clicked)
         self.controls_dock.fit_settings_clicked.connect(self._on_fit_settings_clicked)
@@ -1787,6 +1788,45 @@ class MainWindow(QMainWindow):
                     self.append_log("Configuration save failed.")
             except Exception as e:
                 self.append_log(f"Error saving configuration: {e}")
+
+    def _on_load_custom_model_clicked(self):
+        """Handle load custom model button click - show dialog to select saved model."""
+        if not self.viewmodel:
+            return
+        
+        try:
+            # Get list of saved custom models
+            saved_models = self.viewmodel.list_saved_custom_models()
+            
+            if not saved_models:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self,
+                    "No Saved Models",
+                    "No saved custom models found.\n\nCreate a custom model and save it using the 'Save Model...' button in the Elements dock."
+                )
+                return
+            
+            # Show selection dialog
+            from PySide6.QtWidgets import QInputDialog
+            model_name, ok = QInputDialog.getItem(
+                self,
+                "Load Custom Model",
+                "Select a saved custom model to load:",
+                saved_models,
+                0,
+                False
+            )
+            
+            if ok and model_name:
+                # Load the selected model
+                success = self.viewmodel.load_saved_custom_model(model_name)
+                if success:
+                    self.append_log(f"Loaded custom model: {model_name}")
+                else:
+                    self.append_log(f"Failed to load custom model: {model_name}")
+        except Exception as e:
+            self.append_log(f"Error loading custom model: {e}")
 
     # --------------------------
     # Resolution dock handlers
