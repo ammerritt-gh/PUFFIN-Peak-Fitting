@@ -2667,6 +2667,12 @@ class FitterViewModel(QObject):
             self.parameters_updated.emit()
             self.update_plot()
             
+            # Save the loaded model as fit for current data
+            try:
+                self._save_current_fit()
+            except Exception:
+                pass
+            
             self.log_message.emit(f"Loaded custom model: {model_name}")
             return True
             

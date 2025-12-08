@@ -24,6 +24,7 @@ class ParametersDock(QDockWidget):
     model_changed = Signal(str)  # model name
     apply_clicked = Signal()
     refresh_clicked = Signal()
+    load_custom_model_clicked = Signal()  # load saved custom model
     parameter_changed = Signal(str, object)  # parameter name, value
     parameters_updated = Signal()  # emitted when parameter panel is rebuilt
 
@@ -74,6 +75,10 @@ class ParametersDock(QDockWidget):
         vlayout.addWidget(QLabel("Model:"))
         vlayout.addWidget(self.model_selector)
 
+        # Load Custom Model button
+        self.load_custom_model_btn = QPushButton("Load Custom Model...")
+        vlayout.addWidget(self.load_custom_model_btn)
+
         # Chi-squared display (placed above the parameter list)
         self.chi_label = QLabel("Chi-squared: N/A")
         try:
@@ -115,6 +120,7 @@ class ParametersDock(QDockWidget):
 
         # Connect internal signals
         self.model_selector.currentIndexChanged.connect(self._on_model_selected)
+        self.load_custom_model_btn.clicked.connect(self._on_load_custom_model_clicked)
         self.apply_btn.clicked.connect(self._on_apply_clicked)
         self.refresh_btn.clicked.connect(self._on_refresh_clicked)
 
@@ -122,6 +128,10 @@ class ParametersDock(QDockWidget):
         """Handle model selection change."""
         name = self.model_selector.currentText()
         self.model_changed.emit(name)
+
+    def _on_load_custom_model_clicked(self):
+        """Handle load custom model button click."""
+        self.load_custom_model_clicked.emit()
 
     def _on_apply_clicked(self):
         """Handle apply button click."""

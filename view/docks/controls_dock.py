@@ -16,7 +16,6 @@ class ControlsDock(QDockWidget):
     # Signals
     load_data_clicked = Signal()
     save_data_clicked = Signal()
-    load_custom_model_clicked = Signal()  # Load saved custom model
     run_fit_clicked = Signal()
     update_plot_clicked = Signal()
     edit_config_clicked = Signal()
@@ -46,7 +45,6 @@ class ControlsDock(QDockWidget):
         # Action buttons
         self.load_btn = QPushButton("Load Data")
         self.save_btn = QPushButton("Save Data")
-        self.load_custom_model_btn = QPushButton("Load Custom Model...")
         self.fit_btn = QPushButton("Run Fit")
         self.fit_settings_btn = QPushButton("Fit Settings...")
         self.update_btn = QPushButton("Update Plot")
@@ -56,7 +54,6 @@ class ControlsDock(QDockWidget):
         layout.addWidget(QLabel("Data Controls"))
         layout.addWidget(self.load_btn)
         layout.addWidget(self.save_btn)
-        layout.addWidget(self.load_custom_model_btn)
         layout.addWidget(self.fit_btn)
         layout.addWidget(self.fit_settings_btn)
         layout.addWidget(self.config_btn)
@@ -93,7 +90,6 @@ class ControlsDock(QDockWidget):
         # Connect internal signals to emit dock signals
         self.load_btn.clicked.connect(self._on_load_clicked)
         self.save_btn.clicked.connect(self._on_save_clicked)
-        self.load_custom_model_btn.clicked.connect(self._on_load_custom_model_clicked)
         self.fit_btn.clicked.connect(self._on_fit_clicked)
         self.fit_settings_btn.clicked.connect(self._on_fit_settings_clicked)
         self.update_btn.clicked.connect(self._on_update_clicked)
@@ -112,10 +108,6 @@ class ControlsDock(QDockWidget):
     def _on_save_clicked(self):
         """Handle save button click."""
         self.save_data_clicked.emit()
-
-    def _on_load_custom_model_clicked(self):
-        """Handle load custom model button click."""
-        self.load_custom_model_clicked.emit()
 
     def _on_fit_clicked(self):
         """Handle fit button click."""

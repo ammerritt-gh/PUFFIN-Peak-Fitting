@@ -364,7 +364,6 @@ class MainWindow(QMainWindow):
                 pass
         
         self.controls_dock.edit_config_clicked.connect(self._on_edit_config_clicked)
-        self.controls_dock.load_custom_model_clicked.connect(self._on_load_custom_model_clicked)
         self.controls_dock.exclude_toggled.connect(self._on_exclude_toggled)
         self.controls_dock.resolution_clicked.connect(self._on_resolution_clicked)
         self.controls_dock.fit_settings_clicked.connect(self._on_fit_settings_clicked)
@@ -388,6 +387,7 @@ class MainWindow(QMainWindow):
         
         # Parameters dock signals
         self.parameters_dock.model_changed.connect(self._on_model_changed)
+        self.parameters_dock.load_custom_model_clicked.connect(self._on_load_custom_model_clicked)
         self.parameters_dock.apply_clicked.connect(self._on_apply_clicked)
         self.parameters_dock.refresh_clicked.connect(self._refresh_parameters)
         self.parameters_dock.parameter_changed.connect(self._on_parameter_changed)
