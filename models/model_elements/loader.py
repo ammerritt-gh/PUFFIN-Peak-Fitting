@@ -362,6 +362,114 @@ def _create_evaluate_function(eval_expression: Optional[str], param_names: List[
     return evaluate
 
 
+def _create_composite_model_spec_class(definition: Dict[str, Any]) -> Type:
+    """Create a CompositeModelSpec class from a definition dictionary.
+    
+    Args:
+        definition: The validated definition dictionary with 'is_composite': True
+        
+    Returns:
+        A new CompositeModelSpec subclass
+    """
+    _ensure_base_classes()
+    
+    # Import CompositeModelSpec here to avoid circular imports
+    from models.model_specs import CompositeModelSpec
+    
+    element_name = definition.get("name", "Unknown")
+    description = definition.get("description", "")
+    components_def = definition.get("components", [])
+    
+    # Build the class
+    class DynamicCompositeModelSpec(CompositeModelSpec):
+        __doc__ = description or f"{element_name} composite model specification."
+        _element_name = element_name
+        _element_definition = definition
+        
+        def __init__(self):
+            super().__init__()
+            # Add components from definition
+            for comp_def in components_def:
+                element_type = comp_def.get("element")
+                prefix = comp_def.get("prefix")
+                default_params = comp_def.get("default_parameters", {})
+                
+                if not element_type:
+                    continue
+                
+                # Convert default_parameters to the format expected by add_component
+                initial_params = {}
+                fixed_params = {}
+                link_groups = {}
+                bounds = {}
+                
+                for param_name, param_data in default_params.items():
+                    if isinstance(param_data, dict):
+                        # Extract value
+                        initial_params[param_name] = param_data.get('value')
+                        
+                        # Track fixed state
+                        if param_data.get('fixed'):
+                            fixed_params[param_name] = True
+                        
+                        # Track link groups
+                        lg = param_data.get('link_group')
+                        if lg is not None and lg != 0:
+                            link_groups[param_name] = lg
+                        
+                        # Track bounds
+                        min_val = param_data.get('min')
+                        max_val = param_data.get('max')
+                        if min_val is not None or max_val is not None:
+                            bounds[param_name] = (min_val, max_val)
+                    else:
+                        # Simple value
+                        initial_params[param_name] = param_data
+                
+                try:
+                    # Add the component
+                    component = self.add_component(
+                        element_type,
+                        initial_params=initial_params,
+                        prefix=prefix
+                    )
+                    
+                    # Apply fixed state, link groups, and bounds
+                    if component:
+                        for param_name in component.spec.params.keys():
+                            param_obj = component.spec.params[param_name]
+                            
+                            # Apply fixed state
+                            if param_name in fixed_params:
+                                param_obj.fixed = True
+                            
+                            # Apply link group
+                            if param_name in link_groups:
+                                param_obj.link_group = link_groups[param_name]
+                            
+                            # Apply bounds
+                            if param_name in bounds:
+                                min_val, max_val = bounds[param_name]
+                                if min_val is not None:
+                                    param_obj.min = min_val
+                                if max_val is not None:
+                                    param_obj.max = max_val
+                        
+                        # Rebuild flat params to propagate changes
+                        self._rebuild_flat_params()
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to add component '{element_type}' to composite model: {e}")
+                    continue
+    
+    # Give the class a meaningful name
+    class_name = f"{element_name.replace(' ', '')}ModelSpec"
+    DynamicCompositeModelSpec.__name__ = class_name
+    DynamicCompositeModelSpec.__qualname__ = class_name
+    
+    return DynamicCompositeModelSpec
+
+
 def _create_model_spec_class(definition: Dict[str, Any]) -> Type:
     """Create a ModelSpec class from a definition dictionary.
     
@@ -369,8 +477,12 @@ def _create_model_spec_class(definition: Dict[str, Any]) -> Type:
         definition: The validated definition dictionary
         
     Returns:
-        A new ModelSpec subclass
+        A new ModelSpec subclass (or CompositeModelSpec if is_composite is True)
     """
+    # Check if this is a composite model
+    if definition.get("is_composite"):
+        return _create_composite_model_spec_class(definition)
+    
     _ensure_base_classes()
     
     element_name = definition.get("name", "Unknown")

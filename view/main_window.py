@@ -412,6 +412,7 @@ class MainWindow(QMainWindow):
         self.elements_dock.element_selected.connect(self._on_element_selected)
         self.elements_dock.element_add_clicked.connect(self._on_element_added_clicked)
         self.elements_dock.element_remove_clicked.connect(self._on_element_remove_clicked)
+        self.elements_dock.save_model_clicked.connect(self._on_save_model_clicked)
         self.elements_dock.element_rows_moved.connect(self._on_element_rows_moved)
         
         # Resolution dock signals
@@ -803,6 +804,45 @@ class MainWindow(QMainWindow):
         except Exception as e:
             try:
                 self.append_log(f"Failed to remove element: {e}")
+            except Exception:
+                pass
+
+    def _on_save_model_clicked(self):
+        """Handle save model button click - open dialog to save custom model."""
+        try:
+            if not self.viewmodel:
+                return
+            
+            # Get model data from viewmodel
+            model_data = self.viewmodel.get_model_data_for_save()
+            if model_data is None:
+                # Error message already shown by viewmodel
+                return
+            
+            # Import and show the dialog
+            from view.dialogs.save_model_dialog import SaveModelDialog
+            dialog = SaveModelDialog(model_data, parent=self)
+            
+            if dialog.exec():
+                # User clicked Save
+                model_name = dialog.get_model_name()
+                description = dialog.get_description()
+                save_path = dialog.get_save_path()
+                
+                if save_path:
+                    success = self.viewmodel.save_custom_model_to_yaml(
+                        str(save_path),
+                        model_name,
+                        description
+                    )
+                    
+                    if success:
+                        self.append_log(f"Model '{model_name}' saved successfully.")
+                    else:
+                        self.append_log(f"Failed to save model '{model_name}'.")
+        except Exception as e:
+            try:
+                self.append_log(f"Error saving model: {e}")
             except Exception:
                 pass
 

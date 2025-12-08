@@ -2355,6 +2355,171 @@ class FitterViewModel(QObject):
             pass
         return True
 
+    # --------------------------
+    # Save custom model
+    # --------------------------
+    def get_model_data_for_save(self) -> _typing.Optional[_typing.Dict[str, _typing.Any]]:
+        """
+        Extract current composite model structure for saving to YAML.
+        
+        Returns a dictionary containing:
+        - name: suggested model name
+        - components: list of component dictionaries with parameters
+        - default_save_path: default location to save the model
+        
+        Returns None if current model is not a composite model.
+        """
+        spec = getattr(self.state, "model_spec", None)
+        if not isinstance(spec, CompositeModelSpec):
+            self.log_message.emit("Only custom composite models can be saved.")
+            return None
+        
+        components_list = []
+        try:
+            for component in spec.list_components():
+                comp_data = {
+                    'type': component.spec.__class__.__name__.replace("ModelSpec", ""),
+                    'prefix': component.prefix,
+                    'label': component.label,
+                    'color': component.color,
+                    'parameters': {}
+                }
+                
+                # Get parameters for this component
+                for name, param in component.spec.params.items():
+                    param_data = {
+                        'value': getattr(param, 'value', None),
+                        'fixed': bool(getattr(param, 'fixed', False)),
+                        'link_group': getattr(param, 'link_group', None),
+                        'min': getattr(param, 'min', None),
+                        'max': getattr(param, 'max', None),
+                        'type': getattr(param, 'ptype', 'float'),
+                        'decimals': getattr(param, 'decimals', None),
+                        'step': getattr(param, 'step', None),
+                        'hint': getattr(param, 'hint', ''),
+                    }
+                    comp_data['parameters'][name] = param_data
+                
+                components_list.append(comp_data)
+        except Exception as exc:
+            self.log_message.emit(f"Error extracting model data: {exc}")
+            return None
+        
+        # Get default save path (models/model_elements/)
+        try:
+            from pathlib import Path
+            repo_root = Path(__file__).resolve().parent.parent
+            default_path = repo_root / "models" / "model_elements"
+        except Exception:
+            default_path = Path.home()
+        
+        return {
+            'name': 'CustomModel',
+            'components': components_list,
+            'default_save_path': str(default_path)
+        }
+
+    def save_custom_model_to_yaml(self, filepath: str, model_name: str, 
+                                   description: str = "") -> bool:
+        """
+        Save the current composite model to a YAML file.
+        
+        Args:
+            filepath: Full path where to save the YAML file
+            model_name: Display name for the model
+            description: Optional description of the model
+            
+        Returns:
+            True if save succeeded, False otherwise
+        """
+        from pathlib import Path
+        import yaml
+        
+        model_data = self.get_model_data_for_save()
+        if model_data is None:
+            return False
+        
+        try:
+            components = model_data.get('components', [])
+            
+            # Build YAML structure
+            yaml_data = {
+                'name': model_name,
+                'description': description or f"Custom composite model: {model_name}",
+                'version': 1,
+                'author': 'BigFit User',
+                'category': 'composite',
+                'is_composite': True,
+                'components': []
+            }
+            
+            # Add each component as a sub-model
+            for comp_idx, comp in enumerate(components):
+                comp_type = comp.get('type', 'Unknown')
+                prefix = comp.get('prefix', f'elem{comp_idx + 1}_')
+                
+                component_def = {
+                    'element': comp_type,
+                    'prefix': prefix,
+                    'default_parameters': {}
+                }
+                
+                # Add parameters with their default values and metadata
+                params = comp.get('parameters', {})
+                for param_name, param_info in params.items():
+                    param_def = {
+                        'value': param_info.get('value'),
+                        'type': param_info.get('type', 'float'),
+                    }
+                    
+                    # Add optional metadata
+                    if param_info.get('fixed'):
+                        param_def['fixed'] = True
+                    
+                    link_group = param_info.get('link_group')
+                    if link_group is not None and link_group != 0:
+                        param_def['link_group'] = link_group
+                    
+                    if param_info.get('min') is not None:
+                        param_def['min'] = param_info['min']
+                    if param_info.get('max') is not None:
+                        param_def['max'] = param_info['max']
+                    
+                    if param_info.get('decimals') is not None:
+                        param_def['decimals'] = param_info['decimals']
+                    if param_info.get('step') is not None:
+                        param_def['step'] = param_info['step']
+                    if param_info.get('hint'):
+                        param_def['hint'] = param_info['hint']
+                    
+                    component_def['default_parameters'][param_name] = param_def
+                
+                yaml_data['components'].append(component_def)
+            
+            # Write to file
+            Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False, 
+                         allow_unicode=True, indent=2)
+            
+            self.log_message.emit(f"Model saved to: {filepath}")
+            
+            # Reload model elements to make the new model available
+            try:
+                from models import reload_model_elements
+                reload_model_elements()
+                self.log_message.emit(f"Model '{model_name}' is now available for use.")
+            except Exception as e:
+                self.log_message.emit(f"Model saved but could not reload: {e}")
+            
+            return True
+            
+        except Exception as exc:
+            self.log_message.emit(f"Failed to save model: {exc}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     def _is_parameter_fixed(self, name: _typing.Optional[str]) -> bool:
         """Return True if the given parameter is flagged as fixed in the current spec."""
         if not name or not isinstance(name, str):
