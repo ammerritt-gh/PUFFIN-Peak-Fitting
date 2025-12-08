@@ -2406,8 +2406,8 @@ class FitterViewModel(QObject):
             return None
         
         # Get default save path (models/model_elements/)
+        from pathlib import Path
         try:
-            from pathlib import Path
             repo_root = Path(__file__).resolve().parent.parent
             default_path = repo_root / "models" / "model_elements"
         except Exception:

@@ -219,11 +219,23 @@ class SaveModelDialog(QDialog):
             return False
         
         # Check for valid filename characters
+        # Allow alphanumeric, spaces, hyphens, underscores
         if not re.match(r'^[a-zA-Z][a-zA-Z0-9_\s-]*$', name):
             QMessageBox.warning(
                 self,
                 "Invalid Name",
                 "Model name must start with a letter and contain only letters, numbers, spaces, hyphens, and underscores."
+            )
+            return False
+        
+        # Check that sanitization won't result in empty filename
+        test_filename = name.lower().replace(' ', '_').replace('-', '_')
+        test_filename = re.sub(r'[^a-z0-9_]', '', test_filename)
+        if not test_filename:
+            QMessageBox.warning(
+                self,
+                "Invalid Name",
+                "Model name must contain at least one alphanumeric character after conversion to filename."
             )
             return False
         
@@ -261,6 +273,15 @@ class SaveModelDialog(QDialog):
         # Replace spaces with underscores, make lowercase
         filename = name.lower().replace(' ', '_').replace('-', '_')
         filename = re.sub(r'[^a-z0-9_]', '', filename)  # Remove invalid chars
+        
+        # Ensure filename is not empty after sanitization
+        if not filename:
+            QMessageBox.warning(
+                self,
+                "Invalid Name",
+                "Model name must contain at least one alphanumeric character."
+            )
+            return
         
         self.save_path = Path(location) / f"{filename}.yaml"
         

@@ -494,7 +494,17 @@ def _create_composite_model_spec_class(definition: Dict[str, Any]) -> Type:
                     continue
     
     # Give the class a meaningful name
-    class_name = f"{element_name.replace(' ', '')}ModelSpec"
+    # Remove spaces and create valid Python identifier
+    clean_name = element_name.replace(' ', '')
+    # Remove any remaining invalid characters for Python identifiers
+    clean_name = ''.join(c if c.isalnum() or c == '_' else '' for c in clean_name)
+    # Ensure it starts with a letter or underscore
+    if clean_name and not (clean_name[0].isalpha() or clean_name[0] == '_'):
+        clean_name = '_' + clean_name
+    # Use a default name if sanitization resulted in empty string
+    if not clean_name:
+        clean_name = 'Custom'
+    class_name = f"{clean_name}ModelSpec"
     DynamicCompositeModelSpec.__name__ = class_name
     DynamicCompositeModelSpec.__qualname__ = class_name
     
@@ -578,7 +588,17 @@ def _create_model_spec_class(definition: Dict[str, Any]) -> Type:
                 return super().evaluate(x, params)
     
     # Give the class a meaningful name
-    class_name = f"{element_name.replace(' ', '')}ModelSpec"
+    # Remove spaces and create valid Python identifier
+    clean_name = element_name.replace(' ', '')
+    # Remove any remaining invalid characters for Python identifiers
+    clean_name = ''.join(c if c.isalnum() or c == '_' else '' for c in clean_name)
+    # Ensure it starts with a letter or underscore
+    if clean_name and not (clean_name[0].isalpha() or clean_name[0] == '_'):
+        clean_name = '_' + clean_name
+    # Use a default name if sanitization resulted in empty string
+    if not clean_name:
+        clean_name = 'Custom'
+    class_name = f"{clean_name}ModelSpec"
     DynamicModelSpec.__name__ = class_name
     DynamicModelSpec.__qualname__ = class_name
     
