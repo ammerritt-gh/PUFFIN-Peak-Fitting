@@ -1,0 +1,70 @@
+name: Test Custom Model
+description: 'Custom composite model: Test Custom Model'
+version: 1
+author: BigFit User
+category: composite
+is_composite: true
+components:
+- element: LinearBackground
+  prefix: elem1_
+  default_parameters:
+    Slope:
+      value: 0.0
+      type: float
+      fixed: true
+      decimals: 6
+      step: 0.01
+      hint: Linear slope (m)
+    Intercept:
+      value: 189.407807
+      type: float
+      decimals: 6
+      step: 0.1
+      hint: Vertical offset / intercept (b)
+- element: Gaussian
+  prefix: elem2_
+  default_parameters:
+    Area:
+      value: 2847.621
+      type: float
+      min: 0.0
+      decimals: 3
+      step: 1.0
+      hint: Integrated area of the Gaussian peak
+    Width:
+      value: 3.465
+      type: float
+      min: 1.0e-06
+      decimals: 3
+      step: 0.1
+      hint: Gaussian FWHM
+    Center:
+      value: 0.0
+      type: float
+      fixed: true
+      decimals: 3
+      hint: Peak center (x-axis)
+- element: Gaussian
+  prefix: elem3_
+  default_parameters:
+    Area:
+      value: 212.723
+      type: float
+      min: 0.0
+      decimals: 3
+      step: 1.0
+      hint: Integrated area of the Gaussian peak
+    Width:
+      value: 1.615
+      type: float
+      min: 1.0e-06
+      decimals: 3
+      step: 0.1
+      hint: Gaussian FWHM
+    Center:
+      value: 5.637
+      type: float
+      min: 5.0
+      max: 7.0
+      decimals: 3
+      hint: Peak center (x-axis)
