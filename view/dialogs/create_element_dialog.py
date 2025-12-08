@@ -70,18 +70,28 @@ class CreateElementDialog(QDialog):
         param_layout.addWidget(QLabel("Define parameters for this element:"))
         
         self.param_table = QTableWidget()
-        self.param_table.setColumnCount(5)
-        self.param_table.setHorizontalHeaderLabels(["Name", "Default Value", "Min", "Max", "Description"])
-        self.param_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.param_table.setColumnCount(9)
+        self.param_table.setHorizontalHeaderLabels([
+            "Name", "Default", "Min", "Max", "Description", 
+            "Control", "Modifiers", "Fixed", "Link Group"
+        ])
+        # Set resize modes to prevent misalignment
+        header = self.param_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Name
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Default
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Min
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Max
+        header.setSectionResizeMode(4, QHeaderView.Stretch)           # Description
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Control
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # Modifiers
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)  # Fixed
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)  # Link Group
+        
         self.param_table.setRowCount(3)  # Start with 3 rows
         
-        # Add some default rows
+        # Add some default rows with all columns
         for i in range(3):
-            self.param_table.setItem(i, 0, QTableWidgetItem(""))
-            self.param_table.setItem(i, 1, QTableWidgetItem("1.0"))
-            self.param_table.setItem(i, 2, QTableWidgetItem(""))
-            self.param_table.setItem(i, 3, QTableWidgetItem(""))
-            self.param_table.setItem(i, 4, QTableWidgetItem(""))
+            self._initialize_row(i)
         
         param_layout.addWidget(self.param_table)
         
@@ -151,15 +161,50 @@ class CreateElementDialog(QDialog):
         
         layout.addLayout(btn_layout)
 
+    def _initialize_row(self, row: int):
+        """Initialize a parameter row with widgets in all columns."""
+        # Name
+        self.param_table.setItem(row, 0, QTableWidgetItem(""))
+        # Default value
+        self.param_table.setItem(row, 1, QTableWidgetItem("1.0"))
+        # Min
+        self.param_table.setItem(row, 2, QTableWidgetItem(""))
+        # Max
+        self.param_table.setItem(row, 3, QTableWidgetItem(""))
+        # Description
+        self.param_table.setItem(row, 4, QTableWidgetItem(""))
+        
+        # Control action dropdown
+        control_combo = QComboBox()
+        control_combo.addItems(["wheel", "mouse_move", "none"])
+        control_combo.setCurrentText("wheel")
+        self.param_table.setCellWidget(row, 5, control_combo)
+        
+        # Modifiers dropdown
+        mod_combo = QComboBox()
+        mod_combo.addItems(["none", "Control", "Shift", "Alt"])
+        mod_combo.setCurrentText("none")
+        self.param_table.setCellWidget(row, 6, mod_combo)
+        
+        # Fixed checkbox
+        fixed_check = QCheckBox()
+        fixed_check.setChecked(False)
+        # Center the checkbox
+        fixed_widget = QWidget()
+        fixed_layout = QHBoxLayout(fixed_widget)
+        fixed_layout.addWidget(fixed_check)
+        fixed_layout.setAlignment(Qt.AlignCenter)
+        fixed_layout.setContentsMargins(0, 0, 0, 0)
+        self.param_table.setCellWidget(row, 7, fixed_widget)
+        
+        # Link group
+        self.param_table.setItem(row, 8, QTableWidgetItem("0"))
+
     def _add_parameter_row(self):
         """Add a new parameter row to the table."""
         row = self.param_table.rowCount()
         self.param_table.insertRow(row)
-        self.param_table.setItem(row, 0, QTableWidgetItem(""))
-        self.param_table.setItem(row, 1, QTableWidgetItem("1.0"))
-        self.param_table.setItem(row, 2, QTableWidgetItem(""))
-        self.param_table.setItem(row, 3, QTableWidgetItem(""))
-        self.param_table.setItem(row, 4, QTableWidgetItem(""))
+        self._initialize_row(row)
 
     def _remove_parameter_row(self):
         """Remove the selected parameter row."""
@@ -180,6 +225,7 @@ class CreateElementDialog(QDialog):
             min_item = self.param_table.item(row, 2)
             max_item = self.param_table.item(row, 3)
             desc_item = self.param_table.item(row, 4)
+            link_item = self.param_table.item(row, 8)
             
             param = {
                 'name': name,
@@ -199,6 +245,37 @@ class CreateElementDialog(QDialog):
             if max_item and max_item.text().strip():
                 try:
                     param['max'] = float(max_item.text())
+                except ValueError:
+                    pass
+            
+            # Get control action
+            control_widget = self.param_table.cellWidget(row, 5)
+            if control_widget and isinstance(control_widget, QComboBox):
+                action = control_widget.currentText()
+                if action != "none":
+                    param['control'] = {'action': action, 'modifiers': []}
+                    
+                    # Get modifiers
+                    mod_widget = self.param_table.cellWidget(row, 6)
+                    if mod_widget and isinstance(mod_widget, QComboBox):
+                        modifier = mod_widget.currentText()
+                        if modifier != "none":
+                            param['control']['modifiers'] = [modifier]
+            
+            # Get fixed state
+            fixed_widget = self.param_table.cellWidget(row, 7)
+            if fixed_widget:
+                # Find the checkbox within the widget
+                checkbox = fixed_widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    param['fixed'] = True
+            
+            # Get link group
+            if link_item and link_item.text().strip():
+                try:
+                    link_group = int(link_item.text())
+                    if link_group != 0:
+                        param['link_group'] = link_group
                 except ValueError:
                     pass
             
