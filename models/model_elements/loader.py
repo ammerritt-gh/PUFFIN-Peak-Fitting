@@ -167,31 +167,62 @@ def _validate_element_definition(definition: Dict[str, Any], filepath: Path) -> 
     Raises:
         ModelElementValidationError: If validation fails
     """
-    required_fields = ["name", "parameters"]
-    
-    for field in required_fields:
-        if field not in definition:
-            raise ModelElementValidationError(
-                f"Model element '{filepath.name}' is missing required field: {field}"
-            )
-    
-    # Validate parameters is a list
-    params = definition.get("parameters", [])
-    if not isinstance(params, list):
+    # Name is always required
+    if "name" not in definition:
         raise ModelElementValidationError(
-            f"Model element '{filepath.name}': 'parameters' must be a list"
+            f"Model element '{filepath.name}' is missing required field: name"
         )
     
-    # Validate each parameter has a name
-    for i, param in enumerate(params):
-        if not isinstance(param, dict):
+    # Check if this is a composite model
+    is_composite = definition.get("is_composite", False)
+    
+    if is_composite:
+        # Composite models need components
+        if "components" not in definition:
             raise ModelElementValidationError(
-                f"Model element '{filepath.name}': parameter {i} must be a dict"
+                f"Composite model element '{filepath.name}' is missing required field: components"
             )
-        if "name" not in param:
+        
+        components = definition.get("components", [])
+        if not isinstance(components, list):
             raise ModelElementValidationError(
-                f"Model element '{filepath.name}': parameter {i} is missing 'name'"
+                f"Composite model element '{filepath.name}': 'components' must be a list"
             )
+        
+        # Validate each component
+        for i, comp in enumerate(components):
+            if not isinstance(comp, dict):
+                raise ModelElementValidationError(
+                    f"Composite model element '{filepath.name}': component {i} must be a dict"
+                )
+            if "element" not in comp:
+                raise ModelElementValidationError(
+                    f"Composite model element '{filepath.name}': component {i} is missing 'element'"
+                )
+    else:
+        # Regular models need parameters
+        if "parameters" not in definition:
+            raise ModelElementValidationError(
+                f"Model element '{filepath.name}' is missing required field: parameters"
+            )
+        
+        # Validate parameters is a list
+        params = definition.get("parameters", [])
+        if not isinstance(params, list):
+            raise ModelElementValidationError(
+                f"Model element '{filepath.name}': 'parameters' must be a list"
+            )
+        
+        # Validate each parameter has a name
+        for i, param in enumerate(params):
+            if not isinstance(param, dict):
+                raise ModelElementValidationError(
+                    f"Model element '{filepath.name}': parameter {i} must be a dict"
+                )
+            if "name" not in param:
+                raise ModelElementValidationError(
+                    f"Model element '{filepath.name}': parameter {i} is missing 'name'"
+                )
 
 
 def _load_element_definition(filepath: Path) -> Dict[str, Any]:
