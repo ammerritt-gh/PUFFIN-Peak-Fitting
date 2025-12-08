@@ -388,6 +388,7 @@ class MainWindow(QMainWindow):
         # Parameters dock signals
         self.parameters_dock.model_changed.connect(self._on_model_changed)
         self.parameters_dock.load_custom_model_clicked.connect(self._on_load_custom_model_clicked)
+        self.parameters_dock.create_element_clicked.connect(self._on_create_element_clicked)
         self.parameters_dock.apply_clicked.connect(self._on_apply_clicked)
         self.parameters_dock.refresh_clicked.connect(self._refresh_parameters)
         self.parameters_dock.parameter_changed.connect(self._on_parameter_changed)
@@ -1827,6 +1828,22 @@ class MainWindow(QMainWindow):
                     self.append_log(f"Failed to load custom model: {model_name}")
         except Exception as e:
             self.append_log(f"Error loading custom model: {e}")
+
+    def _on_create_element_clicked(self):
+        """Handle create element button click - open dialog to create new element."""
+        try:
+            from view.dialogs.create_element_dialog import CreateElementDialog
+            dialog = CreateElementDialog(self)
+            
+            if dialog.exec():
+                save_path = dialog.get_save_path()
+                if save_path:
+                    self.append_log(f"Element saved to: {save_path}")
+                    self.append_log("Restart BigFit to use the new element.")
+        except Exception as e:
+            self.append_log(f"Error creating element: {e}")
+            import traceback
+            traceback.print_exc()
 
     # --------------------------
     # Resolution dock handlers
