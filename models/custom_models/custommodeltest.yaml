@@ -1,9 +1,8 @@
-name: Test Custom Model
-description: 'Custom composite model: Test Custom Model'
+name: CustomModeltest
+description: 'Saved custom model: CustomModeltest'
 version: 1
 author: BigFit User
-category: composite
-is_composite: true
+category: saved_custom_model
 components:
 - element: LinearBackground
   prefix: elem1_

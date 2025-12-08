@@ -1,0 +1,25 @@
+name: Triangle Peak
+description: It's a Triangle!
+version: 1
+author: BigFit User
+category: peak
+parameters:
+- name: Width
+  description: ''
+  type: float
+  value: 1.0
+  decimals: 3
+  step: 0.1
+- name: Height
+  description: ''
+  type: float
+  value: 1.0
+  decimals: 3
+  step: 0.1
+- name: Center
+  description: ''
+  type: float
+  value: 1.0
+  decimals: 3
+  step: 0.1
+evaluate: np.maximum(0, Height * (1 - 2 * np.abs(x - Center) / Width))
