@@ -103,17 +103,22 @@ class CreateElementDialog(QDialog):
         code_group = QGroupBox("Evaluation Code")
         code_layout = QVBoxLayout()
         
-        code_layout.addWidget(QLabel(
-            "Enter Python code to evaluate the model.\n"
-            "Available: x (numpy array), parameter names, np, sqrt, log, exp, pi, sin, cos, tan\n"
-            "Must return a numpy array of the same shape as x."
-        ))
+        instructions = QLabel(
+            "Enter the expression to calculate y values from x.\n"
+            "Start with: y = \n"
+            "Available: x (input array), parameter names (defined above)\n"
+            "Functions: np, sqrt, log, exp, pi, sin, cos, tan\n"
+            "\n"
+            "Examples:\n"
+            "  y = Amplitude * np.exp(-((x - Center) / Width)**2)  # Gaussian\n"
+            "  y = Amplitude / (1 + ((x - Center) / Width)**2)      # Lorentzian\n"
+            "  y = Slope * x + Intercept                            # Linear"
+        )
+        instructions.setWordWrap(True)
+        code_layout.addWidget(instructions)
         
         self.code_edit = QTextEdit()
-        self.code_edit.setPlaceholderText(
-            "# Example:\n"
-            "# return Amplitude * np.exp(-((x - Center) / Width)**2)"
-        )
+        self.code_edit.setPlainText("y = ")
         self.code_edit.setFontFamily("Courier")
         code_layout.addWidget(self.code_edit)
         
@@ -218,6 +223,15 @@ class CreateElementDialog(QDialog):
                 self.test_output.setPlainText("❌ Error: No evaluation code provided")
                 return
             
+            # Check if code starts with "y = " and convert it to "return "
+            if code.startswith("y = "):
+                code = "return " + code[4:]
+            elif code.startswith("y="):
+                code = "return " + code[2:]
+            elif not code.startswith("return "):
+                # If it doesn't have "return" or "y =", assume it's the expression and add "return"
+                code = "return " + code
+            
             # Create test environment
             import numpy as np
             from numpy import sqrt, log, exp, pi, sin, cos, tan
@@ -247,12 +261,16 @@ class CreateElementDialog(QDialog):
             
             # Validate result
             if not isinstance(result, np.ndarray):
-                result = np.asarray(result)
+                result = np.asarray(result, dtype=float)
             
-            if result.shape != x.shape:
+            # Ensure result is the same shape as x by flattening if needed
+            if result.ndim > 1:
+                result = result.flatten()
+            
+            if len(result) != len(x):
                 self.test_output.setPlainText(
-                    f"⚠️  Warning: Result shape {result.shape} doesn't match input shape {x.shape}\n"
-                    f"But code compiled and executed successfully."
+                    f"❌ Error: Result length {len(result)} doesn't match input length {len(x)}\n"
+                    f"Make sure your expression returns one value per input x value."
                 )
             else:
                 self.test_output.setPlainText(
@@ -320,6 +338,12 @@ class CreateElementDialog(QDialog):
         parameters = self._get_parameters()
         code = self.code_edit.toPlainText().strip()
         
+        # Convert "y = " syntax to just the expression
+        if code.startswith("y = "):
+            code = code[4:]
+        elif code.startswith("y="):
+            code = code[2:]
+        
         # Generate filename
         filename = name.lower().replace(' ', '_').replace('-', '_')
         filename = re.sub(r'[^a-z0-9_]', '', filename)
@@ -362,7 +386,7 @@ class CreateElementDialog(QDialog):
             'author': 'BigFit User',
             'category': category,
             'parameters': parameters,
-            'evaluate': code
+            'evaluate': code  # Save as single-line string
         }
         
         try:
@@ -370,12 +394,29 @@ class CreateElementDialog(QDialog):
                 yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False,
                          allow_unicode=True, indent=2)
             
-            QMessageBox.information(
-                self,
-                "Success",
-                f"Element saved to:\n{self.save_path}\n\n"
-                "Restart BigFit to use the new element."
-            )
+            # Try to reload elements immediately
+            reload_success = False
+            try:
+                from models import reload_model_elements
+                reload_model_elements()
+                reload_success = True
+            except Exception as reload_err:
+                pass
+            
+            if reload_success:
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    f"Element saved to:\n{self.save_path}\n\n"
+                    "Element loaded! It's now available for use in Custom Model."
+                )
+            else:
+                QMessageBox.information(
+                    self,
+                    "Success",
+                    f"Element saved to:\n{self.save_path}\n\n"
+                    "Restart BigFit to use the new element."
+                )
             
             self.accept()
             
