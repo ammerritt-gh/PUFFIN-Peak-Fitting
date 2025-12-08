@@ -2410,8 +2410,15 @@ class FitterViewModel(QObject):
         try:
             repo_root = Path(__file__).resolve().parent.parent
             default_path = repo_root / "models" / "model_elements"
+            # Ensure the directory exists
+            default_path.mkdir(parents=True, exist_ok=True)
         except Exception:
-            default_path = Path.home()
+            # Fallback to current working directory if we can't determine repo root
+            try:
+                default_path = Path.cwd() / "models" / "model_elements"
+                default_path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                default_path = Path.cwd()
         
         return {
             'name': 'CustomModel',
@@ -2506,9 +2513,13 @@ class FitterViewModel(QObject):
             
             # Reload model elements to make the new model available
             try:
+                # Import is at top of module as: from models import ... reload_model_elements
+                # So we can use it directly here if needed, but for clarity let's import
                 from models import reload_model_elements
                 reload_model_elements()
                 self.log_message.emit(f"Model '{model_name}' is now available for use.")
+            except ImportError as e:
+                self.log_message.emit(f"Model saved but could not import reload function: {e}")
             except Exception as e:
                 self.log_message.emit(f"Model saved but could not reload: {e}")
             

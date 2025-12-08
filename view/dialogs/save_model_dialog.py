@@ -220,11 +220,13 @@ class SaveModelDialog(QDialog):
         
         # Check for valid filename characters
         # Allow alphanumeric, spaces, hyphens, underscores
+        # Note: spaces and hyphens will be converted to underscores in the filename
         if not re.match(r'^[a-zA-Z][a-zA-Z0-9_\s-]*$', name):
             QMessageBox.warning(
                 self,
                 "Invalid Name",
-                "Model name must start with a letter and contain only letters, numbers, spaces, hyphens, and underscores."
+                "Model name must start with a letter and contain only letters, numbers, spaces, hyphens, and underscores.\n\n"
+                "Note: Spaces and hyphens will be converted to underscores in the filename."
             )
             return False
         
