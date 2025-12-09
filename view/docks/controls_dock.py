@@ -4,7 +4,7 @@ Controls dock widget for data operations and file management.
 
 from PySide6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QPushButton, QLabel,
-    QHBoxLayout, QListWidget, QListWidgetItem, QAbstractItemView, QComboBox
+    QHBoxLayout, QListWidget, QListWidgetItem, QAbstractItemView
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
