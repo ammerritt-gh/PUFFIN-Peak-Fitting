@@ -254,11 +254,27 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
         saved_model_name = fit_data.get("model_name", "Voigt")
         saved_elements = fit_data.get("elements", [])
 
+        # Determine if saved state represents a composite model
+        # Check both if model_name indicates composite OR if there are multiple elements
+        is_composite_fit = (
+            saved_model_name and saved_model_name.lower() in ("composite", "custom", "custom model", "custommodel")
+        ) or len(saved_elements) > 1
+        
         # If model names differ or no spec, try to get the correct one
         current_model_name = getattr(model_state, "model_name", None)
         need_new_spec = model_spec is None or (current_model_name and current_model_name.lower() != saved_model_name.lower())
         
-        if need_new_spec:
+        # Special handling for composite models
+        if is_composite_fit and need_new_spec:
+            # Force load as Custom Model for composite fits
+            try:
+                model_spec = get_model_spec("Custom Model")
+                setattr(model_state, "model_spec", model_spec)
+                setattr(model_state, "model_name", "Custom Model")
+            except Exception as e:
+                logger.warning(f"Could not load Custom Model for composite fit: {e}")
+        elif need_new_spec:
+            # Regular atomic model
             try:
                 model_spec = get_model_spec(saved_model_name)
                 setattr(model_state, "model_spec", model_spec)
