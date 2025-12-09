@@ -30,6 +30,9 @@ Note: model spec classes are detected by finding classes that subclass
 """
 
 from typing import Dict, List
+import logging
+
+logger = logging.getLogger(__name__)
 
 from . import model_specs as _model_specs
 from .model_state import ModelState
@@ -90,12 +93,56 @@ def get_available_model_spec_classes() -> Dict[str, type]:
     return dict(_available_model_specs)
 
 def get_available_model_names() -> list:
-    """Return sorted list of discovered model spec class names (e.g. 'VoigtModelSpec').
+    """Return sorted list of available models.
     
-    This includes hardcoded ModelSpec classes only. Saved custom models are NOT included
-    here as they are loaded via a separate mechanism (load_saved_custom_model).
+    Returns YAML-based atomic models, saved custom models, and "Custom Model" option.
+    Falls back gracefully if no YAML files are available.
+    
+    Returns:
+        List of model names suitable for display in UI
     """
-    names = list(_available_model_specs.keys())
+    names = []
+    
+    # Add YAML-based atomic elements from model_elements/
+    try:
+        element_names = list_available_elements()
+        # Convert to display names (capitalize first letter of each word)
+        for elem in element_names:
+            display_name = ' '.join(word.capitalize() for word in elem.replace('_', ' ').split())
+            names.append(display_name)
+    except Exception as e:
+        logger.warning(f"Could not load model elements: {e}")
+    
+    # Add saved custom models from custom_models/
+    try:
+        from pathlib import Path
+        import yaml
+        
+        repo_root = Path(__file__).resolve().parent.parent
+        custom_models_dir = repo_root / "models" / "custom_models"
+        
+        if custom_models_dir.exists():
+            for yaml_file in custom_models_dir.glob("*.yaml"):
+                try:
+                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    if data and data.get('category') == 'saved_custom_model':
+                        model_name = data.get('name')
+                        if model_name and model_name not in names:
+                            names.append(model_name)
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning(f"Could not load saved custom models: {e}")
+    
+    # Always add "Custom Model" option for building composite models
+    if "Custom Model" not in names:
+        names.append("Custom Model")
+    
+    # If no models were found, ensure at least Custom Model is available
+    if not names:
+        names = ["Custom Model"]
+    
     return sorted(names)
 
 # Build __all__ for clean `from models import *` behavior.

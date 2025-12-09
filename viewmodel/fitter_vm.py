@@ -2171,6 +2171,17 @@ class FitterViewModel(QObject):
             model_name = (model_name or "").strip()
             if not model_name:
                 return
+            
+            # Check if this is a saved custom model first
+            is_saved_custom = self._is_saved_custom_model(model_name)
+            
+            if is_saved_custom:
+                # Load the saved custom model (switches to Custom Model and loads components)
+                success = self.load_saved_custom_model(model_name)
+                if success:
+                    return
+                # If loading failed, fall through to regular model loading
+            
             # Create and attach a model_spec for the requested model
             model_spec = get_model_spec(model_name)
             # Allow the spec to initialize from current data
@@ -2519,6 +2530,33 @@ class FitterViewModel(QObject):
             self.log_message.emit(f"Failed to save model: {exc}")
             import traceback
             traceback.print_exc()
+            return False
+
+    def _is_saved_custom_model(self, model_name: str) -> bool:
+        """Check if a model name corresponds to a saved custom model."""
+        from pathlib import Path
+        import yaml
+        
+        try:
+            repo_root = Path(__file__).resolve().parent.parent
+            custom_models_dir = repo_root / "models" / "custom_models"
+            
+            if not custom_models_dir.exists():
+                return False
+            
+            for yaml_file in custom_models_dir.glob("*.yaml"):
+                try:
+                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    if data and data.get('category') == 'saved_custom_model':
+                        saved_name = data.get('name', '')
+                        if saved_name == model_name:
+                            return True
+                except Exception:
+                    continue
+            
+            return False
+        except Exception:
             return False
 
     def list_saved_custom_models(self) -> _typing.List[str]:

@@ -771,10 +771,11 @@ def get_model_spec(model_name: str) -> BaseModelSpec:
     """Get a model specification by name.
     
     This function first tries to load from YAML-based model elements in 
-    models/model_elements/, then falls back to hardcoded specs for compatibility.
+    models/model_elements/, then checks for saved custom models, then falls 
+    back to hardcoded specs for compatibility.
     
     Args:
-        model_name: Name of the model (case-insensitive)
+        model_name: Name of the model (case-insensitive or display name)
         
     Returns:
         A ModelSpec instance for the requested model
@@ -811,8 +812,32 @@ def get_model_spec(model_name: str) -> BaseModelSpec:
         return get_element_spec(element_name)
         
     except ModelElementNotFoundError as e:
-        # Element not found in YAML files - try hardcoded fallbacks
+        # Element not found in YAML files - check if it's a saved custom model
         logger.debug(f"Model element '{model_name}' not found in YAML files: {e}")
+        
+        # Check if this is a saved custom model (returns composite spec marker)
+        try:
+            from pathlib import Path
+            import yaml
+            
+            repo_root = Path(__file__).resolve().parent.parent
+            custom_models_dir = repo_root / "models" / "custom_models"
+            
+            if custom_models_dir.exists():
+                for yaml_file in custom_models_dir.glob("*.yaml"):
+                    try:
+                        with open(yaml_file, 'r', encoding='utf-8') as f:
+                            data = yaml.safe_load(f)
+                        if data and data.get('category') == 'saved_custom_model':
+                            saved_name = data.get('name', '')
+                            if saved_name.lower() == name or saved_name == model_name:
+                                # Return a composite spec as a marker
+                                # The actual loading will be done by load_saved_custom_model
+                                return CompositeModelSpec()
+                    except Exception:
+                        continue
+        except Exception:
+            pass
     except ImportError as e:
         # model_elements module not available
         logger.debug(f"Could not import model_elements: {e}")
