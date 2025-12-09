@@ -1816,6 +1816,36 @@ class FitterViewModel(QObject):
             self.log_message.emit(f"Failed to get current file path: {e}")
         return None
 
+    def _get_default_model_choice(self) -> _typing.Optional[str]:
+        """Get the default model choice from config."""
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            default_model = getattr(cfg, "default_model_for_new_files", None)
+            return default_model if default_model else "(Use Last Fit)"
+        except Exception:
+            return "(Use Last Fit)"
+
+    def set_default_model(self, model_name: str):
+        """Set the default model for newly loaded files without saved fits.
+        
+        Args:
+            model_name: The model name, or special values:
+                       "(Use Last Fit)" - use saved default fit
+                       "(None - User Select)" - no auto-load
+        """
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            cfg.default_model_for_new_files = model_name
+            try:
+                cfg.save()
+            except Exception:
+                pass
+            self._log_message(f"Default model set to: {model_name}")
+        except Exception as e:
+            log_exception("Failed to save default model choice", e, vm=self)
+
     def _save_current_fit(self):
         """Save the current fit state to both default and file-specific locations."""
         try:
@@ -1895,6 +1925,23 @@ class FitterViewModel(QObject):
         Returns True if the default fit was loaded, False otherwise.
         """
         try:
+            # Check what the default model selector is set to
+            default_model_choice = self._get_default_model_choice()
+            
+            if default_model_choice == "(None - User Select)":
+                # User doesn't want auto-loading
+                return False
+            elif default_model_choice and default_model_choice not in ("(Use Last Fit)", "(None - User Select)"):
+                # User selected a specific model as default
+                try:
+                    self.set_model(default_model_choice)
+                    self._log_message(f"Loaded default model: {default_model_choice}")
+                    return True
+                except Exception as e:
+                    log_exception(f"Failed to load default model '{default_model_choice}'", e, vm=self)
+                    # Fall through to try loading saved fit
+            
+            # Default behavior: try to load the saved default fit
             from dataio import load_default_fit
 
             result = load_default_fit(self.state, apply_excluded=False)
@@ -2179,6 +2226,12 @@ class FitterViewModel(QObject):
                 # Load the saved custom model (switches to Custom Model and loads components)
                 success = self.load_saved_custom_model(model_name)
                 if success:
+                    # Explicitly set model_name to "Custom Model" so UI dropdown shows correct value
+                    setattr(self.state, "model_name", "Custom Model")
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
                     return
                 # If loading failed, fall through to regular model loading
             

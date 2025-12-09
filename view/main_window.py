@@ -384,6 +384,7 @@ class MainWindow(QMainWindow):
         self.controls_dock.file_selected.connect(self._on_file_selected)
         self.controls_dock.remove_file_clicked.connect(self._on_remove_file_clicked)
         self.controls_dock.clear_files_clicked.connect(self._on_clear_files_clicked)
+        self.controls_dock.default_model_changed.connect(self._on_default_model_changed)
         
         # Parameters dock signals
         self.parameters_dock.model_changed.connect(self._on_model_changed)
@@ -603,6 +604,16 @@ class MainWindow(QMainWindow):
                     getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
         except Exception as e:
             self.append_log(f"Failed to clear datasets: {e}")
+
+    def _on_default_model_changed(self, model_name):
+        """Called when user changes the default model selector."""
+        if not self.viewmodel or not model_name:
+            return
+        try:
+            if hasattr(self.viewmodel, "set_default_model"):
+                self.viewmodel.set_default_model(model_name)
+        except Exception as e:
+            self.append_log(f"Failed to set default model: {e}")
 
     # --------------------------
     # Element list handlers
