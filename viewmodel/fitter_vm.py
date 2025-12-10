@@ -344,6 +344,12 @@ class FitterViewModel(QObject):
             except Exception:
                 pass
 
+        # CRITICAL: Ensure model_name matches model_spec before emitting signals
+        try:
+            self._synchronize_model_state()
+        except Exception:
+            pass
+
         try:
             self.parameters_updated.emit()
         except Exception:
@@ -430,6 +436,30 @@ class FitterViewModel(QObject):
             self._log_message("Cleared queued datasets and restored initial synthetic data.")
         except Exception as e:
             log_exception("Failed to clear plot", e, vm=self)
+
+    def _synchronize_model_state(self):
+        """Ensure model_name matches model_spec type.
+        
+        This is critical for UI consistency when switching files or loading fits.
+        Composite models must show as "Custom Model", atomic models show their spec name.
+        """
+        try:
+            from models.model_specs import CompositeModelSpec
+            
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return
+            
+            if isinstance(model_spec, CompositeModelSpec):
+                # All composite models display as "Custom Model"
+                setattr(self.state, "model_name", "Custom Model")
+            else:
+                # Atomic models: use spec's name if available
+                spec_name = getattr(model_spec, "name", None)
+                if spec_name:
+                    setattr(self.state, "model_name", spec_name)
+        except Exception:
+            pass
 
     # --------------------------
     # Configuration accessors (ViewModel handles logic/persistence)
@@ -2241,7 +2271,8 @@ class FitterViewModel(QObject):
                 self.log_message.emit(f"Model switched to: Custom Model")
                 
                 # Now load the components from the saved model
-                success = self.load_saved_custom_model(model_name)
+                # Pass emit_signals=False to avoid duplicate signal emissions
+                success = self.load_saved_custom_model(model_name, emit_signals=False)
                 if success:
                     # Notify View to refresh parameters/plot
                     try:
@@ -2668,12 +2699,13 @@ class FitterViewModel(QObject):
         
         return sorted(models)
 
-    def load_saved_custom_model(self, model_name: str) -> bool:
+    def load_saved_custom_model(self, model_name: str, emit_signals: bool = True) -> bool:
         """
         Load a saved custom model by switching to Custom Model and adding its components.
         
         Args:
             model_name: Name of the saved model to load
+            emit_signals: Whether to emit parameters_updated and update_plot signals (default: True)
             
         Returns:
             True if successful, False otherwise
@@ -2801,10 +2833,8 @@ class FitterViewModel(QObject):
             
             self.log_message.emit(f"Loaded custom model: {model_name}")
             
-            # Notify UI to refresh - only if not called from set_model
-            # (set_model will handle the refresh itself)
-            # Check if we were called from set_model by looking at model_spec state
-            if not hasattr(self, '_loading_from_set_model'):
+            # Notify UI to refresh - only if caller requests it
+            if emit_signals:
                 try:
                     self.parameters_updated.emit()
                 except Exception:
