@@ -2233,12 +2233,28 @@ class FitterViewModel(QObject):
             is_saved_custom = self._is_saved_custom_model(model_name)
             
             if is_saved_custom:
-                # Load the saved custom model (switches to Custom Model and loads components)
+                # For saved custom models, set up Custom Model spec FIRST
+                # This ensures any immediate get_parameters() calls work correctly
+                spec = get_model_spec("Custom Model")
+                setattr(self.state, "model_spec", spec)
+                setattr(self.state, "model_name", "Custom Model")
+                self.log_message.emit(f"Model switched to: Custom Model")
+                
+                # Now load the components from the saved model
                 success = self.load_saved_custom_model(model_name)
                 if success:
-                    # load_saved_custom_model already sets model_name and emits signals
+                    # Notify View to refresh parameters/plot
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
+                    try:
+                        self.update_plot()
+                    except Exception:
+                        pass
                     return
-                # If loading failed, fall through to regular model loading
+                # If loading failed, Custom Model is still active but empty
+                return
             
             # Create and attach a model_spec for the requested model
             model_spec = get_model_spec(model_name)
@@ -2689,16 +2705,19 @@ class FitterViewModel(QObject):
             with open(yaml_file, 'r', encoding='utf-8') as f:
                 model_data = yaml.safe_load(f)
             
-            # Create Custom Model (composite) directly without calling set_model to avoid recursion
-            from models import get_model_spec
-            spec = get_model_spec("Custom Model")
+            # Get the Custom Model spec - either from state (if set_model already created it)
+            # or create it now (if called directly via Load Custom Model button)
+            spec = getattr(self.state, "model_spec", None)
             if not isinstance(spec, CompositeModelSpec):
-                self.log_message.emit("Failed to create Custom Model spec")
-                return False
-            
-            # Set the spec on state
-            setattr(self.state, "model_spec", spec)
-            setattr(self.state, "model_name", "Custom Model")
+                from models import get_model_spec
+                spec = get_model_spec("Custom Model")
+                if not isinstance(spec, CompositeModelSpec):
+                    self.log_message.emit("Failed to create Custom Model spec")
+                    return False
+                
+                # Set the spec on state
+                setattr(self.state, "model_spec", spec)
+                setattr(self.state, "model_name", "Custom Model")
             
             # Clear any existing components
             spec.clear_components()
@@ -2773,17 +2792,28 @@ class FitterViewModel(QObject):
                 self.log_message.emit(f"Error: No components could be added from saved model '{model_name}'")
                 return False
             
-            # Notify UI to refresh
-            self.parameters_updated.emit()
-            self.update_plot()
-            
             # Save the loaded model as fit for current data
+            # (Do this before emitting signals so the fit is saved with the right state)
             try:
                 self._save_current_fit()
             except Exception:
                 pass
             
             self.log_message.emit(f"Loaded custom model: {model_name}")
+            
+            # Notify UI to refresh - only if not called from set_model
+            # (set_model will handle the refresh itself)
+            # Check if we were called from set_model by looking at model_spec state
+            if not hasattr(self, '_loading_from_set_model'):
+                try:
+                    self.parameters_updated.emit()
+                except Exception:
+                    pass
+                try:
+                    self.update_plot()
+                except Exception:
+                    pass
+            
             return True
             
         except Exception as exc:
