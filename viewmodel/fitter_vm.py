@@ -2226,12 +2226,7 @@ class FitterViewModel(QObject):
                 # Load the saved custom model (switches to Custom Model and loads components)
                 success = self.load_saved_custom_model(model_name)
                 if success:
-                    # Explicitly set model_name to "Custom Model" so UI dropdown shows correct value
-                    setattr(self.state, "model_name", "Custom Model")
-                    try:
-                        self.parameters_updated.emit()
-                    except Exception:
-                        pass
+                    # load_saved_custom_model already sets model_name and emits signals
                     return
                 # If loading failed, fall through to regular model loading
             
@@ -2684,20 +2679,27 @@ class FitterViewModel(QObject):
             with open(yaml_file, 'r', encoding='utf-8') as f:
                 model_data = yaml.safe_load(f)
             
-            # Switch to Custom Model (composite)
-            self.set_model("Custom Model")
-            
-            # Get the composite spec
-            spec = getattr(self.state, "model_spec", None)
+            # Create Custom Model (composite) directly without calling set_model to avoid recursion
+            from models import get_model_spec
+            spec = get_model_spec("Custom Model")
             if not isinstance(spec, CompositeModelSpec):
-                self.log_message.emit("Failed to switch to Custom Model")
+                self.log_message.emit("Failed to create Custom Model spec")
                 return False
+            
+            # Set the spec on state
+            setattr(self.state, "model_spec", spec)
+            setattr(self.state, "model_name", "Custom Model")
             
             # Clear any existing components
             spec.clear_components()
             
             # Add components from saved model
             components_data = model_data.get('components', [])
+            if not components_data:
+                self.log_message.emit(f"Warning: No components found in saved model '{model_name}'")
+                return False
+                
+            components_added = 0
             for comp_data in components_data:
                 element_type = comp_data.get('element')
                 prefix = comp_data.get('prefix')
@@ -2716,6 +2718,7 @@ class FitterViewModel(QObject):
                     )
                     
                     if component:
+                        components_added += 1
                         # Apply saved parameter values and properties
                         for param_name, param_data in default_params.items():
                             if param_name in component.spec.params:
@@ -2752,7 +2755,13 @@ class FitterViewModel(QObject):
                         
                 except Exception as e:
                     self.log_message.emit(f"Warning: Could not add component '{element_type}': {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
+            
+            if components_added == 0:
+                self.log_message.emit(f"Error: No components could be added from saved model '{model_name}'")
+                return False
             
             # Notify UI to refresh
             self.parameters_updated.emit()
