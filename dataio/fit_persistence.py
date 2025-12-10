@@ -260,6 +260,9 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
             saved_model_name and saved_model_name.lower() in ("composite", "custom", "custom model", "custommodel")
         ) or len(saved_elements) > 1
         
+        # Debug logging
+        logger.info(f"Loading fit: model_name='{saved_model_name}', num_elements={len(saved_elements)}, is_composite={is_composite_fit}")
+        
         # If model names differ or no spec, try to get the correct one
         current_model_name = getattr(model_state, "model_name", None)
         need_new_spec = model_spec is None or (current_model_name and current_model_name.lower() != saved_model_name.lower())

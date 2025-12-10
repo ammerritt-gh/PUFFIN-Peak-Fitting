@@ -1956,6 +1956,16 @@ class FitterViewModel(QObject):
                 # Restore resolution state if present
                 if resolution_state:
                     self.set_resolution_state(resolution_state)
+                
+                # Debug: Log what was loaded
+                model_name = getattr(self.state, "model_name", "Unknown")
+                model_spec = getattr(self.state, "model_spec", None)
+                if isinstance(model_spec, CompositeModelSpec):
+                    num_components = len(model_spec.list_components()) if hasattr(model_spec, "list_components") else 0
+                    self._log_message(f"Loaded Custom Model with {num_components} component(s)")
+                else:
+                    self._log_message(f"Loaded model: {model_name}")
+                
                 return True
         except Exception as e:
             log_exception("Failed to load default fit", e, vm=self)
