@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 import math
-import re
 from functools import partial
 
 
@@ -54,17 +53,9 @@ class ParametersDock(QDockWidget):
             # lazy import to avoid circular imports at module import time
             from models import get_available_model_names
 
-            def _pretty(name: str) -> str:
-                # remove trailing 'ModelSpec' and split CamelCase into words
-                s = re.sub(r"ModelSpec$", "", name)
-                s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
-                pretty = s.strip()
-                if pretty.lower() == "composite":
-                    return "Custom Model"
-                return pretty
-
             spec_class_names = get_available_model_names()
-            display_names = [_pretty(n) for n in spec_class_names]
+            # Use the names as declared in YAML/custom definitions
+            display_names = list(spec_class_names)
             # ensure we have at least the historical defaults as fallback
             if display_names:
                 self.model_selector.addItems(display_names)

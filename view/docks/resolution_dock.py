@@ -65,20 +65,10 @@ class ResolutionDock(QDockWidget):
         # Populate with available resolution models
         try:
             from models import get_available_model_names
-            import re
-            
-            def _pretty(name: str) -> str:
-                s = re.sub(r"ModelSpec$", "", name)
-                s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
-                pretty = s.strip()
-                if pretty.lower() == "composite":
-                    return "Custom Model"
-                return pretty
-            
+
             spec_class_names = get_available_model_names()
-            display_names = [_pretty(n) for n in spec_class_names]
             # Filter out model types not suitable for resolution convolution
-            display_names = [n for n in display_names if n.lower() not in EXCLUDED_RESOLUTION_MODELS]
+            display_names = [n for n in spec_class_names if n.lower() not in EXCLUDED_RESOLUTION_MODELS]
             if display_names:
                 self.model_selector.addItems(display_names)
             else:

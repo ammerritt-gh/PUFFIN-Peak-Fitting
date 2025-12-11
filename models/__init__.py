@@ -103,13 +103,12 @@ def get_available_model_names() -> list:
     """
     names = []
     
-    # Add YAML-based atomic elements from model_elements/
+    # Add YAML-based atomic elements from model_elements/ using their declared names
     try:
-        element_names = list_available_elements()
-        # Convert to display names (capitalize first letter of each word)
-        for elem in element_names:
-            display_name = ' '.join(word.capitalize() for word in elem.replace('_', ' ').split())
-            names.append(display_name)
+        for elem in list_available_elements():
+            # Use the YAML-declared name verbatim so UI and loader stay in sync
+            if elem not in names:
+                names.append(elem)
     except Exception as e:
         logger.warning(f"Could not load model elements: {e}")
     

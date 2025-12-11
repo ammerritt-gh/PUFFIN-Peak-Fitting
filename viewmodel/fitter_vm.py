@@ -2283,6 +2283,14 @@ class FitterViewModel(QObject):
                         self.update_plot()
                     except Exception:
                         pass
+                    # Immediately persist the new model/fit state for the active file
+                    try:
+                        self._save_current_fit()
+                    except Exception:
+                        try:
+                            self.log_message.emit("Failed to auto-save fit after model change.")
+                        except Exception:
+                            pass
                     return
                 # If loading failed, Custom Model is still active but empty
                 return
@@ -2320,6 +2328,14 @@ class FitterViewModel(QObject):
                 self.update_plot()
             except Exception:
                 pass
+            # Persist the new model/fit immediately when switching models
+            try:
+                self._save_current_fit()
+            except Exception:
+                try:
+                    self.log_message.emit("Failed to auto-save fit after model change.")
+                except Exception:
+                    pass
         except Exception as e:
             self.log_message.emit(f"Failed to set model '{model_name}': {e}")
 

@@ -92,20 +92,10 @@ class ControlsDock(QDockWidget):
         # Populate with available models dynamically
         try:
             from models import get_available_model_names
-            import re
-            
-            def _pretty(name: str) -> str:
-                s = re.sub(r"ModelSpec$", "", name)
-                s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
-                pretty = s.strip()
-                if pretty.lower() == "composite":
-                    return "Custom Model"
-                return pretty
-            
-            spec_names = get_available_model_names()
-            for spec_name in spec_names:
-                display_name = _pretty(spec_name)
-                self.default_model_combo.addItem(display_name, spec_name)
+
+            for spec_name in get_available_model_names():
+                # Store the raw name as both display text and user data to keep it canonical
+                self.default_model_combo.addItem(spec_name, spec_name)
         except Exception:
             # Fallback if model discovery fails
             pass
