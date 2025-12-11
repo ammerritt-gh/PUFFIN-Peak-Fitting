@@ -89,7 +89,7 @@ The Save Model Dialog opens:
 ║                                                                    ║
 ║ ┌─ Save Location ────────────────────────────────────────────┐   ║
 ║ │                                                             │   ║
-║ │ [/path/to/BigFit/models/model_elements] [Browse...]        │   ║
+║ │ [/path/to/BigFit/models/custom_models] [Browse...]        │   ║
 ║ │                                                             │   ║
 ║ │ The model will be saved as a .yaml file                    │   ║
 ║ │                                                             │   ║
@@ -103,13 +103,13 @@ The Save Model Dialog opens:
 
 **Status Message** in log:
 ```
-Model saved to: /path/to/BigFit/models/model_elements/two_peaks_with_background.yaml
+Model saved to: /path/to/BigFit/models/custom_models/two_peaks_with_background.yaml
 Model 'Two Peaks with Background' is now available for use.
 ```
 
 **File Created**:
 ```yaml
-# models/model_elements/two_peaks_with_background.yaml
+# models/custom_models/two_peaks_with_background.yaml
 name: Two Peaks with Background
 description: Custom model with two peaks and a linear background
 version: 1
@@ -280,10 +280,16 @@ While in the dialog:
 5. Use for future samples with similar features
 
 ### Workflow 3: Share with Team
+When sharing models with teammates, be aware there are two different kinds of saved YAMLs:
+
+- **Composite (saved custom model)**: Configuration files describing a composite built from existing elements. These are stored by default in `models/custom_models/` and use the category `saved_custom_model`.
+- **Atomic element (model element)**: Individual element definitions (e.g., `Gaussian`, `Linear Background`) are stored in `models/model_elements/` and are used when constructing composites.
+
+Sharing steps:
 1. Create and validate a model
 2. Add clear description
 3. Save to shared location
-4. Team members copy to their `models/model_elements/`
+4. Team members copy composite YAMLs to their `models/custom_models/` and element YAMLs (if sharing new element types) to `models/model_elements/`
 5. Everyone has consistent model for analysis
 
 ## Troubleshooting

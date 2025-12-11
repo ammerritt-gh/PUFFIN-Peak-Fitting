@@ -10,13 +10,12 @@ This test verifies that:
 """
 
 import sys
-import tempfile
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from models import CompositeModelSpec, get_model_spec, reload_model_elements
+from models import CompositeModelSpec
 
 
 def test_save_and_load_custom_model():

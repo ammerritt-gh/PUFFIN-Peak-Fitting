@@ -2577,6 +2577,37 @@ class FitterViewModel(QObject):
         model_data = self.get_model_data_for_save()
         if model_data is None:
             return False
+
+    def _scan_saved_custom_models(self) -> _typing.Dict[str, object]:
+        """Scan the models/custom_models directory for saved custom-model YAML files.
+
+        Returns a mapping of saved-model display name -> pathlib.Path to the YAML file.
+        Only files with 'category' == 'saved_custom_model' are included. If no
+        directory exists or an error occurs, an empty dict is returned.
+        """
+        try:
+            from pathlib import Path
+            import yaml
+
+            repo_root = Path(__file__).resolve().parent.parent
+            custom_models_dir = repo_root / "models" / "custom_models"
+            if not custom_models_dir.exists():
+                return {}
+
+            found = {}
+            for yaml_file in custom_models_dir.glob("*.yaml"):
+                try:
+                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    if data and data.get('category') == 'saved_custom_model':
+                        name = data.get('name', yaml_file.stem)
+                        found[name] = yaml_file
+                except Exception:
+                    # Skip unreadable/invalid files
+                    continue
+            return found
+        except Exception:
+            return {}
         
         try:
             components = model_data.get('components', [])
@@ -2655,28 +2686,9 @@ class FitterViewModel(QObject):
 
     def _is_saved_custom_model(self, model_name: str) -> bool:
         """Check if a model name corresponds to a saved custom model."""
-        from pathlib import Path
-        import yaml
-        
         try:
-            repo_root = Path(__file__).resolve().parent.parent
-            custom_models_dir = repo_root / "models" / "custom_models"
-            
-            if not custom_models_dir.exists():
-                return False
-            
-            for yaml_file in custom_models_dir.glob("*.yaml"):
-                try:
-                    with open(yaml_file, 'r', encoding='utf-8') as f:
-                        data = yaml.safe_load(f)
-                    if data and data.get('category') == 'saved_custom_model':
-                        saved_name = data.get('name', '')
-                        if saved_name == model_name:
-                            return True
-                except Exception:
-                    continue
-            
-            return False
+            models = self._scan_saved_custom_models()
+            return model_name in models
         except Exception:
             return False
 
@@ -2687,33 +2699,11 @@ class FitterViewModel(QObject):
         Returns:
             List of model names (without .yaml extension)
         """
-        from pathlib import Path
-        import yaml
-        
-        models = []
         try:
-            repo_root = Path(__file__).resolve().parent.parent
-            custom_models_dir = repo_root / "models" / "custom_models"
-            
-            if not custom_models_dir.exists():
-                return models
-            
-            for yaml_file in custom_models_dir.glob("*.yaml"):
-                try:
-                    with open(yaml_file, 'r', encoding='utf-8') as f:
-                        data = yaml.safe_load(f)
-                    
-                    # Check if it's a saved custom model
-                    if data and data.get('category') == 'saved_custom_model':
-                        model_name = data.get('name', yaml_file.stem)
-                        models.append(model_name)
-                except Exception:
-                    # Skip files that can't be loaded
-                    continue
+            models = list(self._scan_saved_custom_models().keys())
+            return sorted(models)
         except Exception:
-            pass
-        
-        return sorted(models)
+            return []
 
     def load_saved_custom_model(self, model_name: str, emit_signals: bool = True) -> bool:
         """
@@ -2726,31 +2716,17 @@ class FitterViewModel(QObject):
         Returns:
             True if successful, False otherwise
         """
-        from pathlib import Path
         import yaml
-        
+
         try:
-            # Find the YAML file for this model
-            repo_root = Path(__file__).resolve().parent.parent
-            custom_models_dir = repo_root / "models" / "custom_models"
-            
-            yaml_file = None
-            for candidate in custom_models_dir.glob("*.yaml"):
-                try:
-                    with open(candidate, 'r', encoding='utf-8') as f:
-                        data = yaml.safe_load(f)
-                    if data and data.get('name') == model_name:
-                        yaml_file = candidate
-                        break
-                except Exception:
-                    continue
-            
+            models_map = self._scan_saved_custom_models()
+            yaml_file = models_map.get(model_name)
             if yaml_file is None:
                 self.log_message.emit(f"Could not find saved model: {model_name}")
                 return False
-            
+
             # Load the model data
-            with open(yaml_file, 'r', encoding='utf-8') as f:
+            with open(str(yaml_file), 'r', encoding='utf-8') as f:
                 model_data = yaml.safe_load(f)
             
             # Get the Custom Model spec - either from state (if set_model already created it)

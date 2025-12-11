@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QTextEdit, QFormLayout, QGroupBox,
     QMessageBox, QFileDialog, QTableWidget, QTableWidgetItem,
-    QHeaderView, QDoubleSpinBox, QComboBox, QWidget, QCheckBox
+    QHeaderView, QComboBox, QWidget, QCheckBox
 )
 from PySide6.QtCore import Qt
 from pathlib import Path

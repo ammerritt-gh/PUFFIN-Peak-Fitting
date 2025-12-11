@@ -448,34 +448,36 @@ def _create_composite_model_spec_class(definition: Dict[str, Any]) -> Type:
         def __init__(self):
             super().__init__()
             # Add components from definition
+            # Collect failures so we can provide a clear summary after attempting all components
+            failures = []
             for comp_def in components_def:
                 element_type = comp_def.get("element")
                 prefix = comp_def.get("prefix")
                 default_params = comp_def.get("default_parameters", {})
-                
+
                 if not element_type:
                     continue
-                
+
                 # Convert default_parameters to the format expected by add_component
                 initial_params = {}
                 fixed_params = {}
                 link_groups = {}
                 bounds = {}
-                
+
                 for param_name, param_data in default_params.items():
                     if isinstance(param_data, dict):
                         # Extract value
                         initial_params[param_name] = param_data.get('value')
-                        
+
                         # Track fixed state
                         if param_data.get('fixed'):
                             fixed_params[param_name] = True
-                        
+
                         # Track link groups
                         lg = param_data.get('link_group')
                         if lg is not None and lg != 0:
                             link_groups[param_name] = lg
-                        
+
                         # Track bounds
                         min_val = param_data.get('min')
                         max_val = param_data.get('max')
@@ -484,7 +486,7 @@ def _create_composite_model_spec_class(definition: Dict[str, Any]) -> Type:
                     else:
                         # Simple value
                         initial_params[param_name] = param_data
-                
+
                 try:
                     # Add the component
                     component = self.add_component(
@@ -492,20 +494,20 @@ def _create_composite_model_spec_class(definition: Dict[str, Any]) -> Type:
                         initial_params=initial_params,
                         prefix=prefix
                     )
-                    
+
                     # Apply fixed state, link groups, and bounds
                     if component:
                         for param_name in component.spec.params.keys():
                             param_obj = component.spec.params[param_name]
-                            
+
                             # Apply fixed state
                             if param_name in fixed_params:
                                 param_obj.fixed = True
-                            
+
                             # Apply link group
                             if param_name in link_groups:
                                 param_obj.link_group = link_groups[param_name]
-                            
+
                             # Apply bounds
                             if param_name in bounds:
                                 min_val, max_val = bounds[param_name]
@@ -513,13 +515,39 @@ def _create_composite_model_spec_class(definition: Dict[str, Any]) -> Type:
                                     param_obj.min = min_val
                                 if max_val is not None:
                                     param_obj.max = max_val
-                        
+
                         # Rebuild flat params to propagate changes
                         self._rebuild_flat_params()
-                        
+
                 except Exception as e:
-                    logger.warning(f"Failed to add component '{element_type}' to composite model '{element_name}': {e}")
+                    # Record the failure for a summary that will be shown after initialization
+                    failures.append({
+                        "element": element_type,
+                        "prefix": prefix,
+                        "error": str(e),
+                    })
+                    logger.warning(
+                        f"Failed to add component '{element_type}' to composite model '{element_name}': {e}"
+                    )
                     continue
+
+            # If any component additions failed, attach a summary to the instance
+            # and emit a single, clear error message summarizing failures. This
+            # makes it easier for callers loading saved composite models to see
+            # which components didn't load and why.
+            if failures:
+                # Attach detailed failures for programmatic inspection
+                self._component_load_errors = failures
+
+                # Build a concise summary message
+                summary_lines = [
+                    f"{f['element']} (prefix={f['prefix']}) -> {f['error']}" for f in failures
+                ]
+                summary = (
+                    f"Composite model '{element_name}' had {len(failures)} component(s) fail to load: "
+                    + "; ".join(summary_lines)
+                )
+                logger.error(summary)
     
     # Give the class a meaningful name
     clean_name = _sanitize_class_name(element_name)
