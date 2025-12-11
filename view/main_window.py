@@ -1556,6 +1556,24 @@ class MainWindow(QMainWindow):
             return
         
         try:
+            # Keep the model selector label in sync with the active state's model
+            try:
+                desired_model = getattr(self.viewmodel.state, "model_name", None)
+                if not desired_model:
+                    spec = getattr(self.viewmodel.state, "model_spec", None)
+                    desired_model = getattr(spec, "name", None)
+
+                combo = getattr(self.parameters_dock, "model_selector", None)
+                if desired_model and combo is not None:
+                    if combo.currentText() != str(desired_model):
+                        combo.blockSignals(True)
+                        try:
+                            self.parameters_dock.set_model_selector(desired_model)
+                        finally:
+                            combo.blockSignals(False)
+            except Exception:
+                pass
+
             specs = getattr(self.viewmodel, "get_parameters", lambda: {})()
             if specs is None:
                 specs = {}
