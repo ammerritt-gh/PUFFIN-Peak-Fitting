@@ -4,7 +4,7 @@ Controls dock widget for data operations and file management.
 
 from PySide6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QPushButton, QLabel,
-    QHBoxLayout, QListWidget, QListWidgetItem, QAbstractItemView
+    QHBoxLayout, QListWidget, QListWidgetItem, QAbstractItemView, QComboBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
@@ -26,6 +26,7 @@ class ControlsDock(QDockWidget):
     clear_files_clicked = Signal()
     resolution_clicked = Signal()  # Open resolution window
     fit_settings_clicked = Signal()  # Open fit settings window
+    default_model_changed = Signal(str)  # default model for new files
 
     def __init__(self, parent=None):
         """
@@ -83,6 +84,23 @@ class ControlsDock(QDockWidget):
         file_btn_row.addWidget(self.clear_list_btn)
         layout.addLayout(file_btn_row)
 
+        # Default model selector for new files
+        layout.addWidget(QLabel("Default Model for New Files:"))
+        self.default_model_combo = QComboBox()
+        self.default_model_combo.addItem("(Use Last Fit)", None)
+        self.default_model_combo.addItem("(None - User Select)", None)
+        # Populate with available models dynamically
+        try:
+            from models import get_available_model_names
+
+            for spec_name in get_available_model_names():
+                # Store the raw name as both display text and user data to keep it canonical
+                self.default_model_combo.addItem(spec_name, spec_name)
+        except Exception:
+            # Fallback if model discovery fails
+            pass
+        layout.addWidget(self.default_model_combo)
+
         layout.addStretch(1)
 
         self.setWidget(left_widget)
@@ -100,6 +118,7 @@ class ControlsDock(QDockWidget):
         self.file_list.currentRowChanged.connect(self._on_file_selected)
         self.remove_btn.clicked.connect(self._on_remove_clicked)
         self.clear_list_btn.clicked.connect(self._on_clear_clicked)
+        self.default_model_combo.currentIndexChanged.connect(self._on_default_model_changed)
 
     def _on_load_clicked(self):
         """Handle load button click."""
@@ -148,6 +167,16 @@ class ControlsDock(QDockWidget):
     def _on_clear_clicked(self):
         """Handle clear button click."""
         self.clear_files_clicked.emit()
+
+    def _on_default_model_changed(self, index):
+        """Handle default model selection change."""
+        model_data = self.default_model_combo.itemData(index)
+        if model_data:
+            self.default_model_changed.emit(model_data)
+        else:
+            # Special values like "(Use Last Fit)" or "(None)"
+            text = self.default_model_combo.itemText(index)
+            self.default_model_changed.emit(text)
 
     def update_files(self, files):
         """

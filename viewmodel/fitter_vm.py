@@ -344,6 +344,12 @@ class FitterViewModel(QObject):
             except Exception:
                 pass
 
+        # CRITICAL: Ensure model_name matches model_spec before emitting signals
+        try:
+            self._synchronize_model_state()
+        except Exception:
+            pass
+
         try:
             self.parameters_updated.emit()
         except Exception:
@@ -430,6 +436,30 @@ class FitterViewModel(QObject):
             self._log_message("Cleared queued datasets and restored initial synthetic data.")
         except Exception as e:
             log_exception("Failed to clear plot", e, vm=self)
+
+    def _synchronize_model_state(self):
+        """Ensure model_name matches model_spec type.
+        
+        This is critical for UI consistency when switching files or loading fits.
+        Composite models must show as "Custom Model", atomic models show their spec name.
+        """
+        try:
+            from models.model_specs import CompositeModelSpec
+            
+            model_spec = getattr(self.state, "model_spec", None)
+            if model_spec is None:
+                return
+            
+            if isinstance(model_spec, CompositeModelSpec):
+                # All composite models display as "Custom Model"
+                setattr(self.state, "model_name", "Custom Model")
+            else:
+                # Atomic models: use spec's name if available
+                spec_name = getattr(model_spec, "name", None)
+                if spec_name:
+                    setattr(self.state, "model_name", spec_name)
+        except Exception:
+            pass
 
     # --------------------------
     # Configuration accessors (ViewModel handles logic/persistence)
@@ -1816,6 +1846,36 @@ class FitterViewModel(QObject):
             self.log_message.emit(f"Failed to get current file path: {e}")
         return None
 
+    def _get_default_model_choice(self) -> _typing.Optional[str]:
+        """Get the default model choice from config."""
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            default_model = getattr(cfg, "default_model_for_new_files", None)
+            return default_model if default_model else "(Use Last Fit)"
+        except Exception:
+            return "(Use Last Fit)"
+
+    def set_default_model(self, model_name: str):
+        """Set the default model for newly loaded files without saved fits.
+        
+        Args:
+            model_name: The model name, or special values:
+                       "(Use Last Fit)" - use saved default fit
+                       "(None - User Select)" - no auto-load
+        """
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            cfg.default_model_for_new_files = model_name
+            try:
+                cfg.save()
+            except Exception:
+                pass
+            self._log_message(f"Default model set to: {model_name}")
+        except Exception as e:
+            log_exception("Failed to save default model choice", e, vm=self)
+
     def _save_current_fit(self):
         """Save the current fit state to both default and file-specific locations."""
         try:
@@ -1895,6 +1955,23 @@ class FitterViewModel(QObject):
         Returns True if the default fit was loaded, False otherwise.
         """
         try:
+            # Check what the default model selector is set to
+            default_model_choice = self._get_default_model_choice()
+            
+            if default_model_choice == "(None - User Select)":
+                # User doesn't want auto-loading
+                return False
+            elif default_model_choice and default_model_choice not in ("(Use Last Fit)", "(None - User Select)"):
+                # User selected a specific model as default
+                try:
+                    self.set_model(default_model_choice)
+                    self._log_message(f"Loaded default model: {default_model_choice}")
+                    return True
+                except Exception as e:
+                    log_exception(f"Failed to load default model '{default_model_choice}'", e, vm=self)
+                    # Fall through to try loading saved fit
+            
+            # Default behavior: try to load the saved default fit
             from dataio import load_default_fit
 
             result = load_default_fit(self.state, apply_excluded=False)
@@ -1909,6 +1986,16 @@ class FitterViewModel(QObject):
                 # Restore resolution state if present
                 if resolution_state:
                     self.set_resolution_state(resolution_state)
+                
+                # Debug: Log what was loaded
+                model_name = getattr(self.state, "model_name", "Unknown")
+                model_spec = getattr(self.state, "model_spec", None)
+                if isinstance(model_spec, CompositeModelSpec):
+                    num_components = len(model_spec.list_components()) if hasattr(model_spec, "list_components") else 0
+                    self._log_message(f"Loaded Custom Model with {num_components} component(s)")
+                else:
+                    self._log_message(f"Loaded model: {model_name}")
+                
                 return True
         except Exception as e:
             log_exception("Failed to load default fit", e, vm=self)
@@ -2171,6 +2258,43 @@ class FitterViewModel(QObject):
             model_name = (model_name or "").strip()
             if not model_name:
                 return
+            
+            # Check if this is a saved custom model first
+            is_saved_custom = self._is_saved_custom_model(model_name)
+            
+            if is_saved_custom:
+                # For saved custom models, set up Custom Model spec FIRST
+                # This ensures any immediate get_parameters() calls work correctly
+                spec = get_model_spec("Custom Model")
+                setattr(self.state, "model_spec", spec)
+                setattr(self.state, "model_name", "Custom Model")
+                self.log_message.emit(f"Model switched to: Custom Model")
+                
+                # Now load the components from the saved model
+                # Pass emit_signals=False to avoid duplicate signal emissions
+                success = self.load_saved_custom_model(model_name, emit_signals=False)
+                if success:
+                    # Notify View to refresh parameters/plot
+                    try:
+                        self.parameters_updated.emit()
+                    except Exception:
+                        pass
+                    try:
+                        self.update_plot()
+                    except Exception:
+                        pass
+                    # Immediately persist the new model/fit state for the active file
+                    try:
+                        self._save_current_fit()
+                    except Exception:
+                        try:
+                            self.log_message.emit("Failed to auto-save fit after model change.")
+                        except Exception:
+                            pass
+                    return
+                # If loading failed, Custom Model is still active but empty
+                return
+            
             # Create and attach a model_spec for the requested model
             model_spec = get_model_spec(model_name)
             # Allow the spec to initialize from current data
@@ -2204,6 +2328,14 @@ class FitterViewModel(QObject):
                 self.update_plot()
             except Exception:
                 pass
+            # Persist the new model/fit immediately when switching models
+            try:
+                self._save_current_fit()
+            except Exception:
+                try:
+                    self.log_message.emit("Failed to auto-save fit after model change.")
+                except Exception:
+                    pass
         except Exception as e:
             self.log_message.emit(f"Failed to set model '{model_name}': {e}")
 
@@ -2354,6 +2486,363 @@ class FitterViewModel(QObject):
         except Exception:
             pass
         return True
+
+    # --------------------------
+    # Save custom model
+    # --------------------------
+    def get_model_data_for_save(self) -> _typing.Optional[_typing.Dict[str, _typing.Any]]:
+        """
+        Extract current composite model structure for saving to YAML.
+        
+        Returns a dictionary containing:
+        - name: suggested model name
+        - components: list of component dictionaries with parameters
+        - default_save_path: default location to save the model
+        
+        Returns None if current model is not a composite model.
+        """
+        spec = getattr(self.state, "model_spec", None)
+        if not isinstance(spec, CompositeModelSpec):
+            self.log_message.emit("Only custom composite models can be saved.")
+            return None
+        
+        components_list = []
+        try:
+            for component in spec.list_components():
+                comp_data = {
+                    'type': component.spec.__class__.__name__.replace("ModelSpec", ""),
+                    'prefix': component.prefix,
+                    'label': component.label,
+                    'color': component.color,
+                    'parameters': {}
+                }
+                
+                # Get parameters for this component
+                for name, param in component.spec.params.items():
+                    param_data = {
+                        'value': getattr(param, 'value', None),
+                        'fixed': bool(getattr(param, 'fixed', False)),
+                        'link_group': getattr(param, 'link_group', None),
+                        'min': getattr(param, 'min', None),
+                        'max': getattr(param, 'max', None),
+                        'type': getattr(param, 'ptype', 'float'),
+                        'decimals': getattr(param, 'decimals', None),
+                        'step': getattr(param, 'step', None),
+                        'hint': getattr(param, 'hint', ''),
+                    }
+                    comp_data['parameters'][name] = param_data
+                
+                components_list.append(comp_data)
+        except Exception as exc:
+            self.log_message.emit(f"Error extracting model data: {exc}")
+            return None
+        
+        # Get default save path (models/custom_models/)
+        from pathlib import Path
+        try:
+            repo_root = Path(__file__).resolve().parent.parent
+            default_path = repo_root / "models" / "custom_models"
+            # Ensure the directory exists
+            default_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Fallback to current working directory if we can't determine repo root
+            try:
+                default_path = Path.cwd() / "models" / "custom_models"
+                default_path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                default_path = Path.cwd()
+        
+        return {
+            'name': 'CustomModel',
+            'components': components_list,
+            'default_save_path': str(default_path)
+        }
+
+    def save_custom_model_to_yaml(self, filepath: str, model_name: str, 
+                                   description: str = "") -> bool:
+        """
+        Save the current composite model to a YAML file.
+        
+        Args:
+            filepath: Full path where to save the YAML file
+            model_name: Display name for the model
+            description: Optional description of the model
+            
+        Returns:
+            True if save succeeded, False otherwise
+        """
+        from pathlib import Path
+        import yaml
+        
+        model_data = self.get_model_data_for_save()
+        if model_data is None:
+            return False
+
+    def _scan_saved_custom_models(self) -> _typing.Dict[str, object]:
+        """Scan the models/custom_models directory for saved custom-model YAML files.
+
+        Returns a mapping of saved-model display name -> pathlib.Path to the YAML file.
+        Only files with 'category' == 'saved_custom_model' are included. If no
+        directory exists or an error occurs, an empty dict is returned.
+        """
+        try:
+            from pathlib import Path
+            import yaml
+
+            repo_root = Path(__file__).resolve().parent.parent
+            custom_models_dir = repo_root / "models" / "custom_models"
+            if not custom_models_dir.exists():
+                return {}
+
+            found = {}
+            for yaml_file in custom_models_dir.glob("*.yaml"):
+                try:
+                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    if data and data.get('category') == 'saved_custom_model':
+                        name = data.get('name', yaml_file.stem)
+                        found[name] = yaml_file
+                except Exception:
+                    # Skip unreadable/invalid files
+                    continue
+            return found
+        except Exception:
+            return {}
+        
+        try:
+            components = model_data.get('components', [])
+            
+            # Build YAML structure for saved custom model
+            # Note: This is NOT a model element, but a saved configuration
+            # It will be loaded by switching to Custom Model and adding components
+            yaml_data = {
+                'name': model_name,
+                'description': description or f"Saved custom model: {model_name}",
+                'version': 1,
+                'author': 'BigFit User',
+                'category': 'saved_custom_model',  # Mark as saved custom model, not element
+                'components': []
+            }
+            
+            # Add each component as a sub-model
+            for comp_idx, comp in enumerate(components):
+                comp_type = comp.get('type', 'Unknown')
+                prefix = comp.get('prefix', f'elem{comp_idx + 1}_')
+                
+                component_def = {
+                    'element': comp_type,
+                    'prefix': prefix,
+                    'default_parameters': {}
+                }
+                
+                # Add parameters with their default values and metadata
+                params = comp.get('parameters', {})
+                for param_name, param_info in params.items():
+                    param_def = {
+                        'value': param_info.get('value'),
+                        'type': param_info.get('type', 'float'),
+                    }
+                    
+                    # Add optional metadata
+                    if param_info.get('fixed'):
+                        param_def['fixed'] = True
+                    
+                    link_group = param_info.get('link_group')
+                    if link_group is not None and link_group != 0:
+                        param_def['link_group'] = link_group
+                    
+                    if param_info.get('min') is not None:
+                        param_def['min'] = param_info['min']
+                    if param_info.get('max') is not None:
+                        param_def['max'] = param_info['max']
+                    
+                    if param_info.get('decimals') is not None:
+                        param_def['decimals'] = param_info['decimals']
+                    if param_info.get('step') is not None:
+                        param_def['step'] = param_info['step']
+                    if param_info.get('hint'):
+                        param_def['hint'] = param_info['hint']
+                    
+                    component_def['default_parameters'][param_name] = param_def
+                
+                yaml_data['components'].append(component_def)
+            
+            # Write to file
+            Path(filepath).parent.mkdir(parents=True, exist_ok=True)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                yaml.dump(yaml_data, f, default_flow_style=False, sort_keys=False, 
+                         allow_unicode=True, indent=2)
+            
+            self.log_message.emit(f"Model saved to: {filepath}")
+            self.log_message.emit(f"Model '{model_name}' can be loaded from the 'Load Custom Model' menu.")
+            
+            return True
+            
+        except Exception as exc:
+            self.log_message.emit(f"Failed to save model: {exc}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _is_saved_custom_model(self, model_name: str) -> bool:
+        """Check if a model name corresponds to a saved custom model."""
+        try:
+            models = self._scan_saved_custom_models()
+            return model_name in models
+        except Exception:
+            return False
+
+    def list_saved_custom_models(self) -> _typing.List[str]:
+        """
+        List all available saved custom models.
+        
+        Returns:
+            List of model names (without .yaml extension)
+        """
+        try:
+            models = list(self._scan_saved_custom_models().keys())
+            return sorted(models)
+        except Exception:
+            return []
+
+    def load_saved_custom_model(self, model_name: str, emit_signals: bool = True) -> bool:
+        """
+        Load a saved custom model by switching to Custom Model and adding its components.
+        
+        Args:
+            model_name: Name of the saved model to load
+            emit_signals: Whether to emit parameters_updated and update_plot signals (default: True)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        import yaml
+
+        try:
+            models_map = self._scan_saved_custom_models()
+            yaml_file = models_map.get(model_name)
+            if yaml_file is None:
+                self.log_message.emit(f"Could not find saved model: {model_name}")
+                return False
+
+            # Load the model data
+            with open(str(yaml_file), 'r', encoding='utf-8') as f:
+                model_data = yaml.safe_load(f)
+            
+            # Get the Custom Model spec - either from state (if set_model already created it)
+            # or create it now (if called directly via Load Custom Model button)
+            spec = getattr(self.state, "model_spec", None)
+            if not isinstance(spec, CompositeModelSpec):
+                from models import get_model_spec
+                spec = get_model_spec("Custom Model")
+                if not isinstance(spec, CompositeModelSpec):
+                    self.log_message.emit("Failed to create Custom Model spec")
+                    return False
+                
+                # Set the spec on state
+                setattr(self.state, "model_spec", spec)
+                setattr(self.state, "model_name", "Custom Model")
+            
+            # Clear any existing components
+            spec.clear_components()
+            
+            # Add components from saved model
+            components_data = model_data.get('components', [])
+            if not components_data:
+                self.log_message.emit(f"Warning: No components found in saved model '{model_name}'")
+                return False
+                
+            components_added = 0
+            for comp_data in components_data:
+                element_type = comp_data.get('element')
+                prefix = comp_data.get('prefix')
+                default_params = comp_data.get('default_parameters', {})
+                
+                if not element_type:
+                    continue
+                
+                try:
+                    # Add the component
+                    component = spec.add_component(
+                        element_type,
+                        prefix=prefix,
+                        data_x=getattr(self.state, "x_data", None),
+                        data_y=getattr(self.state, "y_data", None),
+                    )
+                    
+                    if component:
+                        components_added += 1
+                        # Apply saved parameter values and properties
+                        for param_name, param_data in default_params.items():
+                            if param_name in component.spec.params:
+                                param_obj = component.spec.params[param_name]
+                                
+                                # Apply value
+                                if isinstance(param_data, dict):
+                                    value = param_data.get('value')
+                                    if value is not None:
+                                        param_obj.value = value
+                                    
+                                    # Apply fixed state
+                                    if param_data.get('fixed'):
+                                        param_obj.fixed = True
+                                    
+                                    # Apply link group
+                                    link_group = param_data.get('link_group')
+                                    if link_group is not None and link_group != 0:
+                                        param_obj.link_group = link_group
+                                    
+                                    # Apply bounds
+                                    min_val = param_data.get('min')
+                                    if min_val is not None:
+                                        param_obj.min = min_val
+                                    max_val = param_data.get('max')
+                                    if max_val is not None:
+                                        param_obj.max = max_val
+                                else:
+                                    # Simple value
+                                    param_obj.value = param_data
+                        
+                        # Rebuild flat params to propagate changes
+                        spec._rebuild_flat_params()
+                        
+                except Exception as e:
+                    self.log_message.emit(f"Warning: Could not add component '{element_type}': {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
+            if components_added == 0:
+                self.log_message.emit(f"Error: No components could be added from saved model '{model_name}'")
+                return False
+            
+            # Save the loaded model as fit for current data
+            # (Do this before emitting signals so the fit is saved with the right state)
+            try:
+                self._save_current_fit()
+            except Exception:
+                pass
+            
+            self.log_message.emit(f"Loaded custom model: {model_name}")
+            
+            # Notify UI to refresh - only if caller requests it
+            if emit_signals:
+                try:
+                    self.parameters_updated.emit()
+                except Exception:
+                    pass
+                try:
+                    self.update_plot()
+                except Exception:
+                    pass
+            
+            return True
+            
+        except Exception as exc:
+            self.log_message.emit(f"Failed to load custom model '{model_name}': {exc}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def _is_parameter_fixed(self, name: _typing.Optional[str]) -> bool:
         """Return True if the given parameter is flagged as fixed in the current spec."""

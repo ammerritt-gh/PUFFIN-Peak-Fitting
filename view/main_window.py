@@ -384,9 +384,12 @@ class MainWindow(QMainWindow):
         self.controls_dock.file_selected.connect(self._on_file_selected)
         self.controls_dock.remove_file_clicked.connect(self._on_remove_file_clicked)
         self.controls_dock.clear_files_clicked.connect(self._on_clear_files_clicked)
+        self.controls_dock.default_model_changed.connect(self._on_default_model_changed)
         
         # Parameters dock signals
         self.parameters_dock.model_changed.connect(self._on_model_changed)
+        self.parameters_dock.load_custom_model_clicked.connect(self._on_load_custom_model_clicked)
+        self.parameters_dock.create_element_clicked.connect(self._on_create_element_clicked)
         self.parameters_dock.apply_clicked.connect(self._on_apply_clicked)
         self.parameters_dock.refresh_clicked.connect(self._refresh_parameters)
         self.parameters_dock.parameter_changed.connect(self._on_parameter_changed)
@@ -412,6 +415,7 @@ class MainWindow(QMainWindow):
         self.elements_dock.element_selected.connect(self._on_element_selected)
         self.elements_dock.element_add_clicked.connect(self._on_element_added_clicked)
         self.elements_dock.element_remove_clicked.connect(self._on_element_remove_clicked)
+        self.elements_dock.save_model_clicked.connect(self._on_save_model_clicked)
         self.elements_dock.element_rows_moved.connect(self._on_element_rows_moved)
         
         # Resolution dock signals
@@ -600,6 +604,16 @@ class MainWindow(QMainWindow):
                     getattr(self.viewmodel, "clear_loaded_files", lambda: None)()
         except Exception as e:
             self.append_log(f"Failed to clear datasets: {e}")
+
+    def _on_default_model_changed(self, model_name):
+        """Called when user changes the default model selector."""
+        if not self.viewmodel or not model_name:
+            return
+        try:
+            if hasattr(self.viewmodel, "set_default_model"):
+                self.viewmodel.set_default_model(model_name)
+        except Exception as e:
+            self.append_log(f"Failed to set default model: {e}")
 
     # --------------------------
     # Element list handlers
@@ -803,6 +817,45 @@ class MainWindow(QMainWindow):
         except Exception as e:
             try:
                 self.append_log(f"Failed to remove element: {e}")
+            except Exception:
+                pass
+
+    def _on_save_model_clicked(self):
+        """Handle save model button click - open dialog to save custom model."""
+        try:
+            if not self.viewmodel:
+                return
+            
+            # Get model data from viewmodel
+            model_data = self.viewmodel.get_model_data_for_save()
+            if model_data is None:
+                # Error message already shown by viewmodel
+                return
+            
+            # Import and show the dialog
+            from view.dialogs.save_model_dialog import SaveModelDialog
+            dialog = SaveModelDialog(model_data, parent=self)
+            
+            if dialog.exec():
+                # User clicked Save
+                model_name = dialog.get_model_name()
+                description = dialog.get_description()
+                save_path = dialog.get_save_path()
+                
+                if save_path:
+                    success = self.viewmodel.save_custom_model_to_yaml(
+                        str(save_path),
+                        model_name,
+                        description
+                    )
+                    
+                    if success:
+                        self.append_log(f"Model '{model_name}' saved successfully.")
+                    else:
+                        self.append_log(f"Failed to save model '{model_name}'.")
+        except Exception as e:
+            try:
+                self.append_log(f"Error saving model: {e}")
             except Exception:
                 pass
 
@@ -1503,6 +1556,24 @@ class MainWindow(QMainWindow):
             return
         
         try:
+            # Keep the model selector label in sync with the active state's model
+            try:
+                desired_model = getattr(self.viewmodel.state, "model_name", None)
+                if not desired_model:
+                    spec = getattr(self.viewmodel.state, "model_spec", None)
+                    desired_model = getattr(spec, "name", None)
+
+                combo = getattr(self.parameters_dock, "model_selector", None)
+                if desired_model and combo is not None:
+                    if combo.currentText() != str(desired_model):
+                        combo.blockSignals(True)
+                        try:
+                            self.parameters_dock.set_model_selector(desired_model)
+                        finally:
+                            combo.blockSignals(False)
+            except Exception:
+                pass
+
             specs = getattr(self.viewmodel, "get_parameters", lambda: {})()
             if specs is None:
                 specs = {}
@@ -1747,6 +1818,61 @@ class MainWindow(QMainWindow):
                     self.append_log("Configuration save failed.")
             except Exception as e:
                 self.append_log(f"Error saving configuration: {e}")
+
+    def _on_load_custom_model_clicked(self):
+        """Handle load custom model button click - show dialog to select saved model."""
+        if not self.viewmodel:
+            return
+        
+        try:
+            # Get list of saved custom models
+            saved_models = self.viewmodel.list_saved_custom_models()
+            
+            if not saved_models:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self,
+                    "No Saved Models",
+                    "No saved custom models found.\n\nCreate a custom model and save it using the 'Save Model...' button in the Elements dock."
+                )
+                return
+            
+            # Show selection dialog
+            from PySide6.QtWidgets import QInputDialog
+            model_name, ok = QInputDialog.getItem(
+                self,
+                "Load Custom Model",
+                "Select a saved custom model to load:",
+                saved_models,
+                0,
+                False
+            )
+            
+            if ok and model_name:
+                # Load the selected model
+                success = self.viewmodel.load_saved_custom_model(model_name)
+                if success:
+                    self.append_log(f"Loaded custom model: {model_name}")
+                else:
+                    self.append_log(f"Failed to load custom model: {model_name}")
+        except Exception as e:
+            self.append_log(f"Error loading custom model: {e}")
+
+    def _on_create_element_clicked(self):
+        """Handle create element button click - open dialog to create new element."""
+        try:
+            from view.dialogs.create_element_dialog import CreateElementDialog
+            dialog = CreateElementDialog(self)
+            
+            if dialog.exec():
+                save_path = dialog.get_save_path()
+                if save_path:
+                    self.append_log(f"Element saved to: {save_path}")
+                    self.append_log("Restart BigFit to use the new element.")
+        except Exception as e:
+            self.append_log(f"Error creating element: {e}")
+            import traceback
+            traceback.print_exc()
 
     # --------------------------
     # Resolution dock handlers

@@ -167,31 +167,68 @@ def _validate_element_definition(definition: Dict[str, Any], filepath: Path) -> 
     Raises:
         ModelElementValidationError: If validation fails
     """
-    required_fields = ["name", "parameters"]
-    
-    for field in required_fields:
-        if field not in definition:
-            raise ModelElementValidationError(
-                f"Model element '{filepath.name}' is missing required field: {field}"
-            )
-    
-    # Validate parameters is a list
-    params = definition.get("parameters", [])
-    if not isinstance(params, list):
+    # Skip saved custom models (they belong in custom_models directory, not here)
+    if definition.get('category') == 'saved_custom_model':
         raise ModelElementValidationError(
-            f"Model element '{filepath.name}': 'parameters' must be a list"
+            f"File '{filepath.name}' is a saved custom model and should not be in model_elements directory"
         )
     
-    # Validate each parameter has a name
-    for i, param in enumerate(params):
-        if not isinstance(param, dict):
+    # Name is always required
+    if "name" not in definition:
+        raise ModelElementValidationError(
+            f"Model element '{filepath.name}' is missing required field: name"
+        )
+    
+    # Check if this is a composite model
+    is_composite = definition.get("is_composite", False)
+    
+    if is_composite:
+        # Composite models need components
+        if "components" not in definition:
             raise ModelElementValidationError(
-                f"Model element '{filepath.name}': parameter {i} must be a dict"
+                f"Composite model element '{filepath.name}' is missing required field: components"
             )
-        if "name" not in param:
+        
+        components = definition.get("components", [])
+        if not isinstance(components, list):
             raise ModelElementValidationError(
-                f"Model element '{filepath.name}': parameter {i} is missing 'name'"
+                f"Composite model element '{filepath.name}': 'components' must be a list"
             )
+        
+        # Validate each component
+        for i, comp in enumerate(components):
+            if not isinstance(comp, dict):
+                raise ModelElementValidationError(
+                    f"Composite model element '{filepath.name}': component {i} must be a dict"
+                )
+            if "element" not in comp:
+                raise ModelElementValidationError(
+                    f"Composite model element '{filepath.name}': component {i} is missing 'element'"
+                )
+    else:
+        # Regular models need parameters
+        if "parameters" not in definition:
+            raise ModelElementValidationError(
+                f"Model element '{filepath.name}' is missing required field: parameters"
+            )
+        
+        # Validate parameters is a list
+        params = definition.get("parameters", [])
+        if not isinstance(params, list):
+            raise ModelElementValidationError(
+                f"Model element '{filepath.name}': 'parameters' must be a list"
+            )
+        
+        # Validate each parameter has a name
+        for i, param in enumerate(params):
+            if not isinstance(param, dict):
+                raise ModelElementValidationError(
+                    f"Model element '{filepath.name}': parameter {i} must be a dict"
+                )
+            if "name" not in param:
+                raise ModelElementValidationError(
+                    f"Model element '{filepath.name}': parameter {i} is missing 'name'"
+                )
 
 
 def _load_element_definition(filepath: Path) -> Dict[str, Any]:
@@ -362,6 +399,165 @@ def _create_evaluate_function(eval_expression: Optional[str], param_names: List[
     return evaluate
 
 
+def _sanitize_class_name(element_name: str) -> str:
+    """Sanitize an element name to create a valid Python class name.
+    
+    Args:
+        element_name: The element name to sanitize
+        
+    Returns:
+        A valid Python identifier suitable for use as a class name
+    """
+    # Remove spaces and create valid Python identifier
+    clean_name = element_name.replace(' ', '')
+    # Remove any remaining invalid characters for Python identifiers
+    clean_name = ''.join(c if c.isalnum() or c == '_' else '' for c in clean_name)
+    # Ensure it starts with a letter or underscore
+    if clean_name and not (clean_name[0].isalpha() or clean_name[0] == '_'):
+        clean_name = '_' + clean_name
+    # Use a default name if sanitization resulted in empty string
+    if not clean_name:
+        clean_name = 'Custom'
+    return clean_name
+
+
+def _create_composite_model_spec_class(definition: Dict[str, Any]) -> Type:
+    """Create a CompositeModelSpec class from a definition dictionary.
+    
+    Args:
+        definition: The validated definition dictionary with 'is_composite': True
+        
+    Returns:
+        A new CompositeModelSpec subclass
+    """
+    _ensure_base_classes()
+    
+    # Import CompositeModelSpec here to avoid circular imports
+    from models.model_specs import CompositeModelSpec
+    
+    element_name = definition.get("name", "Unknown")
+    description = definition.get("description", "")
+    components_def = definition.get("components", [])
+    
+    # Build the class
+    class DynamicCompositeModelSpec(CompositeModelSpec):
+        __doc__ = description or f"{element_name} composite model specification."
+        _element_name = element_name
+        _element_definition = definition
+        
+        def __init__(self):
+            super().__init__()
+            # Add components from definition
+            # Collect failures so we can provide a clear summary after attempting all components
+            failures = []
+            for comp_def in components_def:
+                element_type = comp_def.get("element")
+                prefix = comp_def.get("prefix")
+                default_params = comp_def.get("default_parameters", {})
+
+                if not element_type:
+                    continue
+
+                # Convert default_parameters to the format expected by add_component
+                initial_params = {}
+                fixed_params = {}
+                link_groups = {}
+                bounds = {}
+
+                for param_name, param_data in default_params.items():
+                    if isinstance(param_data, dict):
+                        # Extract value
+                        initial_params[param_name] = param_data.get('value')
+
+                        # Track fixed state
+                        if param_data.get('fixed'):
+                            fixed_params[param_name] = True
+
+                        # Track link groups
+                        lg = param_data.get('link_group')
+                        if lg is not None and lg != 0:
+                            link_groups[param_name] = lg
+
+                        # Track bounds
+                        min_val = param_data.get('min')
+                        max_val = param_data.get('max')
+                        if min_val is not None or max_val is not None:
+                            bounds[param_name] = (min_val, max_val)
+                    else:
+                        # Simple value
+                        initial_params[param_name] = param_data
+
+                try:
+                    # Add the component
+                    component = self.add_component(
+                        element_type,
+                        initial_params=initial_params,
+                        prefix=prefix
+                    )
+
+                    # Apply fixed state, link groups, and bounds
+                    if component:
+                        for param_name in component.spec.params.keys():
+                            param_obj = component.spec.params[param_name]
+
+                            # Apply fixed state
+                            if param_name in fixed_params:
+                                param_obj.fixed = True
+
+                            # Apply link group
+                            if param_name in link_groups:
+                                param_obj.link_group = link_groups[param_name]
+
+                            # Apply bounds
+                            if param_name in bounds:
+                                min_val, max_val = bounds[param_name]
+                                if min_val is not None:
+                                    param_obj.min = min_val
+                                if max_val is not None:
+                                    param_obj.max = max_val
+
+                        # Rebuild flat params to propagate changes
+                        self._rebuild_flat_params()
+
+                except Exception as e:
+                    # Record the failure for a summary that will be shown after initialization
+                    failures.append({
+                        "element": element_type,
+                        "prefix": prefix,
+                        "error": str(e),
+                    })
+                    logger.warning(
+                        f"Failed to add component '{element_type}' to composite model '{element_name}': {e}"
+                    )
+                    continue
+
+            # If any component additions failed, attach a summary to the instance
+            # and emit a single, clear error message summarizing failures. This
+            # makes it easier for callers loading saved composite models to see
+            # which components didn't load and why.
+            if failures:
+                # Attach detailed failures for programmatic inspection
+                self._component_load_errors = failures
+
+                # Build a concise summary message
+                summary_lines = [
+                    f"{f['element']} (prefix={f['prefix']}) -> {f['error']}" for f in failures
+                ]
+                summary = (
+                    f"Composite model '{element_name}' had {len(failures)} component(s) fail to load: "
+                    + "; ".join(summary_lines)
+                )
+                logger.error(summary)
+    
+    # Give the class a meaningful name
+    clean_name = _sanitize_class_name(element_name)
+    class_name = f"{clean_name}ModelSpec"
+    DynamicCompositeModelSpec.__name__ = class_name
+    DynamicCompositeModelSpec.__qualname__ = class_name
+    
+    return DynamicCompositeModelSpec
+
+
 def _create_model_spec_class(definition: Dict[str, Any]) -> Type:
     """Create a ModelSpec class from a definition dictionary.
     
@@ -369,8 +565,12 @@ def _create_model_spec_class(definition: Dict[str, Any]) -> Type:
         definition: The validated definition dictionary
         
     Returns:
-        A new ModelSpec subclass
+        A new ModelSpec subclass (or CompositeModelSpec if is_composite is True)
     """
+    # Check if this is a composite model
+    if definition.get("is_composite"):
+        return _create_composite_model_spec_class(definition)
+    
     _ensure_base_classes()
     
     element_name = definition.get("name", "Unknown")
@@ -435,7 +635,8 @@ def _create_model_spec_class(definition: Dict[str, Any]) -> Type:
                 return super().evaluate(x, params)
     
     # Give the class a meaningful name
-    class_name = f"{element_name.replace(' ', '')}ModelSpec"
+    clean_name = _sanitize_class_name(element_name)
+    class_name = f"{clean_name}ModelSpec"
     DynamicModelSpec.__name__ = class_name
     DynamicModelSpec.__qualname__ = class_name
     

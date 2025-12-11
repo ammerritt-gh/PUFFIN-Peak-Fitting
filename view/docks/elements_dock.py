@@ -17,6 +17,7 @@ class ElementsDock(QDockWidget):
     element_selected = Signal(int)  # row number
     element_add_clicked = Signal()
     element_remove_clicked = Signal()
+    save_model_clicked = Signal()  # save custom model
     element_rows_moved = Signal(object, int, int, object, int)  # parent, start, end, dest_parent, dest_row
 
     def __init__(self, parent=None):
@@ -51,6 +52,13 @@ class ElementsDock(QDockWidget):
         btn_row.addWidget(self.remove_btn)
         vlayout.addLayout(btn_row)
 
+        # Save model button (separate row for emphasis)
+        save_row = QHBoxLayout()
+        self.save_model_btn = QPushButton("Save Model...")
+        self.save_model_btn.setToolTip("Save current custom model as a reusable model")
+        save_row.addWidget(self.save_model_btn)
+        vlayout.addLayout(save_row)
+
         self.setWidget(container)
 
         # Connect internal signals
@@ -58,6 +66,7 @@ class ElementsDock(QDockWidget):
         self.element_list.model().rowsMoved.connect(self._on_element_rows_moved)
         self.add_btn.clicked.connect(self._on_add_clicked)
         self.remove_btn.clicked.connect(self._on_remove_clicked)
+        self.save_model_btn.clicked.connect(self._on_save_model_clicked)
 
     def _on_element_selected(self, row):
         """Handle element selection."""
@@ -70,6 +79,10 @@ class ElementsDock(QDockWidget):
     def _on_remove_clicked(self):
         """Handle remove button click."""
         self.element_remove_clicked.emit()
+
+    def _on_save_model_clicked(self):
+        """Handle save model button click."""
+        self.save_model_clicked.emit()
 
     def _on_element_rows_moved(self, parent, start, end, dest_parent, dest_row):
         """Handle drag-and-drop reordering."""

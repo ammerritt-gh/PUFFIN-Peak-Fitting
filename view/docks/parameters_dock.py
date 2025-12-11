@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 import math
-import re
 from functools import partial
 
 
@@ -24,6 +23,8 @@ class ParametersDock(QDockWidget):
     model_changed = Signal(str)  # model name
     apply_clicked = Signal()
     refresh_clicked = Signal()
+    load_custom_model_clicked = Signal()  # load saved custom model
+    create_element_clicked = Signal()  # create new element
     parameter_changed = Signal(str, object)  # parameter name, value
     parameters_updated = Signal()  # emitted when parameter panel is rebuilt
 
@@ -52,17 +53,9 @@ class ParametersDock(QDockWidget):
             # lazy import to avoid circular imports at module import time
             from models import get_available_model_names
 
-            def _pretty(name: str) -> str:
-                # remove trailing 'ModelSpec' and split CamelCase into words
-                s = re.sub(r"ModelSpec$", "", name)
-                s = re.sub(r"(?<!^)(?=[A-Z])", " ", s)
-                pretty = s.strip()
-                if pretty.lower() == "composite":
-                    return "Custom Model"
-                return pretty
-
             spec_class_names = get_available_model_names()
-            display_names = [_pretty(n) for n in spec_class_names]
+            # Use the names as declared in YAML/custom definitions
+            display_names = list(spec_class_names)
             # ensure we have at least the historical defaults as fallback
             if display_names:
                 self.model_selector.addItems(display_names)
@@ -73,6 +66,14 @@ class ParametersDock(QDockWidget):
             self.model_selector.addItems(["Voigt", "Gaussian"])
         vlayout.addWidget(QLabel("Model:"))
         vlayout.addWidget(self.model_selector)
+
+        # Model action buttons
+        model_btn_row = QHBoxLayout()
+        self.load_custom_model_btn = QPushButton("Load Custom Model...")
+        self.create_element_btn = QPushButton("Create New Element...")
+        model_btn_row.addWidget(self.load_custom_model_btn)
+        model_btn_row.addWidget(self.create_element_btn)
+        vlayout.addLayout(model_btn_row)
 
         # Chi-squared display (placed above the parameter list)
         self.chi_label = QLabel("Chi-squared: N/A")
@@ -115,6 +116,8 @@ class ParametersDock(QDockWidget):
 
         # Connect internal signals
         self.model_selector.currentIndexChanged.connect(self._on_model_selected)
+        self.load_custom_model_btn.clicked.connect(self._on_load_custom_model_clicked)
+        self.create_element_btn.clicked.connect(self._on_create_element_clicked)
         self.apply_btn.clicked.connect(self._on_apply_clicked)
         self.refresh_btn.clicked.connect(self._on_refresh_clicked)
 
@@ -122,6 +125,14 @@ class ParametersDock(QDockWidget):
         """Handle model selection change."""
         name = self.model_selector.currentText()
         self.model_changed.emit(name)
+
+    def _on_load_custom_model_clicked(self):
+        """Handle load custom model button click."""
+        self.load_custom_model_clicked.emit()
+
+    def _on_create_element_clicked(self):
+        """Handle create element button click."""
+        self.create_element_clicked.emit()
 
     def _on_apply_clicked(self):
         """Handle apply button click."""
