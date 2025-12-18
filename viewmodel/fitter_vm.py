@@ -3043,9 +3043,7 @@ class FitterViewModel(QObject):
         
         # Split parameters by type
         fixed_updates, link_updates, value_updates = self._split_parameter_updates(params)
-        
-        # Get link groups for propagation
-        link_groups = self._collect_link_groups(model_spec)
+
 
         applied = []
         blocked_values = []

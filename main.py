@@ -65,7 +65,7 @@ def _restore_dataset_from_config(model_state, viewmodel):
                     except Exception:
                         pass
         except Exception as fit_exc:
-            log_message(f"Failed to restore fit for file '{os.path.basename(last)}': {fit_exc}", vm=viewmodel)
+            log_exception(f"Failed to restore fit for file '{os.path.basename(last)}'", fit_exc, vm=viewmodel)
         
         # Extract dataset name for logging
         if isinstance(info, dict):
