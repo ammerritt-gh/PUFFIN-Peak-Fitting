@@ -339,11 +339,14 @@ class MainWindow(QMainWindow):
                 self.controls_dock.load_data_clicked.connect(lambda: self.viewmodel.handle_action("load_data"))
                 self.controls_dock.save_data_clicked.connect(lambda: self.viewmodel.handle_action("save_data"))
                 self.controls_dock.run_fit_clicked.connect(lambda: self.viewmodel.handle_action("run_fit"))
+                self.controls_dock.reset_fit_clicked.connect(lambda: self.viewmodel.handle_action("reset_fit"))
                 self.controls_dock.update_plot_clicked.connect(lambda: self.viewmodel.handle_action("update_plot"))
             else:
                 self.controls_dock.load_data_clicked.connect(self.viewmodel.load_data)
                 self.controls_dock.save_data_clicked.connect(self.viewmodel.save_data)
                 self.controls_dock.run_fit_clicked.connect(self.viewmodel.run_fit)
+                if hasattr(self.viewmodel, "reset_fit"):
+                    self.controls_dock.reset_fit_clicked.connect(self.viewmodel.reset_fit)
                 self.controls_dock.update_plot_clicked.connect(self.viewmodel.update_plot)
         except Exception:
             try:
@@ -356,6 +359,11 @@ class MainWindow(QMainWindow):
                 pass
             try:
                 self.controls_dock.run_fit_clicked.connect(self.viewmodel.run_fit)
+            except Exception:
+                pass
+            try:
+                if hasattr(self.viewmodel, "reset_fit"):
+                    self.controls_dock.reset_fit_clicked.connect(self.viewmodel.reset_fit)
             except Exception:
                 pass
             try:

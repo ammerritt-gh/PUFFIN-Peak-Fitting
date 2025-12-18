@@ -84,7 +84,27 @@ class FitterViewModel(QObject):
         if not loaded:
             return
 
+        def _canon_path(p: _typing.Optional[str]) -> _typing.Optional[str]:
+            if not p:
+                return None
+            try:
+                return os.path.normcase(os.path.abspath(os.path.normpath(str(p))))
+            except Exception:
+                return str(p)
+
+        existing_paths = set()
+        for ds in self._datasets:
+            try:
+                info = ds.get("info") if isinstance(ds, dict) else None
+                info = info if isinstance(info, dict) else {}
+                p = _canon_path(info.get("path"))
+                if p:
+                    existing_paths.add(p)
+            except Exception:
+                continue
+
         added = 0
+        skipped_duplicates = 0
         last_info = None
         for x, y, err, info in loaded:
             try:
@@ -95,21 +115,35 @@ class FitterViewModel(QObject):
                 log_exception(f"Skipped {label}", exc, vm=self)
                 continue
 
+            info_dict = info or {}
+            if not isinstance(info_dict, dict):
+                info_dict = {}
+
+            p = _canon_path(info_dict.get("path"))
+            if p and p in existing_paths:
+                skipped_duplicates += 1
+                continue
+            if p:
+                existing_paths.add(p)
+
             dataset = {
                 "x": x_arr,
                 "y": y_arr,
                 "err": err_arr,
-                "info": info or {},
+                "info": info_dict,
             }
             self._datasets.append(dataset)
             added += 1
-            last_info = info or last_info
+            last_info = info_dict or last_info
 
         if added == 0:
             return
 
         if isinstance(last_info, dict):
             self._persist_last_loaded(last_info)
+
+        if skipped_duplicates:
+            self._log_message(f"Skipped {skipped_duplicates} duplicate file(s) already in the queue.")
 
         plural = "file" if added == 1 else "files"
         self._log_message(f"Queued {added} {plural} for viewing.")
@@ -239,11 +273,34 @@ class FitterViewModel(QObject):
             if not q:
                 return
             
+            def _canon_path(p: _typing.Optional[str]) -> _typing.Optional[str]:
+                if not p:
+                    return None
+                try:
+                    return os.path.normcase(os.path.abspath(os.path.normpath(str(p))))
+                except Exception:
+                    return str(p)
+
+            existing_paths = set()
+            for ds in self._datasets:
+                try:
+                    info = ds.get("info") if isinstance(ds, dict) else None
+                    info = info if isinstance(info, dict) else {}
+                    p = _canon_path(info.get("path"))
+                    if p:
+                        existing_paths.add(p)
+                except Exception:
+                    continue
+
             # Attempt to load each path into the queue
             added = 0
             for entry in q:
                 path = entry.get("path") if isinstance(entry, dict) else None
                 if not path or not os.path.isfile(path):
+                    continue
+
+                p = _canon_path(path)
+                if p and p in existing_paths:
                     continue
                 
                 try:
@@ -251,23 +308,27 @@ class FitterViewModel(QObject):
                     x_arr, y_arr, err_arr = self._prepare_dataset(x, y, err)
                     dataset = {"x": x_arr, "y": y_arr, "err": err_arr, "info": info}
                     self._datasets.append(dataset)
+                    if p:
+                        existing_paths.add(p)
                     added += 1
                 except Exception:
                     continue
             
-            # Restore active index if valid
+            # Determine desired active index, but do not set _active_dataset_index yet.
+            # We want activate_file() to actually apply the dataset and load its fit.
             if isinstance(active, int) and 0 <= active < len(self._datasets):
-                self._active_dataset_index = int(active)
+                desired_active = int(active)
             elif self._datasets:
-                self._active_dataset_index = 0
+                desired_active = 0
             else:
-                self._active_dataset_index = None
+                desired_active = None
+            self._active_dataset_index = None
             
             # Notify UI and activate if needed
             if added:
                 safe_call(self._emit_file_queue, context="emit file queue", vm=self)
-                if self._active_dataset_index is not None:
-                    safe_call(self.activate_file, self._active_dataset_index, 
+                if desired_active is not None:
+                    safe_call(self.activate_file, desired_active, 
                              context="activate file in _load_queue_from_config", vm=self)
         except Exception:
             pass
@@ -322,6 +383,60 @@ class FitterViewModel(QObject):
         if idx < 0 or idx >= len(self._datasets):
             return
 
+        # Avoid reloading the currently active dataset *only* when it's already
+        # applied to state (same file path). This prevents skipping activation
+        # during startup queue restore.
+        try:
+            if self._active_dataset_index is not None and idx == self._active_dataset_index:
+                current_path = self._get_current_file_path()
+                ds = self._datasets[idx]
+                info = ds.get("info") if isinstance(ds, dict) else {}
+                info = info if isinstance(info, dict) else {}
+                ds_path = info.get("path")
+                if current_path and ds_path:
+                    try:
+                        current_norm = os.path.normcase(os.path.abspath(os.path.normpath(str(current_path))))
+                        ds_norm = os.path.normcase(os.path.abspath(os.path.normpath(str(ds_path))))
+                    except Exception:
+                        current_norm = str(current_path)
+                        ds_norm = str(ds_path)
+                    if current_norm == ds_norm:
+                        return
+        except Exception:
+            pass
+
+        # Reset any selected curve when swapping datasets so UI doesn't carry state.
+        try:
+            self.clear_selected_curve()
+        except Exception:
+            pass
+
+        # Always start from a clean model/fit state before applying new data.
+        # This prevents stale model_spec/model_name leaking between files.
+        try:
+            from models import get_model_spec
+            setattr(self.state, "fit_result", None)
+            try:
+                if hasattr(self.state, "model"):
+                    delattr(self.state, "model")
+            except Exception:
+                pass
+            setattr(self.state, "model_name", "Voigt")
+            setattr(self.state, "model_spec", get_model_spec("Voigt"))
+        except Exception:
+            pass
+
+        # Clear resolution state on file swap; file-specific fits may restore it.
+        try:
+            self._resolution_model_name = "None"
+            self._resolution_spec = None
+            try:
+                self.resolution_updated.emit()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
         dataset = self._datasets[idx]
         self._apply_dataset_to_state(dataset)
         self._active_dataset_index = idx
@@ -332,11 +447,32 @@ class FitterViewModel(QObject):
         name = info.get("name") or f"Dataset {idx + 1}"
         self._log_message(f"Loaded dataset: {name}")
 
-        # Try to load saved fit for this file, or fall back to default fit
-        fit_loaded = safe_call(self._load_fit_for_current_file, default=False,
-                              context="load fit for current file", vm=self)
+        # Try to load saved fit for this file. If none exists, only apply a
+        # default model/fit if the user explicitly configured it.
+        fit_loaded = safe_call(
+            self._load_fit_for_current_file,
+            default=False,
+            context="load fit for current file",
+            vm=self,
+        )
+
         if not fit_loaded:
-            safe_call(self._load_default_fit, context="load default fit", vm=self)
+            default_choice = None
+            try:
+                default_choice = self._get_default_model_choice()
+            except Exception:
+                default_choice = None
+
+            if default_choice and default_choice not in ("(None - User Select)",):
+                safe_call(self._load_default_fit, context="load default fit", vm=self)
+            else:
+                # Ensure the clean default model is initialized for this dataset.
+                try:
+                    spec = getattr(self.state, "model_spec", None)
+                    if spec is not None and hasattr(spec, "initialize"):
+                        spec.initialize(getattr(self.state, "x_data", None), getattr(self.state, "y_data", None))
+                except Exception:
+                    pass
 
         # Ensure model_name matches model_spec before emitting signals
         safe_call(self._synchronize_model_state, context="synchronize model state", vm=self)
@@ -1831,9 +1967,11 @@ class FitterViewModel(QObject):
             from dataio import get_config
             cfg = get_config()
             default_model = getattr(cfg, "default_model_for_new_files", None)
-            return default_model if default_model else "(Use Last Fit)"
+            # Safer default: don't apply the last fit/model automatically.
+            # Users can opt into "(Use Last Fit)" via the UI selector.
+            return default_model if default_model else "(None - User Select)"
         except Exception:
-            return "(Use Last Fit)"
+            return "(None - User Select)"
 
     def set_default_model(self, model_name: str):
         """Set the default model for newly loaded files without saved fits.
@@ -1981,9 +2119,11 @@ class FitterViewModel(QObject):
         return False
 
     def reset_fit(self):
-        """Reset the fit for the current file and/or default fit.
+        """Reset the fit for the currently active dataset.
 
-        This clears the saved fit state and reinitializes the model parameters.
+        Deletes any file-specific saved fit for the active file (if any), clears
+        fit_result and exclusions, and reinitializes the current model parameters.
+        The global default fit is only reset when no real file is active.
         """
         try:
             from dataio import reset_fit_for_file, reset_default_fit
@@ -1996,13 +2136,13 @@ class FitterViewModel(QObject):
                         self._log_message(f"Cleared saved fit for: {os.path.basename(filepath)}")
                 except Exception as e:
                     log_exception(f"Failed to clear saved fit for file: {filepath}", e, vm=self)
-
-            # Also reset the default fit
-            try:
-                if reset_default_fit():
-                    self._log_message("Cleared default fit.")
-            except Exception:
-                pass
+            else:
+                # Only reset the default fit when no external file is active.
+                try:
+                    if reset_default_fit():
+                        self._log_message("Cleared default fit.")
+                except Exception:
+                    pass
 
             # Reinitialize model spec with current data
             model_spec = getattr(self.state, "model_spec", None)
@@ -2018,6 +2158,25 @@ class FitterViewModel(QObject):
             # Clear fit result
             try:
                 self.state.fit_result = None
+            except Exception:
+                pass
+
+            # Clear exclusions
+            try:
+                xd = getattr(self.state, "x_data", None)
+                if xd is not None:
+                    self.state.excluded = np.zeros_like(np.asarray(xd), dtype=bool)
+            except Exception:
+                pass
+
+            # Clear resolution for this dataset
+            try:
+                self._resolution_model_name = "None"
+                self._resolution_spec = None
+                try:
+                    self.resolution_updated.emit()
+                except Exception:
+                    pass
             except Exception:
                 pass
 

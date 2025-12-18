@@ -17,6 +17,7 @@ class ControlsDock(QDockWidget):
     load_data_clicked = Signal()
     save_data_clicked = Signal()
     run_fit_clicked = Signal()
+    reset_fit_clicked = Signal()
     update_plot_clicked = Signal()
     edit_config_clicked = Signal()
     exclude_toggled = Signal(bool)
@@ -47,6 +48,7 @@ class ControlsDock(QDockWidget):
         self.load_btn = QPushButton("Load Data")
         self.save_btn = QPushButton("Save Data")
         self.fit_btn = QPushButton("Run Fit")
+        self.reset_fit_btn = QPushButton("Reset Fit")
         self.fit_settings_btn = QPushButton("Fit Settings...")
         self.update_btn = QPushButton("Update Plot")
         self.config_btn = QPushButton("Edit Config")
@@ -56,6 +58,7 @@ class ControlsDock(QDockWidget):
         layout.addWidget(self.load_btn)
         layout.addWidget(self.save_btn)
         layout.addWidget(self.fit_btn)
+        layout.addWidget(self.reset_fit_btn)
         layout.addWidget(self.fit_settings_btn)
         layout.addWidget(self.config_btn)
         layout.addWidget(self.update_btn)
@@ -109,6 +112,7 @@ class ControlsDock(QDockWidget):
         self.load_btn.clicked.connect(self._on_load_clicked)
         self.save_btn.clicked.connect(self._on_save_clicked)
         self.fit_btn.clicked.connect(self._on_fit_clicked)
+        self.reset_fit_btn.clicked.connect(self._on_reset_fit_clicked)
         self.fit_settings_btn.clicked.connect(self._on_fit_settings_clicked)
         self.update_btn.clicked.connect(self._on_update_clicked)
         self.config_btn.clicked.connect(self._on_config_clicked)
@@ -131,6 +135,10 @@ class ControlsDock(QDockWidget):
     def _on_fit_clicked(self):
         """Handle fit button click."""
         self.run_fit_clicked.emit()
+
+    def _on_reset_fit_clicked(self):
+        """Handle reset fit button click."""
+        self.reset_fit_clicked.emit()
 
     def _on_update_clicked(self):
         """Handle update button click."""
