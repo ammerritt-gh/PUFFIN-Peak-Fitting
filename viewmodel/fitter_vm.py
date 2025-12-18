@@ -227,21 +227,26 @@ class FitterViewModel(QObject):
             pass
 
     def _load_queue_from_config(self):
+        from .logging_helpers import safe_call
+        
         try:
             from dataio import get_config
+            from dataio.data_loader import load_data_from_file
+            
             cfg = get_config()
             q = getattr(cfg, "queued_files", None)
             active = getattr(cfg, "queued_active", None)
             if not q:
                 return
+            
             # Attempt to load each path into the queue
-            from dataio.data_loader import load_data_from_file
             added = 0
             for entry in q:
+                path = entry.get("path") if isinstance(entry, dict) else None
+                if not path or not os.path.isfile(path):
+                    continue
+                
                 try:
-                    path = entry.get("path") if isinstance(entry, dict) else None
-                    if not path or not os.path.isfile(path):
-                        continue
                     x, y, err, info = load_data_from_file(path)
                     x_arr, y_arr, err_arr = self._prepare_dataset(x, y, err)
                     dataset = {"x": x_arr, "y": y_arr, "err": err_arr, "info": info}
@@ -249,30 +254,27 @@ class FitterViewModel(QObject):
                     added += 1
                 except Exception:
                     continue
-            # restore active index if valid
+            
+            # Restore active index if valid
             if isinstance(active, int) and 0 <= active < len(self._datasets):
                 self._active_dataset_index = int(active)
-            elif len(self._datasets) > 0:
-                # Default to first file if no valid active index
+            elif self._datasets:
                 self._active_dataset_index = 0
             else:
                 self._active_dataset_index = None
+            
+            # Notify UI and activate if needed
             if added:
-                # notify UI
-                try:
-                    self._emit_file_queue()
-                except Exception:
-                    pass
-                # Actually activate the file to apply data and load saved fit
+                safe_call(self._emit_file_queue, context="emit file queue", vm=self)
                 if self._active_dataset_index is not None:
-                    try:
-                        self.activate_file(self._active_dataset_index)
-                    except Exception as e:
-                        log_exception("Failed to activate file in _load_queue_from_config", e)
+                    safe_call(self.activate_file, self._active_dataset_index, 
+                             context="activate file in _load_queue_from_config", vm=self)
         except Exception:
             pass
 
     def _apply_dataset_to_state(self, dataset: dict):
+        from .logging_helpers import safe_call
+        
         x = dataset.get("x")
         y = dataset.get("y")
         err = dataset.get("err")
@@ -281,39 +283,40 @@ class FitterViewModel(QObject):
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
 
-        try:
-            self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
-        except Exception:
+        # Set data using set_data method if available, otherwise set directly
+        if hasattr(self.state, 'set_data'):
+            try:
+                self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
+            except Exception:
+                # Fallback: set data directly and initialize
+                self.state.x_data = np.array(x_arr, copy=True)
+                self.state.y_data = np.array(y_arr, copy=True)
+                safe_call(self.state.model_spec.initialize, self.state.x_data, self.state.y_data,
+                         context="model_spec.initialize", vm=self)
+        else:
             self.state.x_data = np.array(x_arr, copy=True)
             self.state.y_data = np.array(y_arr, copy=True)
-            try:
-                self.state.model_spec.initialize(self.state.x_data, self.state.y_data)
-            except Exception:
-                pass
-            try:
-                self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
-            except Exception:
-                self.state.excluded = np.array([], dtype=bool)
+        
+        # Ensure exclusion mask exists and matches data length
+        self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
 
+        # Set errors with fallback to sqrt of data
         try:
             self.state.errors = np.array(err, dtype=float, copy=True)
         except Exception:
             self.state.errors = np.sqrt(np.clip(np.abs(self.state.y_data), 1e-12, np.inf))
 
+        # Set file_info if provided
         if info:
-            try:
-                try:
-                    setattr(self.state, "file_info", info)
-                except Exception:
-                    # fallback: ignore if state doesn't accept dynamic attributes
-                    pass
-            except Exception:
-                pass
+            safe_call(setattr, self.state, "file_info", info, 
+                     context="set file_info", vm=self)
 
     def activate_file(self, index: int):
+        from .logging_helpers import safe_call, safe_emit
+        
         try:
             idx = int(index)
-        except Exception:
+        except (ValueError, TypeError):
             return
 
         if idx < 0 or idx >= len(self._datasets):
@@ -323,43 +326,25 @@ class FitterViewModel(QObject):
         self._apply_dataset_to_state(dataset)
         self._active_dataset_index = idx
 
+        # Extract dataset name for logging
         info = dataset.get("info") if isinstance(dataset, dict) else {}
-        if not isinstance(info, dict):
-            info = {}
-        name = info.get("name")
-        label = name or f"Dataset {idx + 1}"
-        self._log_message(f"Loaded dataset: {label}")
+        info = info if isinstance(info, dict) else {}
+        name = info.get("name") or f"Dataset {idx + 1}"
+        self._log_message(f"Loaded dataset: {name}")
 
         # Try to load saved fit for this file, or fall back to default fit
-        fit_loaded = False
-        try:
-            fit_loaded = self._load_fit_for_current_file()
-        except Exception:
-            pass
-
+        fit_loaded = safe_call(self._load_fit_for_current_file, default=False,
+                              context="load fit for current file", vm=self)
         if not fit_loaded:
-            # Try to load the default fit as a fallback
-            try:
-                self._load_default_fit()
-            except Exception:
-                pass
+            safe_call(self._load_default_fit, context="load default fit", vm=self)
 
-        # CRITICAL: Ensure model_name matches model_spec before emitting signals
-        try:
-            self._synchronize_model_state()
-        except Exception:
-            pass
+        # Ensure model_name matches model_spec before emitting signals
+        safe_call(self._synchronize_model_state, context="synchronize model state", vm=self)
 
-        try:
-            self.parameters_updated.emit()
-        except Exception:
-            pass
-
+        # Notify UI
+        safe_emit(self.parameters_updated, vm=self, signal_name="parameters_updated")
         self._emit_file_queue()
-        try:
-            self.update_plot()
-        except Exception:
-            pass
+        safe_call(self.update_plot, context="update plot", vm=self)
 
     def remove_file_at(self, index: int):
         try:
@@ -390,6 +375,8 @@ class FitterViewModel(QObject):
             self._emit_file_queue()
 
     def clear_loaded_files(self, emit_log=True):
+        from .logging_helpers import safe_emit, safe_call
+        
         self._datasets.clear()
         self._active_dataset_index = None
         model_name = getattr(self.state, "model_name", "Voigt") if hasattr(self, "state") else "Voigt"
@@ -399,14 +386,8 @@ class FitterViewModel(QObject):
             self.state = ModelState()
         self._fit_worker = None
         self._emit_file_queue()
-        try:
-            self.parameters_updated.emit()
-        except Exception:
-            pass
-        try:
-            self.update_plot()
-        except Exception:
-            pass
+        safe_emit(self.parameters_updated, vm=self, signal_name="parameters_updated")
+        safe_call(self.update_plot, context="update plot", vm=self)
         if emit_log:
             self._log_message("Cleared queued datasets and restored initial synthetic data.")
 
@@ -418,21 +399,19 @@ class FitterViewModel(QObject):
 
     def clear_plot(self):
         """Reset to initial synthetic dataset and clear stored last-loaded file in config."""
+        from .logging_helpers import safe_call
+        
         try:
             self.clear_loaded_files(emit_log=False)
 
-            # clear saved last-loaded file in config if available
-            try:
+            # Clear saved last-loaded file in config if available
+            def _clear_config():
                 from dataio import get_config
                 cfg = get_config()
                 cfg.last_loaded_file = None
-                try:
-                    cfg.save()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
+                safe_call(cfg.save, context="save config", vm=self)
+            
+            safe_call(_clear_config, context="clear config", vm=self)
             self._log_message("Cleared queued datasets and restored initial synthetic data.")
         except Exception as e:
             log_exception("Failed to clear plot", e, vm=self)
@@ -2987,6 +2966,64 @@ class FitterViewModel(QObject):
         except Exception:
             return a == b
 
+    def _split_parameter_updates(self, params: dict):
+        """Split parameter dict into fixed, link, and value updates.
+        
+        Returns:
+            Tuple of (fixed_updates, link_updates, value_updates) dicts
+        """
+        fixed_suffix = "__fixed"
+        link_suffix = "__link"
+        fixed_updates = {}
+        link_updates = {}
+        value_updates = {}
+        
+        for k, v in params.items():
+            if isinstance(k, str) and k.endswith(fixed_suffix):
+                base = k[:-len(fixed_suffix)]
+                fixed_updates[base] = bool(v)
+            elif isinstance(k, str) and k.endswith(link_suffix):
+                base = k[:-len(link_suffix)]
+                try:
+                    link_updates[base] = int(v) if v else None
+                except (ValueError, TypeError):
+                    link_updates[base] = None
+            else:
+                value_updates[k] = v
+        
+        return fixed_updates, link_updates, value_updates
+    
+    def _ensure_model_and_spec(self):
+        """Ensure state has both model and model_spec, creating them if needed.
+        
+        Returns:
+            Tuple of (model, model_spec, is_composite)
+        """
+        mdl = getattr(self.state, "model", None)
+        model_spec = getattr(self.state, "model_spec", None)
+
+        # Ensure we have a model_spec
+        if model_spec is None:
+            model_name = getattr(self.state, "model_name", None)
+            if model_name is None and mdl is not None:
+                model_name = getattr(mdl, "name", None) or mdl.__class__.__name__
+            if model_name is None:
+                model_name = "voigt"
+            try:
+                from models import get_model_spec
+                model_spec = get_model_spec(model_name)
+                setattr(self.state, "model_spec", model_spec)
+            except Exception:
+                model_spec = None
+
+        # Ensure we have a model object
+        if mdl is None:
+            mdl = SimpleNamespace()
+            setattr(self.state, "model", mdl)
+
+        is_composite = isinstance(model_spec, CompositeModelSpec)
+        return mdl, model_spec, is_composite
+
     def apply_parameters(self, params: dict):
         """Apply parameters from the UI.
 
@@ -2995,159 +3032,88 @@ class FitterViewModel(QObject):
         the attached state.model_spec parameter values. Finally triggers update_plot().
         """
         if not isinstance(params, dict):
-            # try to coerce mapping-like objects to dict
             try:
                 params = dict(params)
             except Exception:
-                # nothing sensible to do
                 self.log_message.emit("apply_parameters: expected a dict")
                 return
 
-        # Apply into state.model where possible, otherwise into state.model_spec
-        mdl = getattr(self.state, "model", None)
-        model_spec = getattr(self.state, "model_spec", None)
+        # Ensure model and spec exist
+        mdl, model_spec, is_composite = self._ensure_model_and_spec()
+        
+        # Split parameters by type
+        fixed_updates, link_updates, value_updates = self._split_parameter_updates(params)
 
-        # Ensure we have a model_spec to persist defaults if needed
-        if model_spec is None:
-            # try to create one from state.model_name or fallback
-            model_name = getattr(self.state, "model_name", None)
-            if model_name is None and mdl is not None:
-                model_name = getattr(mdl, "name", None) or mdl.__class__.__name__
-            if model_name is None:
-                model_name = "voigt"
-            # local import for get_model_spec
-            try:
-                from models import get_model_spec
-                model_spec = get_model_spec(model_name)
-                setattr(self.state, "model_spec", model_spec)
-            except Exception:
-                model_spec = None
-
-        # If no concrete model object exists, create a thin namespace to hold attributes
-        if mdl is None:
-            mdl = SimpleNamespace()
-            setattr(self.state, "model", mdl)
-
-        is_composite = isinstance(model_spec, CompositeModelSpec)
-        link_groups = self._collect_link_groups(model_spec)
-        # split fixed toggles (keys ending with '__fixed'), link groups (keys ending with '__link'), 
-        # and value updates
-        fixed_suffix = "__fixed"
-        link_suffix = "__link"
-        fixed_updates = {}
-        link_updates = {}
-        value_updates = {}
-        for k, v in params.items():
-            try:
-                if isinstance(k, str) and k.endswith(fixed_suffix):
-                    base = k[: -len(fixed_suffix)]
-                    fixed_updates[base] = bool(v)
-                elif isinstance(k, str) and k.endswith(link_suffix):
-                    base = k[: -len(link_suffix)]
-                    try:
-                        link_updates[base] = int(v) if v else None
-                    except Exception:
-                        link_updates[base] = None
-                else:
-                    value_updates[k] = v
-            except Exception:
-                # fallback: treat as value update
-                value_updates[k] = v
 
         applied = []
         blocked_values = []
-        # First apply link_group updates
+        
+        # Apply link_group updates
         for base, link_val in link_updates.items():
-            try:
-                if model_spec is not None and base in model_spec.params:
-                    try:
-                        model_spec.params[base].link_group = link_val
-                    except Exception:
-                        pass
-                    # If composite, also propagate link_group back to the underlying component param
-                    try:
-                        if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, 'get_link'):
-                            link = model_spec.get_link(base)
-                            if link and isinstance(link, tuple) and len(link) >= 2:
-                                component, pname = link
-                                try:
-                                    if pname in getattr(component.spec, 'params', {}):
-                                        component.spec.params[pname].link_group = link_val
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                applied.append(f"{base}{link_suffix}")
-            except Exception:
-                pass
+            if model_spec is not None and base in getattr(model_spec, 'params', {}):
+                try:
+                    model_spec.params[base].link_group = link_val
+                    # Propagate to composite component if applicable
+                    if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, 'get_link'):
+                        link = model_spec.get_link(base)
+                        if link and isinstance(link, tuple) and len(link) >= 2:
+                            component, pname = link
+                            if hasattr(component, 'spec') and pname in getattr(component.spec, 'params', {}):
+                                component.spec.params[pname].link_group = link_val
+                    applied.append(f"{base}__link")
+                except Exception:
+                    pass
+        
+        # Refresh link groups after updates
         link_groups = self._collect_link_groups(model_spec)
         
-        # Apply fixed-state updates so UI and fit logic see changes immediately
+        # Apply fixed-state updates
         for base, fv in fixed_updates.items():
             try:
                 self._apply_fixed_state_to_group(model_spec, mdl, base, bool(fv), link_groups)
-                applied.append(f"{base}{fixed_suffix}")
+                applied.append(f"{base}__fixed")
             except Exception:
                 pass
 
-        # Now apply value updates (regular parameter assignments)
+        # Apply value updates (regular parameter assignments)
         for k, v in value_updates.items():
+            # Skip if parameter is fixed
+            if self._is_parameter_fixed(k):
+                current_val = self._get_current_param_value(k)
+                if not self._values_close(current_val, v):
+                    blocked_values.append(k)
+                continue
+            
+            # Set parameter value on model and spec
             try:
-                if self._is_parameter_fixed(k):
-                    current_val = self._get_current_param_value(k)
-                    if not self._values_close(current_val, v):
-                        blocked_values.append(k)
-                    continue
-                # prefer to set attribute on the actual model object
-                try:
-                    setattr(mdl, k, v)
-                    if is_composite and hasattr(model_spec, "set_param_value"):
-                        model_spec.set_param_value(k, v)
-                    applied.append(k)
-                except Exception:
-                    # if model doesn't accept attribute, fallback to model_spec if available
-                    if model_spec is not None and k in model_spec.params:
-                        if is_composite and hasattr(model_spec, "set_param_value"):
-                            model_spec.set_param_value(k, v)
-                        else:
-                            model_spec.params[k].value = v
-                        applied.append(k)
-                    else:
-                        # create attribute on model as last resort
-                        try:
-                            setattr(mdl, k, v)
-                        except Exception:
-                            pass
-                        if is_composite and hasattr(model_spec, "set_param_value"):
-                            try:
-                                model_spec.set_param_value(k, v)
-                            except Exception:
-                                pass
-                        applied.append(k)
-                
-                # If this parameter is linked, propagate value to all linked parameters
-                if model_spec is not None and k in model_spec.params:
-                    try:
-                        lg = getattr(model_spec.params[k], "link_group", None)
-                        if lg and lg > 0 and lg in link_groups:
-                            linked_params = link_groups[lg]
-                            for linked_name in linked_params:
-                                if linked_name != k:  # Don't apply to self
-                                    try:
-                                        setattr(mdl, linked_name, v)
-                                        if is_composite and hasattr(model_spec, "set_param_value"):
-                                            model_spec.set_param_value(linked_name, v)
-                                        else:
-                                            model_spec.params[linked_name].value = v
-                                        if linked_name not in applied:
-                                            applied.append(linked_name)
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
+                setattr(mdl, k, v)
+                if is_composite and hasattr(model_spec, "set_param_value"):
+                    model_spec.set_param_value(k, v)
+                elif model_spec and k in getattr(model_spec, 'params', {}):
+                    model_spec.params[k].value = v
+                applied.append(k)
             except Exception:
-                # ignore per-parameter failures
                 pass
+            
+            # Propagate value to linked parameters
+            if model_spec and k in getattr(model_spec, 'params', {}):
+                try:
+                    lg = getattr(model_spec.params[k], "link_group", None)
+                    if lg and lg > 0 and lg in link_groups:
+                        for linked_name in link_groups[lg]:
+                            if linked_name != k:
+                                try:
+                                    setattr(mdl, linked_name, v)
+                                    if is_composite and hasattr(model_spec, "set_param_value"):
+                                        model_spec.set_param_value(linked_name, v)
+                                    elif linked_name in model_spec.params:
+                                        model_spec.params[linked_name].value = v
+                                    if linked_name not in applied:
+                                        applied.append(linked_name)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
         if blocked_values:
             key = tuple(sorted(blocked_values))

@@ -123,10 +123,7 @@ class ModelState:
             dists = np.hypot(xd - float(x), yd - float(y))
             idx = int(np.argmin(dists))
             if dists[idx] <= float(tol):
-                try:
-                    self.excluded[idx] = not bool(self.excluded[idx])
-                except Exception:
-                    pass
+                self.excluded[idx] = not bool(self.excluded[idx])
                 return idx
         except Exception:
             pass
@@ -151,10 +148,7 @@ class ModelState:
             if inds.size == 0:
                 return inds
             # if all inside are excluded, un-exclude them, else exclude them
-            if np.all(self.excluded[inds]):
-                self.excluded[inds] = False
-            else:
-                self.excluded[inds] = True
+            self.excluded[inds] = not np.all(self.excluded[inds])
             return inds
         except Exception:
             return np.array([], dtype=int)
@@ -175,6 +169,57 @@ class ModelState:
     # ------------------------------------------------------------------
     # Evaluation (placeholder — to be linked to model factory)
     # ------------------------------------------------------------------
+    def _try_call_with_fallback(self, func, x, params):
+        """Helper to try calling func(x, params) then fallback to func(x)."""
+        if not callable(func):
+            return None
+        try:
+            return func(x, params)
+        except Exception:
+            try:
+                return func(x)
+            except Exception:
+                return None
+    
+    def _get_params_dict(self):
+        """Build parameter dict from model_spec and model attributes."""
+        params = {}
+        spec = getattr(self, "model_spec", None)
+        
+        # Get params from spec
+        if spec is not None and hasattr(spec, "get_param_values"):
+            try:
+                params = spec.get_param_values()
+            except Exception:
+                pass
+        elif spec is not None:
+            for n, p in getattr(spec, "params", {}).items():
+                try:
+                    params[n] = getattr(p, "value", None)
+                except Exception:
+                    params[n] = None
+        
+        # Overlay model object attributes
+        mdl = getattr(self, "model", None)
+        if mdl is not None:
+            for k in list(params.keys()):
+                if hasattr(mdl, k):
+                    try:
+                        params[k] = getattr(mdl, k)
+                    except Exception:
+                        pass
+            # Include extra non-private non-callable attributes
+            for k in dir(mdl):
+                if not k.startswith("_") and k not in params:
+                    try:
+                        v = getattr(mdl, k)
+                        if not callable(v):
+                            params[k] = v
+                    except Exception:
+                        pass
+        
+        return params
+    
     def evaluate(self, model_func=None):
         """
         Evaluate current model. The callable model_func should be provided
@@ -185,113 +230,50 @@ class ModelState:
         (and any attributes on state.model) and attempts to call callables
         with signature (x, params) first, then falls back to (x).
         """
-        # build a simple params dict from model_spec.params
-        params = {}
-        spec = getattr(self, "model_spec", None)
-        if spec is not None:
-            try:
-                # use the spec helper if available
-                if hasattr(spec, "get_param_values"):
-                    params = spec.get_param_values()
-                else:
-                    for n, p in getattr(spec, "params", {}).items():
-                        try:
-                            params[n] = getattr(p, "value", None)
-                        except Exception:
-                            params[n] = None
-            except Exception:
-                params = {}
-
-        # overlay any attributes stored on a concrete model object
+        params = self._get_params_dict()
+        
+        # 1) Try explicit callable first
+        if callable(model_func):
+            result = self._try_call_with_fallback(model_func, self.x_data, params)
+            if result is not None:
+                return result
+        
+        # 2) Try concrete model instance
         mdl = getattr(self, "model", None)
         if mdl is not None:
-            try:
-                for k in list(params.keys()):
-                    if hasattr(mdl, k):
-                        try:
-                            params[k] = getattr(mdl, k)
-                        except Exception:
-                            pass
-                # also include any extra attrs on the model that aren't in spec
-                for k in dir(mdl):
-                    if k.startswith("_"):
-                        continue
-                    if k not in params:
-                        try:
-                            v = getattr(mdl, k)
-                            # skip methods
-                            if not callable(v):
-                                params[k] = v
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-        # 1) explicit callable wins: try with (x, params) then (x)
-        if callable(model_func):
-            try:
-                return model_func(self.x_data, params)
-            except Exception:
-                try:
-                    return model_func(self.x_data)
-                except Exception:
-                    pass
-
-        # 2) concrete model instance on state (prefer evaluate() if present)
-        if mdl is not None:
-            # Prefer an 'evaluate' method on a model instance. Some models are
-            # implemented as simple callables (functions) while others are
-            # objects exposing an 'evaluate' method. Check for 'evaluate'
-            # first so static checkers (which may treat callables as
-            # FunctionType) do not flag attribute access on functions.
-            if hasattr(mdl, "evaluate") and callable(getattr(mdl, "evaluate")):
-                try:
-                    return mdl.evaluate(self.x_data, params)
-                except Exception:
-                    try:
-                        return mdl.evaluate(self.x_data)
-                    except Exception:
-                        pass
-            if callable(mdl):
-                try:
-                    return mdl(self.x_data, params)
-                except Exception:
-                    try:
-                        return mdl(self.x_data)
-                    except Exception:
-                        pass
-
-        # 3) attached model_spec: try evaluate(x, params) then evaluate(x)
+            # Try evaluate method
+            if hasattr(mdl, "evaluate"):
+                result = self._try_call_with_fallback(mdl.evaluate, self.x_data, params)
+                if result is not None:
+                    return result
+            # Try calling model directly
+            result = self._try_call_with_fallback(mdl, self.x_data, params)
+            if result is not None:
+                return result
+        
+        # 3) Try attached model_spec
+        spec = getattr(self, "model_spec", None)
         if spec is not None:
-            if hasattr(spec, "evaluate") and callable(getattr(spec, "evaluate")):
-                try:
-                    return spec.evaluate(self.x_data, params)
-                except Exception:
+            # Try evaluate method
+            if hasattr(spec, "evaluate"):
+                result = self._try_call_with_fallback(spec.evaluate, self.x_data, params)
+                if result is not None:
+                    return result
+            # Try maker helpers
+            for maker_name in ("to_callable", "to_model", "get_callable", "get_model"):
+                if hasattr(spec, maker_name):
                     try:
-                        return spec.evaluate(self.x_data)
+                        maker_func = getattr(spec, maker_name)
+                        if callable(maker_func):
+                            fn = maker_func()
+                            result = self._try_call_with_fallback(fn, self.x_data, params)
+                            if result is not None:
+                                return result
                     except Exception:
                         pass
-            # try common maker helpers that may return a callable accepting params
-            for maker in ("to_callable", "to_model", "get_callable", "get_model"):
-                if hasattr(spec, maker) and callable(getattr(spec, maker)):
-                    try:
-                        fn = getattr(spec, maker)()
-                        if callable(fn):
-                            try:
-                                return fn(self.x_data, params)
-                            except Exception:
-                                try:
-                                    return fn(self.x_data)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-
-        # nothing usable: return zeros matching x
-        try:
-            return np.zeros_like(self.x_data)
-        except Exception:
-            return np.array([])
+        
+        # Fallback: return zeros matching x
+        return np.zeros_like(self.x_data) if len(self.x_data) > 0 else np.array([])
 
     # ------------------------------------------------------------------
     # Snapshot/save helpers
@@ -314,50 +296,43 @@ class ModelState:
         self.x_data = np.array(snap["x"])
         self.y_data = np.array(snap["y"])
 
-        # restore exclusion mask if present, otherwise reset
+        # Restore exclusion mask with length matching
         exc = snap.get("excluded", None)
         try:
             if exc is None:
                 self.excluded = np.zeros_like(self.x_data, dtype=bool)
             else:
                 arr = np.asarray(exc, dtype=bool)
-                # if length mismatches, attempt to pad/truncate
                 if len(arr) != len(self.x_data):
-                    a = np.zeros_like(self.x_data, dtype=bool)
-                    a[: min(len(a), len(arr))] = arr[: len(a)]
-                    self.excluded = a
+                    # Pad or truncate to match data length
+                    self.excluded = np.zeros_like(self.x_data, dtype=bool)
+                    min_len = min(len(self.excluded), len(arr))
+                    self.excluded[:min_len] = arr[:min_len]
                 else:
                     self.excluded = arr
         except Exception:
-            try:
-                self.excluded = np.zeros_like(self.x_data, dtype=bool)
-            except Exception:
-                self.excluded = np.array([], dtype=bool)
+            self.excluded = np.zeros_like(self.x_data, dtype=bool)
 
-        # rebuild the model spec
+        # Rebuild the model spec
         self.model_spec = get_model_spec(self.model_name)
+        
+        # Restore parameters
         for k, v in snap.get("parameters", {}).items():
             if k in self.model_spec.params:
                 self.model_spec.params[k].value = v
-        # restore fixed-state if present
-        fixed_map = snap.get("fixed", {})
-        try:
-            for k, fv in fixed_map.items():
-                if k in self.model_spec.params:
-                    try:
-                        self.model_spec.params[k].fixed = bool(fv)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        # restore link_group if present
-        link_map = snap.get("link_groups", {})
-        try:
-            for k, lg in link_map.items():
-                if k in self.model_spec.params:
-                    try:
-                        self.model_spec.params[k].link_group = int(lg) if lg else None
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        
+        # Restore fixed state
+        for k, fv in snap.get("fixed", {}).items():
+            if k in self.model_spec.params:
+                try:
+                    self.model_spec.params[k].fixed = bool(fv)
+                except Exception:
+                    pass
+        
+        # Restore link groups
+        for k, lg in snap.get("link_groups", {}).items():
+            if k in self.model_spec.params:
+                try:
+                    self.model_spec.params[k].link_group = int(lg) if lg else None
+                except Exception:
+                    pass
