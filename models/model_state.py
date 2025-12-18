@@ -175,7 +175,7 @@ class ModelState:
             return None
         try:
             return func(x, params)
-        except (TypeError, Exception):
+        except Exception:
             try:
                 return func(x)
             except Exception:

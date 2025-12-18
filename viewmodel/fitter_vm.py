@@ -283,20 +283,22 @@ class FitterViewModel(QObject):
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
 
-        # Try to use set_data method if available, otherwise set directly
+        # Set data using set_data method if available, otherwise set directly
         if hasattr(self.state, 'set_data'):
             try:
                 self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
             except Exception:
+                # Fallback: set data directly and initialize
                 self.state.x_data = np.array(x_arr, copy=True)
                 self.state.y_data = np.array(y_arr, copy=True)
                 safe_call(self.state.model_spec.initialize, self.state.x_data, self.state.y_data,
                          context="model_spec.initialize", vm=self)
-                self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
         else:
             self.state.x_data = np.array(x_arr, copy=True)
             self.state.y_data = np.array(y_arr, copy=True)
-            self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
+        
+        # Ensure exclusion mask exists and matches data length
+        self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
 
         # Set errors with fallback to sqrt of data
         try:
