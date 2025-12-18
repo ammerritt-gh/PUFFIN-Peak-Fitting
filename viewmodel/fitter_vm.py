@@ -2964,6 +2964,64 @@ class FitterViewModel(QObject):
         except Exception:
             return a == b
 
+    def _split_parameter_updates(self, params: dict):
+        """Split parameter dict into fixed, link, and value updates.
+        
+        Returns:
+            Tuple of (fixed_updates, link_updates, value_updates) dicts
+        """
+        fixed_suffix = "__fixed"
+        link_suffix = "__link"
+        fixed_updates = {}
+        link_updates = {}
+        value_updates = {}
+        
+        for k, v in params.items():
+            if isinstance(k, str) and k.endswith(fixed_suffix):
+                base = k[:-len(fixed_suffix)]
+                fixed_updates[base] = bool(v)
+            elif isinstance(k, str) and k.endswith(link_suffix):
+                base = k[:-len(link_suffix)]
+                try:
+                    link_updates[base] = int(v) if v else None
+                except (ValueError, TypeError):
+                    link_updates[base] = None
+            else:
+                value_updates[k] = v
+        
+        return fixed_updates, link_updates, value_updates
+    
+    def _ensure_model_and_spec(self):
+        """Ensure state has both model and model_spec, creating them if needed.
+        
+        Returns:
+            Tuple of (model, model_spec, is_composite)
+        """
+        mdl = getattr(self.state, "model", None)
+        model_spec = getattr(self.state, "model_spec", None)
+
+        # Ensure we have a model_spec
+        if model_spec is None:
+            model_name = getattr(self.state, "model_name", None)
+            if model_name is None and mdl is not None:
+                model_name = getattr(mdl, "name", None) or mdl.__class__.__name__
+            if model_name is None:
+                model_name = "voigt"
+            try:
+                from models import get_model_spec
+                model_spec = get_model_spec(model_name)
+                setattr(self.state, "model_spec", model_spec)
+            except Exception:
+                model_spec = None
+
+        # Ensure we have a model object
+        if mdl is None:
+            mdl = SimpleNamespace()
+            setattr(self.state, "model", mdl)
+
+        is_composite = isinstance(model_spec, CompositeModelSpec)
+        return mdl, model_spec, is_composite
+
     def apply_parameters(self, params: dict):
         """Apply parameters from the UI.
 
@@ -2972,159 +3030,90 @@ class FitterViewModel(QObject):
         the attached state.model_spec parameter values. Finally triggers update_plot().
         """
         if not isinstance(params, dict):
-            # try to coerce mapping-like objects to dict
             try:
                 params = dict(params)
             except Exception:
-                # nothing sensible to do
                 self.log_message.emit("apply_parameters: expected a dict")
                 return
 
-        # Apply into state.model where possible, otherwise into state.model_spec
-        mdl = getattr(self.state, "model", None)
-        model_spec = getattr(self.state, "model_spec", None)
-
-        # Ensure we have a model_spec to persist defaults if needed
-        if model_spec is None:
-            # try to create one from state.model_name or fallback
-            model_name = getattr(self.state, "model_name", None)
-            if model_name is None and mdl is not None:
-                model_name = getattr(mdl, "name", None) or mdl.__class__.__name__
-            if model_name is None:
-                model_name = "voigt"
-            # local import for get_model_spec
-            try:
-                from models import get_model_spec
-                model_spec = get_model_spec(model_name)
-                setattr(self.state, "model_spec", model_spec)
-            except Exception:
-                model_spec = None
-
-        # If no concrete model object exists, create a thin namespace to hold attributes
-        if mdl is None:
-            mdl = SimpleNamespace()
-            setattr(self.state, "model", mdl)
-
-        is_composite = isinstance(model_spec, CompositeModelSpec)
+        # Ensure model and spec exist
+        mdl, model_spec, is_composite = self._ensure_model_and_spec()
+        
+        # Split parameters by type
+        fixed_updates, link_updates, value_updates = self._split_parameter_updates(params)
+        
+        # Get link groups for propagation
         link_groups = self._collect_link_groups(model_spec)
-        # split fixed toggles (keys ending with '__fixed'), link groups (keys ending with '__link'), 
-        # and value updates
-        fixed_suffix = "__fixed"
-        link_suffix = "__link"
-        fixed_updates = {}
-        link_updates = {}
-        value_updates = {}
-        for k, v in params.items():
-            try:
-                if isinstance(k, str) and k.endswith(fixed_suffix):
-                    base = k[: -len(fixed_suffix)]
-                    fixed_updates[base] = bool(v)
-                elif isinstance(k, str) and k.endswith(link_suffix):
-                    base = k[: -len(link_suffix)]
-                    try:
-                        link_updates[base] = int(v) if v else None
-                    except Exception:
-                        link_updates[base] = None
-                else:
-                    value_updates[k] = v
-            except Exception:
-                # fallback: treat as value update
-                value_updates[k] = v
 
         applied = []
         blocked_values = []
-        # First apply link_group updates
+        
+        # Apply link_group updates
         for base, link_val in link_updates.items():
-            try:
-                if model_spec is not None and base in model_spec.params:
-                    try:
-                        model_spec.params[base].link_group = link_val
-                    except Exception:
-                        pass
-                    # If composite, also propagate link_group back to the underlying component param
-                    try:
-                        if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, 'get_link'):
-                            link = model_spec.get_link(base)
-                            if link and isinstance(link, tuple) and len(link) >= 2:
-                                component, pname = link
-                                try:
-                                    if pname in getattr(component.spec, 'params', {}):
-                                        component.spec.params[pname].link_group = link_val
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-                applied.append(f"{base}{link_suffix}")
-            except Exception:
-                pass
+            if model_spec is not None and base in getattr(model_spec, 'params', {}):
+                try:
+                    model_spec.params[base].link_group = link_val
+                    # Propagate to composite component if applicable
+                    if isinstance(model_spec, CompositeModelSpec) and hasattr(model_spec, 'get_link'):
+                        link = model_spec.get_link(base)
+                        if link and isinstance(link, tuple) and len(link) >= 2:
+                            component, pname = link
+                            if hasattr(component, 'spec') and pname in getattr(component.spec, 'params', {}):
+                                component.spec.params[pname].link_group = link_val
+                    applied.append(f"{base}__link")
+                except Exception:
+                    pass
+        
+        # Refresh link groups after updates
         link_groups = self._collect_link_groups(model_spec)
         
-        # Apply fixed-state updates so UI and fit logic see changes immediately
+        # Apply fixed-state updates
         for base, fv in fixed_updates.items():
             try:
                 self._apply_fixed_state_to_group(model_spec, mdl, base, bool(fv), link_groups)
-                applied.append(f"{base}{fixed_suffix}")
+                applied.append(f"{base}__fixed")
             except Exception:
                 pass
 
-        # Now apply value updates (regular parameter assignments)
+        # Apply value updates (regular parameter assignments)
         for k, v in value_updates.items():
+            # Skip if parameter is fixed
+            if self._is_parameter_fixed(k):
+                current_val = self._get_current_param_value(k)
+                if not self._values_close(current_val, v):
+                    blocked_values.append(k)
+                continue
+            
+            # Set parameter value on model and spec
             try:
-                if self._is_parameter_fixed(k):
-                    current_val = self._get_current_param_value(k)
-                    if not self._values_close(current_val, v):
-                        blocked_values.append(k)
-                    continue
-                # prefer to set attribute on the actual model object
-                try:
-                    setattr(mdl, k, v)
-                    if is_composite and hasattr(model_spec, "set_param_value"):
-                        model_spec.set_param_value(k, v)
-                    applied.append(k)
-                except Exception:
-                    # if model doesn't accept attribute, fallback to model_spec if available
-                    if model_spec is not None and k in model_spec.params:
-                        if is_composite and hasattr(model_spec, "set_param_value"):
-                            model_spec.set_param_value(k, v)
-                        else:
-                            model_spec.params[k].value = v
-                        applied.append(k)
-                    else:
-                        # create attribute on model as last resort
-                        try:
-                            setattr(mdl, k, v)
-                        except Exception:
-                            pass
-                        if is_composite and hasattr(model_spec, "set_param_value"):
-                            try:
-                                model_spec.set_param_value(k, v)
-                            except Exception:
-                                pass
-                        applied.append(k)
-                
-                # If this parameter is linked, propagate value to all linked parameters
-                if model_spec is not None and k in model_spec.params:
-                    try:
-                        lg = getattr(model_spec.params[k], "link_group", None)
-                        if lg and lg > 0 and lg in link_groups:
-                            linked_params = link_groups[lg]
-                            for linked_name in linked_params:
-                                if linked_name != k:  # Don't apply to self
-                                    try:
-                                        setattr(mdl, linked_name, v)
-                                        if is_composite and hasattr(model_spec, "set_param_value"):
-                                            model_spec.set_param_value(linked_name, v)
-                                        else:
-                                            model_spec.params[linked_name].value = v
-                                        if linked_name not in applied:
-                                            applied.append(linked_name)
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        pass
+                setattr(mdl, k, v)
+                if is_composite and hasattr(model_spec, "set_param_value"):
+                    model_spec.set_param_value(k, v)
+                elif model_spec and k in getattr(model_spec, 'params', {}):
+                    model_spec.params[k].value = v
+                applied.append(k)
             except Exception:
-                # ignore per-parameter failures
                 pass
+            
+            # Propagate value to linked parameters
+            if model_spec and k in getattr(model_spec, 'params', {}):
+                try:
+                    lg = getattr(model_spec.params[k], "link_group", None)
+                    if lg and lg > 0 and lg in link_groups:
+                        for linked_name in link_groups[lg]:
+                            if linked_name != k:
+                                try:
+                                    setattr(mdl, linked_name, v)
+                                    if is_composite and hasattr(model_spec, "set_param_value"):
+                                        model_spec.set_param_value(linked_name, v)
+                                    elif linked_name in model_spec.params:
+                                        model_spec.params[linked_name].value = v
+                                    if linked_name not in applied:
+                                        applied.append(linked_name)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
 
         if blocked_values:
             key = tuple(sorted(blocked_values))
