@@ -50,3 +50,39 @@ def log_exception(context: str, exc: Optional[BaseException] = None, vm: Optiona
             print(f"{context}: logging failed for exception {exc}")
         except Exception:
             pass
+
+
+def safe_call(func, *args, default=None, context: str = "operation", vm: Optional[object] = None, **kwargs):
+    """Safely call a function, logging exceptions and returning default on failure.
+    
+    Args:
+        func: Callable to execute
+        *args: Positional arguments for func
+        default: Value to return on exception (default: None)
+        context: Description for error logging
+        vm: ViewModel instance for logging
+        **kwargs: Keyword arguments for func
+        
+    Returns:
+        Result of func(*args, **kwargs) or default on exception
+    """
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        log_exception(f"Failed during {context}", e, vm=vm)
+        return default
+
+
+def safe_emit(signal, *args, vm: Optional[object] = None, signal_name: str = "signal"):
+    """Safely emit a Qt signal, catching and logging any exceptions.
+    
+    Args:
+        signal: Qt signal to emit
+        *args: Arguments to pass to signal.emit()
+        vm: ViewModel instance for logging
+        signal_name: Name of signal for error messages
+    """
+    try:
+        signal.emit(*args)
+    except Exception as e:
+        log_exception(f"Failed to emit {signal_name}", e, vm=vm)

@@ -227,21 +227,26 @@ class FitterViewModel(QObject):
             pass
 
     def _load_queue_from_config(self):
+        from .logging_helpers import safe_call
+        
         try:
             from dataio import get_config
+            from dataio.data_loader import load_data_from_file
+            
             cfg = get_config()
             q = getattr(cfg, "queued_files", None)
             active = getattr(cfg, "queued_active", None)
             if not q:
                 return
+            
             # Attempt to load each path into the queue
-            from dataio.data_loader import load_data_from_file
             added = 0
             for entry in q:
+                path = entry.get("path") if isinstance(entry, dict) else None
+                if not path or not os.path.isfile(path):
+                    continue
+                
                 try:
-                    path = entry.get("path") if isinstance(entry, dict) else None
-                    if not path or not os.path.isfile(path):
-                        continue
                     x, y, err, info = load_data_from_file(path)
                     x_arr, y_arr, err_arr = self._prepare_dataset(x, y, err)
                     dataset = {"x": x_arr, "y": y_arr, "err": err_arr, "info": info}
@@ -249,30 +254,27 @@ class FitterViewModel(QObject):
                     added += 1
                 except Exception:
                     continue
-            # restore active index if valid
+            
+            # Restore active index if valid
             if isinstance(active, int) and 0 <= active < len(self._datasets):
                 self._active_dataset_index = int(active)
-            elif len(self._datasets) > 0:
-                # Default to first file if no valid active index
+            elif self._datasets:
                 self._active_dataset_index = 0
             else:
                 self._active_dataset_index = None
+            
+            # Notify UI and activate if needed
             if added:
-                # notify UI
-                try:
-                    self._emit_file_queue()
-                except Exception:
-                    pass
-                # Actually activate the file to apply data and load saved fit
+                safe_call(self._emit_file_queue, context="emit file queue", vm=self)
                 if self._active_dataset_index is not None:
-                    try:
-                        self.activate_file(self._active_dataset_index)
-                    except Exception as e:
-                        log_exception("Failed to activate file in _load_queue_from_config", e)
+                    safe_call(self.activate_file, self._active_dataset_index, 
+                             context="activate file in _load_queue_from_config", vm=self)
         except Exception:
             pass
 
     def _apply_dataset_to_state(self, dataset: dict):
+        from .logging_helpers import safe_call
+        
         x = dataset.get("x")
         y = dataset.get("y")
         err = dataset.get("err")
@@ -281,39 +283,38 @@ class FitterViewModel(QObject):
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
 
-        try:
-            self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
-        except Exception:
+        # Try to use set_data method if available, otherwise set directly
+        if hasattr(self.state, 'set_data'):
+            try:
+                self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
+            except Exception:
+                self.state.x_data = np.array(x_arr, copy=True)
+                self.state.y_data = np.array(y_arr, copy=True)
+                safe_call(self.state.model_spec.initialize, self.state.x_data, self.state.y_data,
+                         context="model_spec.initialize", vm=self)
+                self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
+        else:
             self.state.x_data = np.array(x_arr, copy=True)
             self.state.y_data = np.array(y_arr, copy=True)
-            try:
-                self.state.model_spec.initialize(self.state.x_data, self.state.y_data)
-            except Exception:
-                pass
-            try:
-                self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
-            except Exception:
-                self.state.excluded = np.array([], dtype=bool)
+            self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
 
+        # Set errors with fallback to sqrt of data
         try:
             self.state.errors = np.array(err, dtype=float, copy=True)
         except Exception:
             self.state.errors = np.sqrt(np.clip(np.abs(self.state.y_data), 1e-12, np.inf))
 
+        # Set file_info if provided
         if info:
-            try:
-                try:
-                    setattr(self.state, "file_info", info)
-                except Exception:
-                    # fallback: ignore if state doesn't accept dynamic attributes
-                    pass
-            except Exception:
-                pass
+            safe_call(setattr, self.state, "file_info", info, 
+                     context="set file_info", vm=self)
 
     def activate_file(self, index: int):
+        from .logging_helpers import safe_call, safe_emit
+        
         try:
             idx = int(index)
-        except Exception:
+        except (ValueError, TypeError):
             return
 
         if idx < 0 or idx >= len(self._datasets):
@@ -323,43 +324,25 @@ class FitterViewModel(QObject):
         self._apply_dataset_to_state(dataset)
         self._active_dataset_index = idx
 
+        # Extract dataset name for logging
         info = dataset.get("info") if isinstance(dataset, dict) else {}
-        if not isinstance(info, dict):
-            info = {}
-        name = info.get("name")
-        label = name or f"Dataset {idx + 1}"
-        self._log_message(f"Loaded dataset: {label}")
+        info = info if isinstance(info, dict) else {}
+        name = info.get("name") or f"Dataset {idx + 1}"
+        self._log_message(f"Loaded dataset: {name}")
 
         # Try to load saved fit for this file, or fall back to default fit
-        fit_loaded = False
-        try:
-            fit_loaded = self._load_fit_for_current_file()
-        except Exception:
-            pass
-
+        fit_loaded = safe_call(self._load_fit_for_current_file, default=False,
+                              context="load fit for current file", vm=self)
         if not fit_loaded:
-            # Try to load the default fit as a fallback
-            try:
-                self._load_default_fit()
-            except Exception:
-                pass
+            safe_call(self._load_default_fit, context="load default fit", vm=self)
 
-        # CRITICAL: Ensure model_name matches model_spec before emitting signals
-        try:
-            self._synchronize_model_state()
-        except Exception:
-            pass
+        # Ensure model_name matches model_spec before emitting signals
+        safe_call(self._synchronize_model_state, context="synchronize model state", vm=self)
 
-        try:
-            self.parameters_updated.emit()
-        except Exception:
-            pass
-
+        # Notify UI
+        safe_emit(self.parameters_updated, vm=self, signal_name="parameters_updated")
         self._emit_file_queue()
-        try:
-            self.update_plot()
-        except Exception:
-            pass
+        safe_call(self.update_plot, context="update plot", vm=self)
 
     def remove_file_at(self, index: int):
         try:
@@ -390,6 +373,8 @@ class FitterViewModel(QObject):
             self._emit_file_queue()
 
     def clear_loaded_files(self, emit_log=True):
+        from .logging_helpers import safe_emit, safe_call
+        
         self._datasets.clear()
         self._active_dataset_index = None
         model_name = getattr(self.state, "model_name", "Voigt") if hasattr(self, "state") else "Voigt"
@@ -399,14 +384,8 @@ class FitterViewModel(QObject):
             self.state = ModelState()
         self._fit_worker = None
         self._emit_file_queue()
-        try:
-            self.parameters_updated.emit()
-        except Exception:
-            pass
-        try:
-            self.update_plot()
-        except Exception:
-            pass
+        safe_emit(self.parameters_updated, vm=self, signal_name="parameters_updated")
+        safe_call(self.update_plot, context="update plot", vm=self)
         if emit_log:
             self._log_message("Cleared queued datasets and restored initial synthetic data.")
 
@@ -418,21 +397,19 @@ class FitterViewModel(QObject):
 
     def clear_plot(self):
         """Reset to initial synthetic dataset and clear stored last-loaded file in config."""
+        from .logging_helpers import safe_call
+        
         try:
             self.clear_loaded_files(emit_log=False)
 
-            # clear saved last-loaded file in config if available
-            try:
+            # Clear saved last-loaded file in config if available
+            def _clear_config():
                 from dataio import get_config
                 cfg = get_config()
                 cfg.last_loaded_file = None
-                try:
-                    cfg.save()
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
+                safe_call(cfg.save, context="save config", vm=self)
+            
+            safe_call(_clear_config, context="clear config", vm=self)
             self._log_message("Cleared queued datasets and restored initial synthetic data.")
         except Exception as e:
             log_exception("Failed to clear plot", e, vm=self)
