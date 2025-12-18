@@ -2578,37 +2578,6 @@ class FitterViewModel(QObject):
         if model_data is None:
             return False
 
-    def _scan_saved_custom_models(self) -> _typing.Dict[str, object]:
-        """Scan the models/custom_models directory for saved custom-model YAML files.
-
-        Returns a mapping of saved-model display name -> pathlib.Path to the YAML file.
-        Only files with 'category' == 'saved_custom_model' are included. If no
-        directory exists or an error occurs, an empty dict is returned.
-        """
-        try:
-            from pathlib import Path
-            import yaml
-
-            repo_root = Path(__file__).resolve().parent.parent
-            custom_models_dir = repo_root / "models" / "custom_models"
-            if not custom_models_dir.exists():
-                return {}
-
-            found = {}
-            for yaml_file in custom_models_dir.glob("*.yaml"):
-                try:
-                    with open(yaml_file, 'r', encoding='utf-8') as f:
-                        data = yaml.safe_load(f)
-                    if data and data.get('category') == 'saved_custom_model':
-                        name = data.get('name', yaml_file.stem)
-                        found[name] = yaml_file
-                except Exception:
-                    # Skip unreadable/invalid files
-                    continue
-            return found
-        except Exception:
-            return {}
-        
         try:
             components = model_data.get('components', [])
             
@@ -2683,6 +2652,37 @@ class FitterViewModel(QObject):
             import traceback
             traceback.print_exc()
             return False
+
+    def _scan_saved_custom_models(self) -> _typing.Dict[str, object]:
+        """Scan the models/custom_models directory for saved custom-model YAML files.
+
+        Returns a mapping of saved-model display name -> pathlib.Path to the YAML file.
+        Only files with 'category' == 'saved_custom_model' are included. If no
+        directory exists or an error occurs, an empty dict is returned.
+        """
+        try:
+            from pathlib import Path
+            import yaml
+
+            repo_root = Path(__file__).resolve().parent.parent
+            custom_models_dir = repo_root / "models" / "custom_models"
+            if not custom_models_dir.exists():
+                return {}
+
+            found = {}
+            for yaml_file in custom_models_dir.glob("*.yaml"):
+                try:
+                    with open(yaml_file, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f)
+                    if data and data.get('category') == 'saved_custom_model':
+                        name = data.get('name', yaml_file.stem)
+                        found[name] = yaml_file
+                except Exception:
+                    # Skip unreadable/invalid files
+                    continue
+            return found
+        except Exception:
+            return {}
 
     def _is_saved_custom_model(self, model_name: str) -> bool:
         """Check if a model name corresponds to a saved custom model."""
