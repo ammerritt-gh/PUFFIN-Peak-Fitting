@@ -528,10 +528,102 @@ class FitterViewModel(QObject):
             self._log_message("Cleared queued datasets and restored initial synthetic data.")
 
     def save_data(self):
-        """Save current data and fit to file."""
-        y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
-        save_dataset(self.state.x_data, self.state.y_data, y_fit=y_fit)
-        self._log_message("Data saved successfully.")
+        """Save current data and fit to file with multiple export options."""
+        try:
+            # Import required modules
+            from view.dialogs.save_data_dialog import SaveDataDialog
+            from dataio.data_exporter import export_all, save_as_image, save_as_ascii, save_parameters
+            from dataio import get_config
+            
+            # Get default save folder from config
+            cfg = get_config()
+            default_folder = cfg.default_save_folder or str(_typing.cast(object, __import__('pathlib')).Path.home())
+            
+            # Show save dialog
+            dialog = SaveDataDialog(parent=None, default_folder=default_folder)
+            if dialog.exec() != dialog.Accepted:
+                return
+            
+            base_path = dialog.get_save_path()
+            options = dialog.get_save_options()
+            
+            if not base_path:
+                self._log_message("Save cancelled: no path selected.")
+                return
+            
+            # Gather data for export
+            x_data = getattr(self.state, "x_data", None)
+            y_data = getattr(self.state, "y_data", None)
+            y_errors = getattr(self.state, "errors", None)
+            excluded_mask = getattr(self.state, "excluded", None)
+            file_info = getattr(self.state, "file_info", None)
+            model_name = getattr(self.state, "model_name", None)
+            
+            if x_data is None or y_data is None:
+                self._log_message("No data available to save.")
+                return
+            
+            # Get fit data
+            y_fit_dict = None
+            try:
+                # Try to get detailed fit with components
+                y_fit_dict = self._get_plot_fit_data()
+            except Exception:
+                # Fallback to simple evaluation
+                try:
+                    y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
+                    if y_fit is not None:
+                        y_fit_dict = y_fit
+                except Exception:
+                    y_fit_dict = None
+            
+            # Get parameters and fit result
+            parameters = self.get_parameters() if hasattr(self, "get_parameters") else {}
+            fit_result = getattr(self.state, "fit_result", None)
+            
+            # Perform exports based on options
+            margin_percent = options.get('margin_percent', 10.0)
+            save_image_flag = options.get('save_image', False)
+            save_ascii_flag = options.get('save_ascii', False)
+            save_params_flag = options.get('save_parameters', False)
+            
+            success_count = 0
+            failed_exports = []
+            
+            if save_image_flag:
+                image_path = f"{base_path}.png"
+                if save_as_image(x_data, y_data, y_fit_dict, y_errors, image_path, 
+                                margin_percent, excluded_mask, file_info):
+                    self._log_message(f"Image saved to: {image_path}")
+                    success_count += 1
+                else:
+                    failed_exports.append("image")
+            
+            if save_ascii_flag:
+                ascii_path = f"{base_path}_data.txt"
+                if save_as_ascii(x_data, y_data, y_fit_dict, y_errors, ascii_path, excluded_mask):
+                    self._log_message(f"ASCII data saved to: {ascii_path}")
+                    success_count += 1
+                else:
+                    failed_exports.append("ASCII data")
+            
+            if save_params_flag:
+                params_path = f"{base_path}_parameters.txt"
+                if save_parameters(parameters, fit_result, params_path, model_name):
+                    self._log_message(f"Parameters saved to: {params_path}")
+                    success_count += 1
+                else:
+                    failed_exports.append("parameters")
+            
+            # Summary message
+            if success_count > 0:
+                self._log_message(f"Save completed: {success_count} file(s) exported successfully.")
+            
+            if failed_exports:
+                self._log_message(f"Failed to save: {', '.join(failed_exports)}")
+        
+        except Exception as e:
+            log_exception("Failed to save data", e, vm=self)
 
     def clear_plot(self):
         """Reset to initial synthetic dataset and clear stored last-loaded file in config."""
@@ -1929,6 +2021,136 @@ class FitterViewModel(QObject):
             return x_arr[mask], y_arr[mask]
         except Exception:
             return x_arr, y_arr
+
+    def _get_plot_fit_data(self) -> _typing.Optional[dict]:
+        """Get the current fit data structure for export (similar to update_plot output).
+        
+        Returns:
+            Dict with 'total' and 'components' keys, or None if no fit available
+        """
+        try:
+            x = getattr(self.state, "x_data", None)
+            if x is None:
+                return None
+            
+            x_arr = np.asarray(x, dtype=float)
+            model_spec = getattr(self.state, "model_spec", None)
+            
+            preview_grid = self._build_preview_grid(x_arr)
+            preview_enabled = preview_grid.size > x_arr.size
+            
+            if isinstance(model_spec, CompositeModelSpec):
+                try:
+                    component_outputs = model_spec.evaluate_components(x_arr)
+                except Exception:
+                    component_outputs = []
+                
+                preview_lookup = {}
+                if preview_enabled:
+                    try:
+                        preview_outputs = model_spec.evaluate_components(preview_grid)
+                        for component, values in preview_outputs:
+                            try:
+                                preview_lookup[component.prefix] = np.asarray(values, dtype=float)
+                            except Exception:
+                                pass
+                    except Exception:
+                        preview_lookup = {}
+                        preview_enabled = False
+                
+                total = np.zeros_like(x_arr, dtype=float)
+                total_preview = np.zeros_like(preview_grid, dtype=float) if preview_enabled else None
+                preview_complete = bool(preview_enabled)
+                components_for_export = []
+                
+                for component, values in component_outputs:
+                    arr = np.asarray(values, dtype=float)
+                    if arr.shape != x_arr.shape:
+                        continue
+                    try:
+                        total += arr
+                    except Exception:
+                        pass
+                    
+                    disp_x = x_arr
+                    disp_y = arr
+                    if preview_enabled:
+                        preview_arr = np.asarray(preview_lookup.get(component.prefix, np.array([])), dtype=float)
+                        if preview_arr.size == preview_grid.size:
+                            disp_x = preview_grid
+                            disp_y = preview_arr
+                            try:
+                                if total_preview is not None:
+                                    total_preview += preview_arr
+                            except Exception:
+                                preview_complete = False
+                        else:
+                            preview_complete = False
+                    
+                    components_for_export.append({
+                        "prefix": component.prefix,
+                        "label": component.label,
+                        "color": component.color,
+                        "x": np.asarray(disp_x, dtype=float),
+                        "y": np.asarray(disp_y, dtype=float),
+                    })
+                
+                if preview_complete and total_preview is not None:
+                    fit_x = np.asarray(preview_grid, dtype=float)
+                    fit_y = np.asarray(total_preview, dtype=float)
+                else:
+                    fit_x = np.asarray(x_arr, dtype=float)
+                    fit_y = np.asarray(total, dtype=float)
+                
+                # Apply resolution if enabled
+                if self.has_resolution():
+                    try:
+                        fit_y = self.evaluate_with_resolution(fit_x, fit_y)
+                        for comp_data in components_for_export:
+                            comp_y = comp_data.get("y")
+                            comp_x = comp_data.get("x")
+                            if comp_y is not None and comp_x is not None:
+                                comp_data["y"] = self.evaluate_with_resolution(comp_x, comp_y)
+                        total = self.evaluate_with_resolution(x_arr, total)
+                        
+                        # Trim to visible range
+                        data_min, data_max = float(np.min(x_arr)), float(np.max(x_arr))
+                        fit_x, fit_y = self._trim_to_visible_range(fit_x, fit_y, data_min, data_max)
+                        for comp_data in components_for_export:
+                            comp_x = comp_data.get("x")
+                            comp_y = comp_data.get("y")
+                            if comp_x is not None and comp_y is not None:
+                                comp_data["x"], comp_data["y"] = self._trim_to_visible_range(
+                                    comp_x, comp_y, data_min, data_max
+                                )
+                    except Exception:
+                        pass
+                
+                return {
+                    "total": {"x": fit_x, "y": fit_y, "data_y": total},
+                    "components": components_for_export,
+                }
+            else:
+                # Non-composite model
+                y_fit = None
+                if hasattr(self.state, "evaluate"):
+                    try:
+                        y_fit = self.state.evaluate()
+                    except Exception:
+                        pass
+                
+                if y_fit is not None:
+                    arr = np.asarray(y_fit, dtype=float)
+                    if self.has_resolution():
+                        try:
+                            arr = self.evaluate_with_resolution(x_arr, arr)
+                        except Exception:
+                            pass
+                    return arr
+                
+                return None
+        except Exception:
+            return None
 
     def compute_statistics(self, y_fit=None, n_params: int = 0) -> dict:
         """Compute common fit statistics (reduced chi-squared, Cash) for current state.
