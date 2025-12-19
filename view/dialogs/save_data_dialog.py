@@ -4,10 +4,10 @@ Dialog for saving data, fits, and parameters with multiple output options.
 """
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
-    QFileDialog, QLabel, QDoubleSpinBox, QCheckBox, QMessageBox,
-    QDialogButtonBox, QRadioButton, QButtonGroup, QLineEdit, QComboBox
+    QFileDialog, QLabel, QDoubleSpinBox, QMessageBox,
+    QLineEdit, QComboBox
 )
-from PySide6.QtCore import Qt
+
 from pathlib import Path
 
 

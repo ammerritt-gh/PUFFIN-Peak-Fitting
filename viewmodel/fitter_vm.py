@@ -660,8 +660,9 @@ class FitterViewModel(QObject):
                         delimiter_name = dialog.get_delimiter_name()
                         cfg.save_delimiter = delimiter_name
                         cfg.save()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        # Log but do not interrupt the save operation if updating config fails
+                        self._log_message(f"Warning: failed to save delimiter preference: {e}")
                 
                 if failed_exports:
                     error_msg = f"Failed: {', '.join(failed_exports)}"
@@ -2107,8 +2108,9 @@ class FitterViewModel(QObject):
                         for component, values in preview_outputs:
                             try:
                                 preview_lookup[component.prefix] = np.asarray(values, dtype=float)
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                # Skip this component's preview if conversion fails, but log for diagnostics
+                                log_exception("Failed to convert preview component values to ndarray", exc)
                     except Exception:
                         preview_lookup = {}
                         preview_enabled = False
@@ -2124,8 +2126,9 @@ class FitterViewModel(QObject):
                         continue
                     try:
                         total += arr
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # Log but continue so other components can still be processed
+                        log_exception("Error accumulating component contribution into total", exc)
                     
                     disp_x = x_arr
                     disp_y = arr
@@ -2178,8 +2181,8 @@ class FitterViewModel(QObject):
                                 comp_data["x"], comp_data["y"] = self._trim_to_visible_range(
                                     comp_x, comp_y, data_min, data_max
                                 )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log_exception("Error applying resolution during fit preview", exc)
                 
                 return {
                     "total": {"x": fit_x, "y": fit_y, "data_y": total},

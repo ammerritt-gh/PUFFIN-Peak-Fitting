@@ -2,16 +2,16 @@
 
 ## Overview
 
-The BigFit application now provides comprehensive data export options through an enhanced "Save Data" dialog. When you click the "Save Data" button, you can choose from four different save modes to export your data, fits, and parameters in various formats.
+The BigFit application now provides comprehensive data export options through a dedicated "Save Data" dock (SaveDock). When you click the "Save Data" button, this persistent dock widget is shown or raised, and you can choose from four different save modes to export your data, fits, and parameters in various formats.
 
 ## Save Modes
 
 ### 1. Save Everything (Default)
-Exports all three file types with appropriate suffixes:
-- **Image file** (`basename.png`): Plot with data, fits, and components
-- **ASCII data file** (`basename_data.txt`): Data and fit curves
-- **Parameters file** (`basename_parameters.txt`): Fit parameters with errors
-
+Exports all four files with the following suffixes:
+- **Margin image file** (`basename_image_margin.png`): Plot with data, fits, components, and configured margin
+- **View image file** (`basename_image_view.png`): Plot exactly as currently displayed in the main view
+- **ASCII data file** (`basename_ASCII.txt`): Data and fit curves
+- **Parameters file** (`basename_params.txt`): Fit parameters with errors
 ### 2. Save as Image Only
 Exports a high-quality PNG image of the current plot showing:
 - Data points with error bars

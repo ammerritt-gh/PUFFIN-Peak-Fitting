@@ -194,16 +194,7 @@ class SaveDock(QDockWidget):
         self.ascii_filename.setText(f"{base}_ASCII.txt")
         self.params_filename.setText(f"{base}_params.txt")
     
-    def _get_save_path(self, suffix):
-        """Get the full save path for a given suffix."""
-        folder = self.folder_edit.text().strip()
-        base = self.base_filename_edit.text().strip()
-        
-        if not folder or not base:
-            return None
-        
-        return str(Path(folder) / f"{base}{suffix}")
-    
+
     def _validate_inputs(self):
         """Validate that folder and filename are provided."""
         if not self.folder_edit.text().strip():
