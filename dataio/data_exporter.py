@@ -138,7 +138,7 @@ def save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, margin_percen
         return False
 
 
-def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask=None):
+def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask=None, delimiter=","):
     """Save data and fits as ASCII file with fine grid for fits.
     
     Format:
@@ -152,17 +152,22 @@ def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask
         y_errors: Error bars array (can be None)
         save_path: Path for the ASCII file
         excluded_mask: Boolean array marking excluded points
+        delimiter: Delimiter character ("," , "\t", or " ")
     
     Returns:
         True if successful, False otherwise
     """
     try:
         with open(save_path, 'w') as f:
+            # Determine delimiter display for header
+            delim_name = "tab" if delimiter == "\t" else ("space" if delimiter == " " else "comma")
+            
             # Write header
             f.write("# BigFit Data Export\n")
+            f.write(f"# Delimiter: {delim_name}\n")
             f.write("# \n")
             f.write("# Data columns (rows may be excluded from fit):\n")
-            f.write("#   Energy\tCounts\tErrors\n")
+            f.write(f"#   Energy{delimiter}Counts{delimiter}Errors\n")
             f.write("# \n")
             
             # Determine fit columns
@@ -183,7 +188,7 @@ def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask
             
             if fit_columns:
                 f.write("# Fit columns (evaluated on fine grid):\n")
-                f.write(f"#   X_fit\t{chr(9).join(fit_columns)}\n")
+                f.write(f"#   X_fit{delimiter}{delimiter.join(fit_columns)}\n")
                 f.write("# \n")
             
             f.write("# ===== DATA SECTION =====\n")
@@ -196,9 +201,9 @@ def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask
                 
                 # Mark excluded points in comment
                 if excluded_mask is not None and i < len(excluded_mask) and excluded_mask[i]:
-                    f.write(f"# {x_val:.6f}\t{y_val:.6e}\t{err_val:.6e}\n")
+                    f.write(f"# {x_val:.6f}{delimiter}{y_val:.6e}{delimiter}{err_val:.6e}\n")
                 else:
-                    f.write(f"{x_val:.6f}\t{y_val:.6e}\t{err_val:.6e}\n")
+                    f.write(f"{x_val:.6f}{delimiter}{y_val:.6e}{delimiter}{err_val:.6e}\n")
             
             # Write fit section if available
             if y_fit_dict is not None and fit_columns:
@@ -237,14 +242,14 @@ def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask
                         line = f"{fit_x[i]:.6f}"
                         for fit_y in fit_y_arrays:
                             if i < len(fit_y):
-                                line += f"\t{fit_y[i]:.6e}"
+                                line += f"{delimiter}{fit_y[i]:.6e}"
                             else:
-                                line += "\t"
+                                line += delimiter
                         f.write(line + "\n")
                 else:
                     # Simple array fit
                     for i in range(len(x_data)):
-                        f.write(f"{x_data[i]:.6f}\t{y_fit_dict[i]:.6e}\n")
+                        f.write(f"{x_data[i]:.6f}{delimiter}{y_fit_dict[i]:.6e}\n")
         
         return True
     
@@ -255,7 +260,7 @@ def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask
         return False
 
 
-def save_parameters(parameters, fit_result, save_path, model_name=None):
+def save_parameters(parameters, fit_result, save_path, model_name=None, delimiter=","):
     """Save fit parameters with values and errors.
     
     Args:
@@ -263,19 +268,24 @@ def save_parameters(parameters, fit_result, save_path, model_name=None):
         fit_result: Fit result dict with parameter values and errors (if available)
         save_path: Path for the parameters file
         model_name: Optional model name for header
+        delimiter: Delimiter character ("," , "\t", or " ")
     
     Returns:
         True if successful, False otherwise
     """
     try:
         with open(save_path, 'w') as f:
+            # Determine delimiter display for header
+            delim_name = "tab" if delimiter == "\t" else ("space" if delimiter == " " else "comma")
+            
             # Write header
             f.write("# BigFit Parameter Export\n")
             if model_name:
                 f.write(f"# Model: {model_name}\n")
+            f.write(f"# Delimiter: {delim_name}\n")
             f.write("# \n")
             f.write("# Columns:\n")
-            f.write("#   Parameter\tValue\tError\tFixed\tMin\tMax\n")
+            f.write(f"#   Parameter{delimiter}Value{delimiter}Error{delimiter}Fixed{delimiter}Min{delimiter}Max\n")
             f.write("# \n")
             f.write("# Error values are standard errors calculated from the covariance matrix (Jacobian)\n")
             f.write("# of the fit. 'N/A' indicates the parameter was fixed or error unavailable.\n")
@@ -321,7 +331,7 @@ def save_parameters(parameters, fit_result, save_path, model_name=None):
                 min_str = f"{min_val:.6e}" if min_val not in ('', None) else "N/A"
                 max_str = f"{max_val:.6e}" if max_val not in ('', None) else "N/A"
                 
-                f.write(f"{name}\t{value_str}\t{error_str}\t{fixed_str}\t{min_str}\t{max_str}\n")
+                f.write(f"{name}{delimiter}{value_str}{delimiter}{error_str}{delimiter}{fixed_str}{delimiter}{min_str}{delimiter}{max_str}\n")
         
         return True
     
@@ -334,7 +344,7 @@ def save_parameters(parameters, fit_result, save_path, model_name=None):
 
 def export_all(x_data, y_data, y_fit_dict, y_errors, parameters, fit_result, 
                base_path, margin_percent=10.0, excluded_mask=None, file_info=None, 
-               model_name=None):
+               model_name=None, delimiter=","):
     """Export all data, fits, and parameters.
     
     Args:
@@ -349,6 +359,7 @@ def export_all(x_data, y_data, y_fit_dict, y_errors, parameters, fit_result,
         excluded_mask: Boolean exclusion mask
         file_info: File info dict
         model_name: Model name for parameter file
+        delimiter: Delimiter character for text files
     
     Returns:
         Dict with success status for each export type
@@ -369,13 +380,13 @@ def export_all(x_data, y_data, y_fit_dict, y_errors, parameters, fit_result,
     # Save ASCII
     ascii_path = f"{base_path}_data.txt"
     results['ascii'] = save_as_ascii(
-        x_data, y_data, y_fit_dict, y_errors, ascii_path, excluded_mask
+        x_data, y_data, y_fit_dict, y_errors, ascii_path, excluded_mask, delimiter
     )
     
     # Save parameters
     params_path = f"{base_path}_parameters.txt"
     results['parameters'] = save_parameters(
-        parameters, fit_result, params_path, model_name
+        parameters, fit_result, params_path, model_name, delimiter
     )
     
     return results

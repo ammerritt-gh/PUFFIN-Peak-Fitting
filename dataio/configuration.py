@@ -15,6 +15,8 @@ class Config:
     queued_files: List[dict] = field(default_factory=list)
     # index of active queued file, or None
     queued_active: Optional[int] = None
+    # save dialog preferences
+    save_delimiter: str = "comma"  # "comma", "tab", or "space"
 
     def __post_init__(self):
         # ensure folders are normalized strings
@@ -56,6 +58,7 @@ class Config:
                 config_filename=path.name,
                 queued_files=data.get("queued_files", []),
                 queued_active=data.get("queued_active", None),
+                save_delimiter=data.get("save_delimiter", "comma"),
             )
         except Exception:
             # on parse error return defaults and keep config folder

@@ -532,95 +532,150 @@ class FitterViewModel(QObject):
         try:
             # Import required modules
             from view.dialogs.save_data_dialog import SaveDataDialog
-            from dataio.data_exporter import export_all, save_as_image, save_as_ascii, save_parameters
+            from dataio.data_exporter import save_as_image, save_as_ascii, save_parameters
             from dataio import get_config
+            from PySide6.QtWidgets import QDialog
+            from pathlib import Path
             
-            # Get default save folder from config
+            # Get default save folder and delimiter from config
             cfg = get_config()
-            default_folder = cfg.default_save_folder or str(_typing.cast(object, __import__('pathlib')).Path.home())
+            default_folder = cfg.default_save_folder or str(Path.home())
+            
+            # Get default filename from loaded file
+            default_filename = "data"
+            try:
+                file_info = getattr(self.state, "file_info", None)
+                if file_info and isinstance(file_info, dict):
+                    file_path = file_info.get("path")
+                    if file_path:
+                        default_filename = Path(file_path).stem
+            except Exception:
+                pass
             
             # Show save dialog
-            dialog = SaveDataDialog(parent=None, default_folder=default_folder)
-            if dialog.exec() != dialog.Accepted:
-                return
+            dialog = SaveDataDialog(parent=None, default_folder=default_folder, default_filename=default_filename)
             
-            base_path = dialog.get_save_path()
-            options = dialog.get_save_options()
-            
-            if not base_path:
-                self._log_message("Save cancelled: no path selected.")
-                return
-            
-            # Gather data for export
-            x_data = getattr(self.state, "x_data", None)
-            y_data = getattr(self.state, "y_data", None)
-            y_errors = getattr(self.state, "errors", None)
-            excluded_mask = getattr(self.state, "excluded", None)
-            file_info = getattr(self.state, "file_info", None)
-            model_name = getattr(self.state, "model_name", None)
-            
-            if x_data is None or y_data is None:
-                self._log_message("No data available to save.")
-                return
-            
-            # Get fit data
-            y_fit_dict = None
+            # Set delimiter from config
             try:
-                # Try to get detailed fit with components
-                y_fit_dict = self._get_plot_fit_data()
+                dialog.set_delimiter_from_config(cfg.save_delimiter)
             except Exception:
-                # Fallback to simple evaluation
+                pass
+            
+            # Connect button signals to perform saves
+            def perform_save():
+                """Perform the actual save operation based on dialog options."""
+                base_path = dialog.get_base_path()
+                options = dialog.get_save_options()
+                
+                if not base_path:
+                    dialog.set_status("Error: No path selected.", False)
+                    return
+                
+                # Gather data for export
+                x_data = getattr(self.state, "x_data", None)
+                y_data = getattr(self.state, "y_data", None)
+                y_errors = getattr(self.state, "errors", None)
+                excluded_mask = getattr(self.state, "excluded", None)
+                file_info = getattr(self.state, "file_info", None)
+                model_name = getattr(self.state, "model_name", None)
+                
+                if x_data is None or y_data is None:
+                    dialog.set_status("Error: No data available to save.", False)
+                    self._log_message("No data available to save.")
+                    return
+                
+                # Get fit data
+                y_fit_dict = None
                 try:
-                    y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
-                    if y_fit is not None:
-                        y_fit_dict = y_fit
+                    # Try to get detailed fit with components
+                    y_fit_dict = self._get_plot_fit_data()
                 except Exception:
-                    y_fit_dict = None
+                    # Fallback to simple evaluation
+                    try:
+                        y_fit = self.state.evaluate() if hasattr(self.state, "evaluate") else None
+                        if y_fit is not None:
+                            y_fit_dict = y_fit
+                    except Exception:
+                        y_fit_dict = None
+                
+                # Get parameters and fit result
+                parameters = self.get_parameters() if hasattr(self, "get_parameters") else {}
+                fit_result = getattr(self.state, "fit_result", None)
+                
+                # Get delimiter
+                delimiter = options.get('delimiter', ',')
+                if delimiter == 'comma':
+                    delimiter = ','
+                elif delimiter == 'tab':
+                    delimiter = '\t'
+                elif delimiter == 'space':
+                    delimiter = ' '
+                
+                # Perform exports based on options
+                margin_percent = options.get('margin_percent', 10.0)
+                save_image_flag = options.get('save_image', False)
+                save_ascii_flag = options.get('save_ascii', False)
+                save_params_flag = options.get('save_parameters', False)
+                
+                success_count = 0
+                failed_exports = []
+                saved_files = []
+                
+                if save_image_flag:
+                    image_path = f"{base_path}_image.png"
+                    if save_as_image(x_data, y_data, y_fit_dict, y_errors, image_path, 
+                                    margin_percent, excluded_mask, file_info):
+                        self._log_message(f"Image saved to: {image_path}")
+                        saved_files.append("image")
+                        success_count += 1
+                    else:
+                        failed_exports.append("image")
+                
+                if save_ascii_flag:
+                    ascii_path = f"{base_path}_ASCII.txt"
+                    if save_as_ascii(x_data, y_data, y_fit_dict, y_errors, ascii_path, excluded_mask, delimiter):
+                        self._log_message(f"ASCII data saved to: {ascii_path}")
+                        saved_files.append("ASCII")
+                        success_count += 1
+                    else:
+                        failed_exports.append("ASCII data")
+                
+                if save_params_flag:
+                    params_path = f"{base_path}_params.txt"
+                    if save_parameters(parameters, fit_result, params_path, model_name, delimiter):
+                        self._log_message(f"Parameters saved to: {params_path}")
+                        saved_files.append("parameters")
+                        success_count += 1
+                    else:
+                        failed_exports.append("parameters")
+                
+                # Update status in dialog
+                if success_count > 0:
+                    status_msg = f"Saved: {', '.join(saved_files)}"
+                    dialog.set_status(status_msg, True)
+                    self._log_message(f"Save completed: {success_count} file(s) exported successfully.")
+                    
+                    # Save delimiter preference to config
+                    try:
+                        delimiter_name = dialog.get_delimiter_name()
+                        cfg.save_delimiter = delimiter_name
+                        cfg.save()
+                    except Exception:
+                        pass
+                
+                if failed_exports:
+                    error_msg = f"Failed: {', '.join(failed_exports)}"
+                    dialog.set_status(error_msg, False)
+                    self._log_message(f"Failed to save: {', '.join(failed_exports)}")
             
-            # Get parameters and fit result
-            parameters = self.get_parameters() if hasattr(self, "get_parameters") else {}
-            fit_result = getattr(self.state, "fit_result", None)
+            # Connect each button to perform_save
+            dialog.save_image_btn.clicked.connect(perform_save)
+            dialog.save_ascii_btn.clicked.connect(perform_save)
+            dialog.save_params_btn.clicked.connect(perform_save)
+            dialog.save_all_btn.clicked.connect(perform_save)
             
-            # Perform exports based on options
-            margin_percent = options.get('margin_percent', 10.0)
-            save_image_flag = options.get('save_image', False)
-            save_ascii_flag = options.get('save_ascii', False)
-            save_params_flag = options.get('save_parameters', False)
-            
-            success_count = 0
-            failed_exports = []
-            
-            if save_image_flag:
-                image_path = f"{base_path}.png"
-                if save_as_image(x_data, y_data, y_fit_dict, y_errors, image_path, 
-                                margin_percent, excluded_mask, file_info):
-                    self._log_message(f"Image saved to: {image_path}")
-                    success_count += 1
-                else:
-                    failed_exports.append("image")
-            
-            if save_ascii_flag:
-                ascii_path = f"{base_path}_data.txt"
-                if save_as_ascii(x_data, y_data, y_fit_dict, y_errors, ascii_path, excluded_mask):
-                    self._log_message(f"ASCII data saved to: {ascii_path}")
-                    success_count += 1
-                else:
-                    failed_exports.append("ASCII data")
-            
-            if save_params_flag:
-                params_path = f"{base_path}_parameters.txt"
-                if save_parameters(parameters, fit_result, params_path, model_name):
-                    self._log_message(f"Parameters saved to: {params_path}")
-                    success_count += 1
-                else:
-                    failed_exports.append("parameters")
-            
-            # Summary message
-            if success_count > 0:
-                self._log_message(f"Save completed: {success_count} file(s) exported successfully.")
-            
-            if failed_exports:
-                self._log_message(f"Failed to save: {', '.join(failed_exports)}")
+            # Show dialog (it won't close on save, only on Close button)
+            dialog.exec()
         
         except Exception as e:
             log_exception("Failed to save data", e, vm=self)
