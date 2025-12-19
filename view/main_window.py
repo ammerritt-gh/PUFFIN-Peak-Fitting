@@ -68,6 +68,9 @@ class MainWindow(QMainWindow):
         for dock in [self.controls_dock, self.parameters_dock, self.log_dock]:
             dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
 
+        # --- Menu Bar ---
+        self._init_menu_bar()
+
         self.resize(1400, 800)
 
     # --------------------------
@@ -290,7 +293,7 @@ class MainWindow(QMainWindow):
         self.fit_dock = FitDock(self)
         self.fit_dock.hide()  # Start hidden; button reopens it
         
-        # Create save dock (left side, below controls)
+        # Create save dock (left side, below controls, initially hidden)
         from dataio import get_config
         from pathlib import Path
         cfg = get_config()
@@ -301,6 +304,7 @@ class MainWindow(QMainWindow):
             self.splitDockWidget(self.controls_dock, self.save_dock, Qt.Vertical)
         except Exception:
             pass
+        self.save_dock.hide()  # Start hidden; button shows it
         
         # Set up backward compatibility aliases for old attribute names
         self.left_dock = self.controls_dock
@@ -339,6 +343,58 @@ class MainWindow(QMainWindow):
         
         # Connect dock signals to handlers
         self._wire_dock_signals()
+    
+    def _init_menu_bar(self):
+        """Initialize the menu bar with Docks menu."""
+        menubar = self.menuBar()
+        
+        # Docks menu
+        docks_menu = menubar.addMenu("&Docks")
+        
+        # Track all docks
+        self._all_docks = {
+            "Controls": self.controls_dock,
+            "Parameters": self.parameters_dock,
+            "Elements": self.elements_dock,
+            "Log": self.log_dock,
+            "Save Data": self.save_dock,
+            "Resolution": self.resolution_dock,
+            "Fit Settings": self.fit_dock,
+        }
+        
+        # Add menu items for each dock
+        for dock_name, dock in self._all_docks.items():
+            action = docks_menu.addAction(dock_name)
+            action.setCheckable(True)
+            action.setChecked(dock.isVisible())
+            
+            # Connect to toggle visibility and raise
+            def make_toggle_handler(d, name):
+                def handler(checked):
+                    if checked:
+                        d.show()
+                        d.raise_()
+                        d.activateWindow()
+                    else:
+                        d.hide()
+                return handler
+            
+            action.toggled.connect(make_toggle_handler(dock, dock_name))
+            
+            # Update menu when dock visibility changes
+            def make_visibility_handler(a, d):
+                def handler(visible):
+                    a.setChecked(visible)
+                return handler
+            
+            dock.visibilityChanged.connect(make_visibility_handler(action, dock))
+    
+    def _show_save_dock(self):
+        """Show and raise the save dock when Save Data button is clicked."""
+        if hasattr(self, 'save_dock'):
+            self.save_dock.show()
+            self.save_dock.raise_()
+            self.save_dock.activateWindow()
 
     def _wire_dock_signals(self):
         """Wire up all dock signals to main window handlers."""
@@ -350,13 +406,13 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self.viewmodel, "handle_action"):
                 self.controls_dock.load_data_clicked.connect(lambda: self.viewmodel.handle_action("load_data"))
-                self.controls_dock.save_data_clicked.connect(lambda: self.viewmodel.handle_action("save_data"))
+                self.controls_dock.save_data_clicked.connect(self._show_save_dock)
                 self.controls_dock.run_fit_clicked.connect(lambda: self.viewmodel.handle_action("run_fit"))
                 self.controls_dock.reset_fit_clicked.connect(lambda: self.viewmodel.handle_action("reset_fit"))
                 self.controls_dock.update_plot_clicked.connect(lambda: self.viewmodel.handle_action("update_plot"))
             else:
                 self.controls_dock.load_data_clicked.connect(self.viewmodel.load_data)
-                self.controls_dock.save_data_clicked.connect(self.viewmodel.save_data)
+                self.controls_dock.save_data_clicked.connect(self._show_save_dock)
                 self.controls_dock.run_fit_clicked.connect(self.viewmodel.run_fit)
                 if hasattr(self.viewmodel, "reset_fit"):
                     self.controls_dock.reset_fit_clicked.connect(self.viewmodel.reset_fit)
@@ -367,7 +423,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             try:
-                self.controls_dock.save_data_clicked.connect(self.viewmodel.save_data)
+                self.controls_dock.save_data_clicked.connect(self._show_save_dock)
             except Exception:
                 pass
             try:
