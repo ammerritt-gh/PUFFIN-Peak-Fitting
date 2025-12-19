@@ -60,9 +60,17 @@ class FitWorker(QThread):
                 maxfev=8000
             )
 
-            # Construct result
+            # Construct result with parameter errors from covariance
             y_fit = self.model_func(self.x, *popt)
             fit_result = dict(zip(self.param_names, popt))
+            
+            # Extract standard errors from covariance matrix diagonal
+            try:
+                perr = np.sqrt(np.diag(pcov))
+                fit_result['perr'] = dict(zip(self.param_names, perr))
+            except Exception:
+                # If covariance calculation failed, set errors to None
+                fit_result['perr'] = {name: None for name in self.param_names}
 
             self.progress.emit(1.0)
             self.finished.emit(fit_result, y_fit)
