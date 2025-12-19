@@ -25,6 +25,7 @@ from view.docks.elements_dock import ElementsDock
 from view.docks.log_dock import LogDock
 from view.docks.resolution_dock import ResolutionDock
 from view.docks.fit_dock import FitDock
+from view.docks.save_dock import SaveDock
 from models import CompositeModelSpec
 
 # -- color palette (change these) --
@@ -289,6 +290,18 @@ class MainWindow(QMainWindow):
         self.fit_dock = FitDock(self)
         self.fit_dock.hide()  # Start hidden; button reopens it
         
+        # Create save dock (left side, below controls)
+        from dataio import get_config
+        from pathlib import Path
+        cfg = get_config()
+        default_folder = cfg.default_save_folder or str(Path.home())
+        self.save_dock = SaveDock(self, default_folder=default_folder, default_filename="data")
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.save_dock)
+        try:
+            self.splitDockWidget(self.controls_dock, self.save_dock, Qt.Vertical)
+        except Exception:
+            pass
+        
         # Set up backward compatibility aliases for old attribute names
         self.left_dock = self.controls_dock
         self.right_dock = self.parameters_dock
@@ -386,6 +399,7 @@ class MainWindow(QMainWindow):
         
         try:
             self.viewmodel.files_updated.connect(self.controls_dock.update_files)
+            self.viewmodel.files_updated.connect(self._on_files_updated_for_save_dock)
         except Exception:
             pass
         
@@ -393,6 +407,13 @@ class MainWindow(QMainWindow):
         self.controls_dock.remove_file_clicked.connect(self._on_remove_file_clicked)
         self.controls_dock.clear_files_clicked.connect(self._on_clear_files_clicked)
         self.controls_dock.default_model_changed.connect(self._on_default_model_changed)
+        
+        # Save dock signals
+        self.save_dock.save_image_with_margin_requested.connect(self._on_save_image_margin)
+        self.save_dock.save_image_view_range_requested.connect(self._on_save_image_view)
+        self.save_dock.save_ascii_requested.connect(self._on_save_ascii)
+        self.save_dock.save_parameters_requested.connect(self._on_save_parameters)
+        self.save_dock.save_all_requested.connect(self._on_save_all)
         
         # Parameters dock signals
         self.parameters_dock.model_changed.connect(self._on_model_changed)
@@ -2124,6 +2145,310 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "fit_dock") and self.fit_dock.isVisible():
                 self._refresh_fit_bounds()
+        except Exception:
+            pass
+
+    # --------------------------
+    # Save Dock Handlers
+    # --------------------------
+    def _on_save_image_margin(self, options):
+        """Handle save image with margin request from save dock."""
+        try:
+            from dataio.data_exporter import save_as_image
+            from pathlib import Path
+            
+            # Gather data
+            x_data = getattr(self.viewmodel.state, "x_data", None)
+            y_data = getattr(self.viewmodel.state, "y_data", None)
+            y_errors = getattr(self.viewmodel.state, "errors", None)
+            excluded_mask = getattr(self.viewmodel.state, "excluded", None)
+            file_info = getattr(self.viewmodel.state, "file_info", None)
+            
+            if x_data is None or y_data is None:
+                self.save_dock.set_status("Error: No data available", False)
+                return
+            
+            # Get fit data
+            y_fit_dict = None
+            try:
+                y_fit_dict = self.viewmodel._get_plot_fit_data()
+            except Exception:
+                pass
+            
+            # Build save path
+            folder = options['folder']
+            filename = options['filename']
+            save_path = str(Path(folder) / filename)
+            
+            # Save
+            margin_percent = options['margin_percent']
+            if save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, 
+                           margin_percent, excluded_mask, file_info):
+                self.save_dock.set_status(f"Saved: {filename}", True)
+                self.append_log(f"Image saved: {save_path}")
+                
+                # Save delimiter preference
+                self._save_delimiter_preference(options.get('delimiter_name', 'comma'))
+            else:
+                self.save_dock.set_status("Error saving image", False)
+                self.append_log("Failed to save image")
+        except Exception as e:
+            self.save_dock.set_status(f"Error: {e}", False)
+            self.append_log(f"Error saving image: {e}")
+    
+    def _on_save_image_view(self, options):
+        """Handle save image with view range request from save dock."""
+        try:
+            from dataio.data_exporter import save_as_image
+            from pathlib import Path
+            
+            # Gather data
+            x_data = getattr(self.viewmodel.state, "x_data", None)
+            y_data = getattr(self.viewmodel.state, "y_data", None)
+            y_errors = getattr(self.viewmodel.state, "errors", None)
+            excluded_mask = getattr(self.viewmodel.state, "excluded", None)
+            file_info = getattr(self.viewmodel.state, "file_info", None)
+            
+            if x_data is None or y_data is None:
+                self.save_dock.set_status("Error: No data available", False)
+                return
+            
+            # Get fit data
+            y_fit_dict = None
+            try:
+                y_fit_dict = self.viewmodel._get_plot_fit_data()
+            except Exception:
+                pass
+            
+            # Get current view range from plot
+            view_range = None
+            try:
+                vb = self.plot_widget.getViewBox()
+                [[x_min, x_max], [y_min, y_max]] = vb.viewRange()
+                view_range = ((x_min, x_max), (y_min, y_max))
+            except Exception:
+                pass
+            
+            # Build save path
+            folder = options['folder']
+            filename = options['filename']
+            save_path = str(Path(folder) / filename)
+            
+            # Save with view range
+            if save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, 
+                           margin_percent=0, excluded_mask=excluded_mask, 
+                           file_info=file_info, view_range=view_range):
+                self.save_dock.set_status(f"Saved: {filename}", True)
+                self.append_log(f"Image saved: {save_path}")
+                
+                # Save delimiter preference
+                self._save_delimiter_preference(options.get('delimiter_name', 'comma'))
+            else:
+                self.save_dock.set_status("Error saving image", False)
+                self.append_log("Failed to save image")
+        except Exception as e:
+            self.save_dock.set_status(f"Error: {e}", False)
+            self.append_log(f"Error saving image: {e}")
+    
+    def _on_save_ascii(self, options):
+        """Handle save ASCII request from save dock."""
+        try:
+            from dataio.data_exporter import save_as_ascii
+            from pathlib import Path
+            
+            # Gather data
+            x_data = getattr(self.viewmodel.state, "x_data", None)
+            y_data = getattr(self.viewmodel.state, "y_data", None)
+            y_errors = getattr(self.viewmodel.state, "errors", None)
+            excluded_mask = getattr(self.viewmodel.state, "excluded", None)
+            
+            if x_data is None or y_data is None:
+                self.save_dock.set_status("Error: No data available", False)
+                return
+            
+            # Get fit data
+            y_fit_dict = None
+            try:
+                y_fit_dict = self.viewmodel._get_plot_fit_data()
+            except Exception:
+                pass
+            
+            # Build save path
+            folder = options['folder']
+            filename = options['filename']
+            save_path = str(Path(folder) / filename)
+            delimiter = options['delimiter']
+            
+            # Save
+            if save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, 
+                           excluded_mask, delimiter):
+                self.save_dock.set_status(f"Saved: {filename}", True)
+                self.append_log(f"ASCII data saved: {save_path}")
+                
+                # Save delimiter preference
+                self._save_delimiter_preference(options.get('delimiter_name', 'comma'))
+            else:
+                self.save_dock.set_status("Error saving ASCII", False)
+                self.append_log("Failed to save ASCII data")
+        except Exception as e:
+            self.save_dock.set_status(f"Error: {e}", False)
+            self.append_log(f"Error saving ASCII: {e}")
+    
+    def _on_save_parameters(self, options):
+        """Handle save parameters request from save dock."""
+        try:
+            from dataio.data_exporter import save_parameters
+            from pathlib import Path
+            
+            # Get parameters and fit result
+            parameters = self.viewmodel.get_parameters() if hasattr(self.viewmodel, "get_parameters") else {}
+            fit_result = getattr(self.viewmodel.state, "fit_result", None)
+            model_name = getattr(self.viewmodel.state, "model_name", None)
+            
+            if not parameters:
+                self.save_dock.set_status("Error: No parameters available", False)
+                return
+            
+            # Build save path
+            folder = options['folder']
+            filename = options['filename']
+            save_path = str(Path(folder) / filename)
+            delimiter = options['delimiter']
+            
+            # Save
+            if save_parameters(parameters, fit_result, save_path, model_name, delimiter):
+                self.save_dock.set_status(f"Saved: {filename}", True)
+                self.append_log(f"Parameters saved: {save_path}")
+                
+                # Save delimiter preference
+                self._save_delimiter_preference(options.get('delimiter_name', 'comma'))
+            else:
+                self.save_dock.set_status("Error saving parameters", False)
+                self.append_log("Failed to save parameters")
+        except Exception as e:
+            self.save_dock.set_status(f"Error: {e}", False)
+            self.append_log(f"Error saving parameters: {e}")
+    
+    def _on_save_all(self, options):
+        """Handle save all request from save dock."""
+        try:
+            from dataio.data_exporter import save_as_image, save_as_ascii, save_parameters
+            from pathlib import Path
+            
+            # Gather data
+            x_data = getattr(self.viewmodel.state, "x_data", None)
+            y_data = getattr(self.viewmodel.state, "y_data", None)
+            y_errors = getattr(self.viewmodel.state, "errors", None)
+            excluded_mask = getattr(self.viewmodel.state, "excluded", None)
+            file_info = getattr(self.viewmodel.state, "file_info", None)
+            
+            if x_data is None or y_data is None:
+                self.save_dock.set_status("Error: No data available", False)
+                return
+            
+            # Get fit data
+            y_fit_dict = None
+            try:
+                y_fit_dict = self.viewmodel._get_plot_fit_data()
+            except Exception:
+                pass
+            
+            # Get parameters
+            parameters = self.viewmodel.get_parameters() if hasattr(self.viewmodel, "get_parameters") else {}
+            fit_result = getattr(self.viewmodel.state, "fit_result", None)
+            model_name = getattr(self.viewmodel.state, "model_name", None)
+            
+            folder = options['folder']
+            delimiter = options['delimiter']
+            margin_percent = options['margin_percent']
+            
+            saved_files = []
+            failed_files = []
+            
+            # Save image with margin
+            img_margin_path = str(Path(folder) / options['image_margin_filename'])
+            if save_as_image(x_data, y_data, y_fit_dict, y_errors, img_margin_path,
+                           margin_percent, excluded_mask, file_info):
+                saved_files.append("image (margin)")
+                self.append_log(f"Image saved: {img_margin_path}")
+            else:
+                failed_files.append("image (margin)")
+            
+            # Save image with view range
+            view_range = None
+            try:
+                vb = self.plot_widget.getViewBox()
+                [[x_min, x_max], [y_min, y_max]] = vb.viewRange()
+                view_range = ((x_min, x_max), (y_min, y_max))
+            except Exception:
+                pass
+            
+            img_view_path = str(Path(folder) / options['image_view_filename'])
+            if save_as_image(x_data, y_data, y_fit_dict, y_errors, img_view_path,
+                           margin_percent=0, excluded_mask=excluded_mask, 
+                           file_info=file_info, view_range=view_range):
+                saved_files.append("image (view)")
+                self.append_log(f"Image saved: {img_view_path}")
+            else:
+                failed_files.append("image (view)")
+            
+            # Save ASCII
+            ascii_path = str(Path(folder) / options['ascii_filename'])
+            if save_as_ascii(x_data, y_data, y_fit_dict, y_errors, ascii_path,
+                           excluded_mask, delimiter):
+                saved_files.append("ASCII")
+                self.append_log(f"ASCII data saved: {ascii_path}")
+            else:
+                failed_files.append("ASCII")
+            
+            # Save parameters
+            params_path = str(Path(folder) / options['params_filename'])
+            if save_parameters(parameters, fit_result, params_path, model_name, delimiter):
+                saved_files.append("parameters")
+                self.append_log(f"Parameters saved: {params_path}")
+            else:
+                failed_files.append("parameters")
+            
+            # Update status
+            if saved_files:
+                status_msg = f"Saved: {', '.join(saved_files)}"
+                self.save_dock.set_status(status_msg, True)
+                
+                # Save delimiter preference
+                self._save_delimiter_preference(options.get('delimiter_name', 'comma'))
+            
+            if failed_files:
+                error_msg = f"Failed: {', '.join(failed_files)}"
+                self.save_dock.set_status(error_msg, len(saved_files) == 0)
+        except Exception as e:
+            self.save_dock.set_status(f"Error: {e}", False)
+            self.append_log(f"Error in save all: {e}")
+    
+    def _save_delimiter_preference(self, delimiter_name):
+        """Save delimiter preference to config."""
+        try:
+            from dataio import get_config
+            cfg = get_config()
+            cfg.save_delimiter = delimiter_name
+            cfg.save()
+        except Exception:
+            pass
+    
+    def _on_files_updated_for_save_dock(self, files):
+        """Update save dock when files are loaded."""
+        try:
+            if hasattr(self, 'save_dock') and files:
+                from pathlib import Path
+                # Get the currently active file
+                try:
+                    file_info = getattr(self.viewmodel.state, "file_info", None)
+                    if file_info and isinstance(file_info, dict):
+                        file_path = file_info.get("path")
+                        if file_path:
+                            default_filename = Path(file_path).stem
+                            self.save_dock.update_base_filename(default_filename)
+                except Exception:
+                    pass
         except Exception:
             pass
 

@@ -9,7 +9,7 @@ import io
 
 
 def save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, margin_percent=10.0, 
-                  excluded_mask=None, file_info=None):
+                  excluded_mask=None, file_info=None, view_range=None):
     """Save the plot as an image file (PNG or PDF).
     
     Args:
@@ -18,9 +18,10 @@ def save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, margin_percen
         y_fit_dict: Dictionary with fit data (can be dict with 'total' and 'components' or array)
         y_errors: Error bars array (can be None)
         save_path: Path for the image file (with .png or .pdf extension)
-        margin_percent: Percentage margin beyond data range (default 10%)
+        margin_percent: Percentage margin beyond data range (default 10%, ignored if view_range is provided)
         excluded_mask: Boolean array marking excluded points
         file_info: Optional file info dict for title
+        view_range: Optional tuple of ((x_min, x_max), (y_min, y_max)) to use instead of auto-calculating
     
     Returns:
         True if successful, False otherwise
@@ -99,16 +100,23 @@ def save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, margin_percen
                 ax.plot(x_data, y_fit_dict, '-', color='purple', 
                        linewidth=2, label='Fit')
         
-        # Calculate axis limits with margin based on data only (not fits)
-        x_min, x_max = np.min(x_data), np.max(x_data)
-        x_range = x_max - x_min
-        x_margin = x_range * (margin_percent / 100.0)
-        ax.set_xlim(x_min - x_margin, x_max + x_margin)
-        
-        y_min, y_max = np.min(y_data), np.max(y_data)
-        y_range = y_max - y_min
-        y_margin = y_range * (margin_percent / 100.0)
-        ax.set_ylim(y_min - y_margin, y_max + y_margin)
+        # Calculate axis limits
+        if view_range is not None:
+            # Use provided view range
+            (x_min, x_max), (y_min, y_max) = view_range
+            ax.set_xlim(x_min, x_max)
+            ax.set_ylim(y_min, y_max)
+        else:
+            # Calculate with margin based on data only (not fits)
+            x_min, x_max = np.min(x_data), np.max(x_data)
+            x_range = x_max - x_min
+            x_margin = x_range * (margin_percent / 100.0)
+            ax.set_xlim(x_min - x_margin, x_max + x_margin)
+            
+            y_min, y_max = np.min(y_data), np.max(y_data)
+            y_range = y_max - y_min
+            y_margin = y_range * (margin_percent / 100.0)
+            ax.set_ylim(y_min - y_margin, y_max + y_margin)
         
         # Labels and title
         ax.set_xlabel('Energy (meV)', fontsize=12)
