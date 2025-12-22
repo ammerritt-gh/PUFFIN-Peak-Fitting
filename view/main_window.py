@@ -392,6 +392,23 @@ class MainWindow(QMainWindow):
     def _show_save_dock(self):
         """Show and raise the save dock when Save Data button is clicked."""
         if hasattr(self, 'save_dock'):
+            try:
+                # Float the dock so it pops out as a separate window
+                self.save_dock.setFloating(True)
+
+                # Ensure the floating window is large enough to show all controls.
+                # Use a reasonable minimum but scale with the main window.
+                desired_w = min(520, int(self.width() * 0.55))
+                desired_h = min(480, int(self.height() * 0.55))
+                try:
+                    self.save_dock.resize(desired_w, desired_h)
+                except Exception:
+                    try:
+                        self.save_dock.setMinimumSize(desired_w, desired_h)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self.save_dock.show()
             self.save_dock.raise_()
             self.save_dock.activateWindow()
