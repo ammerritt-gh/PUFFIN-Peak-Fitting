@@ -1,69 +1,71 @@
 # PUFFIN
 
-PUFFIN is a PySide6 desktop app for interactive 1D curve fitting (e.g., spectroscopy / lineshape analysis). It provides live plotting with PyQtGraph, dynamic parameter forms, SciPy-based fitting, and a clean MVVM split between view, viewmodel, and model state.
+PUFFIN is a desktop app for interactive 1D curve fitting (PySide6 + PyQtGraph + SciPy). Load a spectrum, pick/build a model, tweak parameters with live previews, exclude bad points, run a fit, and export results.
 
-## Key Features
-- MVVM architecture: `view/` is UI-only, `viewmodel/` owns coordination, `models/` holds specs and runtime state.
-- Interactive plotting: mouse/keyboard handlers for clicks, drags, wheel, and shortcuts with logging to the dock panel.
-- Dynamic parameter UI: widgets are auto-generated from model specs (min/max/choices/steps/decimals) and stay in sync with the underlying model state.
-- Parameter linking: tie parameters into link groups for shared values; visually indicated in the parameters dock and honored during fitting.
-- Model library: YAML-based elements (Gaussian, Voigt, DHO, linear background) and composite specs; extend by adding a `model_elements/*.yaml` and registering in `models/model_specs.py`.
-- Fitting workflow: SciPy `curve_fit` wrapped in a worker thread; results push back into both the model spec and runtime model, refreshing the UI.
-- Data IO: flexible loader auto-detects delimiters; saver writes tab-separated columns (`Energy`, `Counts`, optional `Fit`). Configuration stored in `config/settings.json`.
+## Install
 
-## Requirements
-- Python 3.10+
-- Dependencies: PySide6, pyqtgraph, numpy, scipy, pandas, matplotlib (see `requirements.txt`).
+Requirements: Python 3.10+
 
-Install locally:
 ```bash
 python -m pip install -r requirements.txt
 ```
 
-## Run the App
+## Run
+
 From the repo root:
+
 ```bash
-python -m PUFFIN.main
+python main.py
 ```
-This launches the GUI with the default docks (plot, controls, parameters, log, elements, resolution).
 
-## Typical Workflow
-1. Load data via the File menu (CSV/TSV; columns `Energy`, `Counts`, optional `Errors`). Loader infers errors if absent.
-2. Choose or build a model in the Elements/Parameters docks. Parameter widgets mirror the active model spec.
-3. Adjust parameters and click **Update** to preview the curve. Use link groups to lock parameters together.
-4. Run **Fit** to optimize with `curve_fit`; results propagate back into the UI and the runtime model.
-5. Save the fitted dataset (data + optional fit column) from the File menu.
+## How To Use
 
-## Keyboard & Mouse Shortcuts
-- `R`: reset/auto-range the plot view.
-- `F`: run fit.
-- `U`: update plot with current parameters.
-- `Space`: clear selection (viewmodel-driven).
-- `Ctrl + Mouse Wheel`: example parameter tweak hook (see `FitterViewModel.handle_wheel_scroll`).
-- Click/move/wheel events are logged; the `InputHandler` emits signals that MainWindow forwards to the viewmodel.
+1. **Load data**
+	- Open the **Controls** dock and click **Load Data**.
+	- You can load multiple files; pick the active dataset from **Loaded Files**.
 
-## Configuration
-- Defaults live in `config/settings.json`. The loader uses `default_load_folder`, falling back to `FMO_ANALYSIS_INPUT_DIR` then `~/Documents`.
-- Call `FitterViewModel.save_config()` after changing defaults so subsequent runs pick them up.
+2. **Build or choose a model**
+	- Use the **Elements** dock to assemble a model (peaks/background/components).
+	- The **Parameters** dock updates automatically for the active model.
 
-## Project Structure (high level)
-- `main.py`: entry point that wires `ModelState`, `FitterViewModel`, and `view/main_window.py`.
-- `models/`: model specs, runtime state, metrics, YAML element definitions.
-- `view/`: PySide6 UI, docks, input handler, custom view box.
-- `viewmodel/`: coordination/business logic, logging helpers.
-- `worker/`: threaded fitting worker.
-- `dataio/`: configuration, loaders/savers, fit persistence.
-- `examples/`: usage examples (e.g., input handler patterns).
-- `docs/`: implementation notes and design guides.
+3. **Preview (live)**
+	- Adjust parameter values in **Parameters**; the plot updates as you change values.
+	- Click **Update Plot** in **Controls** if you want a manual refresh.
 
-## Extending
-- Add a new model: create `model_elements/<name>.yaml`, register in `models/model_spec.get_model_spec()`, and expose parameters via `Parameter` helpers so the auto-form renders meaningful controls.
-- Add interactions: extend `view/input_handler.py` signals or `viewmodel/fitter_vm.py` handlers; keep UI mutations out of worker threads.
+4. **Exclude bad points**
+	- Click **Exclude** (Controls) to enable exclusion mode.
+	- Click points or drag a box to toggle exclusions.
+	- Click **Include All** to clear exclusions.
 
-## Troubleshooting
-- Plot updates but data lengths mismatch: ensure `x_data`, `y_data`, and `errors` arrays are trimmed to equal length before emitting `plot_updated`.
-- UI not reflecting parameter changes: confirm `FitterViewModel.apply_parameters()` is called so values mirror into both `state.model` and `state.model_spec.params`.
-- File dialog defaults: verify `config/settings.json` is readable and follows the default folder resolution order.
+5. **Fit**
+	- Click **Run Fit** (Controls) or press **F**.
+	- Fit results are written back into the parameter panel.
+
+6. **Save**
+	- Click **Save Data** (Controls) to open the **Save Data** dock.
+	- Export plot images, ASCII data, and parameter summaries (or **Save All**).
+
+## Data Files
+
+- Supported: `.dat`, `.txt`, `.csv`
+- Format: at least **two numeric columns** per row (`x`, `y`); an optional **third numeric column** is used as `error`.
+- Headers/notes are OK: the loader skips non-numeric lines until it finds data.
+- Delimiters are auto-detected (comma/tab/whitespace). Lines starting with `#` are treated as comments.
+
+## Shortcuts
+
+- **F**: run fit
+- **Space**: clear selection
+- **D**: toggle exclude mode
+- **0**: clear selected curve/component
+- **1–9**: select a component (composite models)
+- **Q / E**: cycle selected component
+
+## Tips
+
+- Use the **Docks** menu to show/hide panels (Controls, Parameters, Elements, Log, Save Data, Resolution, Fit Settings).
+- On startup, PUFFIN can restore the last loaded dataset and any saved fit (when available).
 
 ## License
-Provide or confirm a license before distribution; none is bundled in the repository.
+
+Licensed under the GNU General Public License v3.0. See `LICENSE`.
