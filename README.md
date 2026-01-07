@@ -1,6 +1,6 @@
-# BigFit
+# PUFFIN
 
-BigFit is a PySide6 desktop app for interactive 1D curve fitting (e.g., spectroscopy / lineshape analysis). It provides live plotting with PyQtGraph, dynamic parameter forms, SciPy-based fitting, and a clean MVVM split between view, viewmodel, and model state.
+PUFFIN is a PySide6 desktop app for interactive 1D curve fitting (e.g., spectroscopy / lineshape analysis). It provides live plotting with PyQtGraph, dynamic parameter forms, SciPy-based fitting, and a clean MVVM split between view, viewmodel, and model state.
 
 ## Key Features
 - MVVM architecture: `view/` is UI-only, `viewmodel/` owns coordination, `models/` holds specs and runtime state.
@@ -23,7 +23,7 @@ python -m pip install -r requirements.txt
 ## Run the App
 From the repo root:
 ```bash
-python -m BigFit.main
+python -m PUFFIN.main
 ```
 This launches the GUI with the default docks (plot, controls, parameters, log, elements, resolution).
 

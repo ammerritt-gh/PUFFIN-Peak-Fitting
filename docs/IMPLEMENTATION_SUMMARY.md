@@ -7,7 +7,7 @@ This document summarizes the work completed to integrate input_handler functiona
 ## Deliverables
 
 ### 1. New Input Handler Module ✅
-**File**: `BigFit/view/input_handler.py` (176 lines)
+**File**: `PUFFIN/view/input_handler.py` (176 lines)
 
 A reusable component that centralizes event handling for PyQtGraph plots:
 - Captures mouse clicks, movements, key presses, and wheel scrolls
@@ -16,7 +16,7 @@ A reusable component that centralizes event handling for PyQtGraph plots:
 - Provides event filtering for wheel events with modifiers
 
 ### 2. Main Window Integration ✅
-**File**: `BigFit/view/main_window.py` (modified)
+**File**: `PUFFIN/view/main_window.py` (modified)
 
 Enhanced the view layer with input handling:
 - Created and connected InputHandler instance
@@ -26,7 +26,7 @@ Enhanced the view layer with input handling:
 - Maintained existing UI structure and functionality
 
 ### 3. ViewModel Integration ✅
-**File**: `BigFit/viewmodel/fitter_vm.py` (modified)
+**File**: `PUFFIN/viewmodel/fitter_vm.py` (modified)
 
 Added business logic for input events:
 - 4 handler methods for plot interactions
@@ -35,7 +35,7 @@ Added business logic for input events:
 - Ready for extension with peak selection/manipulation
 
 ### 4. Comprehensive Documentation ✅
-**File**: `BigFit/INPUT_HANDLER_INTEGRATION.md` (220 lines)
+**File**: `PUFFIN/INPUT_HANDLER_INTEGRATION.md` (220 lines)
 
 Complete guide including:
 - Architecture diagrams showing MVVM separation
@@ -45,7 +45,7 @@ Complete guide including:
 - Comparison table showing pattern extraction
 
 ### 5. Usage Examples ✅
-**File**: `BigFit/examples/input_handler_examples.py` (350 lines)
+**File**: `PUFFIN/examples/input_handler_examples.py` (350 lines)
 
 8 practical examples demonstrating:
 1. Basic setup and signal connections
@@ -153,7 +153,7 @@ The implementation provides foundation for future enhancements:
 ## Files Changed Summary
 
 ```
-BigFit/
+PUFFIN/
 ├── view/
 │   ├── input_handler.py          [NEW - 176 lines]
 │   └── main_window.py             [MODIFIED - Added ~150 lines]
@@ -210,7 +210,7 @@ The input_handler integration is **complete and production-ready**. The implemen
 - Passes all integration tests
 - Enables future enhancements
 
-The BigFit application now has a solid foundation for interactive plot manipulation while maintaining code quality and architectural integrity.
+The PUFFIN application now has a solid foundation for interactive plot manipulation while maintaining code quality and architectural integrity.
 
 ---
 

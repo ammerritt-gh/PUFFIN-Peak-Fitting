@@ -89,7 +89,7 @@ The Save Model Dialog opens:
 ║                                                                    ║
 ║ ┌─ Save Location ────────────────────────────────────────────┐   ║
 ║ │                                                             │   ║
-║ │ [/path/to/BigFit/models/custom_models] [Browse...]        │   ║
+║ │ [/path/to/PUFFIN/models/custom_models] [Browse...]        │   ║
 ║ │                                                             │   ║
 ║ │ The model will be saved as a .yaml file                    │   ║
 ║ │                                                             │   ║
@@ -103,7 +103,7 @@ The Save Model Dialog opens:
 
 **Status Message** in log:
 ```
-Model saved to: /path/to/BigFit/models/custom_models/two_peaks_with_background.yaml
+Model saved to: /path/to/PUFFIN/models/custom_models/two_peaks_with_background.yaml
 Model 'Two Peaks with Background' is now available for use.
 ```
 
@@ -113,7 +113,7 @@ Model 'Two Peaks with Background' is now available for use.
 name: Two Peaks with Background
 description: Custom model with two peaks and a linear background
 version: 1
-author: BigFit User
+author: PUFFIN User
 category: composite
 is_composite: true
 components:
@@ -295,7 +295,7 @@ Sharing steps:
 ## Troubleshooting
 
 ### Model doesn't appear in selector
-**Solution**: Restart BigFit to reload model elements
+**Solution**: Restart PUFFIN to reload model elements
 
 ### Can't save to default location
 **Solution**: Browse to a location where you have write permissions

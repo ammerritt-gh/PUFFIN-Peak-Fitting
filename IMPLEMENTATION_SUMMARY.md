@@ -1,7 +1,7 @@
 # Save Custom Model Feature - Implementation Summary
 
 ## Overview
-This document summarizes the implementation of the "Save Custom Model" feature for BigFit, which allows users to save their custom composite models as reusable YAML files.
+This document summarizes the implementation of the "Save Custom Model" feature for PUFFIN, which allows users to save their custom composite models as reusable YAML files.
 
 ## Problem Statement (from Issue)
 > Create a way to save the current "custom model" as a new model. Saving the model should open a dialog box that shows all the elements, parameters, fixing, linked or unlinked, min/max, etc. The dialog box shows the save location (by default, the models folder) and allows the user to name the model. Confirming the save box saves the model as a new model that can be loaded as a custom model.
@@ -115,7 +115,7 @@ components:
 name: Two Peaks with Background
 description: Custom model with two peaks and linear background
 version: 1
-author: BigFit User
+author: PUFFIN User
 category: composite
 is_composite: true
 components:
@@ -178,7 +178,7 @@ Comprehensive end-to-end test that:
 - [ ] Enter model name and description
 - [ ] Verify dialog shows correct structure
 - [ ] Save the model
-- [ ] Restart BigFit
+- [ ] Restart PUFFIN
 - [ ] Verify model appears in selector
 - [ ] Load the saved model
 - [ ] Verify all properties are preserved
@@ -299,4 +299,4 @@ Comprehensive end-to-end test that:
 
 ## Conclusion
 
-The Save Custom Model feature is fully implemented and tested. It provides a complete solution for creating, saving, and sharing custom composite models in BigFit. The implementation is robust, well-tested, and documented, making it easy for users to create reusable models with specific parameter constraints.
+The Save Custom Model feature is fully implemented and tested. It provides a complete solution for creating, saving, and sharing custom composite models in PUFFIN. The implementation is robust, well-tested, and documented, making it easy for users to create reusable models with specific parameter constraints.

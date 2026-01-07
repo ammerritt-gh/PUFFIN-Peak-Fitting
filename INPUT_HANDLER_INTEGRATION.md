@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the input handler integration that centralizes mouse and keyboard event handling for the BigFit application, following patterns from `PySide_Fitter_PyQtGraph.py`.
+This document describes the input handler integration that centralizes mouse and keyboard event handling for the PUFFIN application, following patterns from `PySide_Fitter_PyQtGraph.py`.
 
 ## Architecture
 
@@ -148,7 +148,7 @@ Calls apply_parameters() and update_plot()
 
 The implementation extracts and adapts patterns from the reference implementation:
 
-| PySide_Fitter_PyQtGraph.py | BigFit Implementation |
+| PySide_Fitter_PyQtGraph.py | PUFFIN Implementation |
 |----------------------------|----------------------|
 | `connect_plot_events()` | `InputHandler._connect_events()` |
 | `on_mouse_click(event)` | `InputHandler._on_mouse_click()` → `mouse_clicked` signal |
@@ -240,7 +240,7 @@ Potential improvements to consider:
 
 ## See Also
 
-- `BigFit/view/input_handler.py` - InputHandler implementation
-- `BigFit/view/main_window.py` - View integration
-- `BigFit/viewmodel/fitter_vm.py` - ViewModel handlers
+- `PUFFIN/view/input_handler.py` - InputHandler implementation
+- `PUFFIN/view/main_window.py` - View integration
+- `PUFFIN/viewmodel/fitter_vm.py` - ViewModel handlers
 - `Minis Testing/PySide_Fitter_PyQtGraph.py` - Reference implementation

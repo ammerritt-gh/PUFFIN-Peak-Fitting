@@ -137,7 +137,7 @@ def test_image_export():
 def main():
     """Run all tests."""
     print("=" * 60)
-    print("BigFit Save Functionality Tests")
+    print("PUFFIN Save Functionality Tests")
     print("=" * 60)
     
     results = []

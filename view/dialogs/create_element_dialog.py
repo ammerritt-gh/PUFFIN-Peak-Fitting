@@ -460,7 +460,7 @@ class CreateElementDialog(QDialog):
             'name': name,
             'description': description or f"Custom element: {name}",
             'version': 1,
-            'author': 'BigFit User',
+            'author': 'PUFFIN User',
             'category': category,
             'parameters': parameters,
             'evaluate': code  # Save as single-line string
@@ -492,7 +492,7 @@ class CreateElementDialog(QDialog):
                     self,
                     "Success",
                     f"Element saved to:\n{self.save_path}\n\n"
-                    "Restart BigFit to use the new element."
+                    "Restart PUFFIN to use the new element."
                 )
             
             self.accept()

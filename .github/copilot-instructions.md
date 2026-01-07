@@ -1,8 +1,8 @@
-description: Practical orientation for AI copilots working on BigFit.
+description: Practical orientation for AI copilots working on PUFFIN.
 ---
 
-# BigFit Copilot Notes
-- **Entry point**: `BigFit/main.py` spins up the PySide6 app, instantiates `ModelState`, `FitterViewModel`, and `view.main_window.MainWindow`, then wires Qt signals (`plot_updated`, `log_message`, `parameters_updated`).
+# PUFFIN Copilot Notes
+- **Entry point**: `PUFFIN/main.py` spins up the PySide6 app, instantiates `ModelState`, `FitterViewModel`, and `view.main_window.MainWindow`, then wires Qt signals (`plot_updated`, `log_message`, `parameters_updated`).
 - **MVVM split**: `view/main_window.py` is strictly UI; `viewmodel/fitter_vm.py` owns coordination/business logic; `models/model_state.py` keeps the runtime data and model spec.
 - **Plot stack**: `view/view_box.CustomViewBox` emits selection/exclusion signals; `view/input_handler.InputHandler` converts those into `FitterViewModel` calls; the view never touches model data directly.
 - **Dynamic parameter UI**: `MainWindow._refresh_parameters()` expects `FitterViewModel.get_parameters()` to return `{name: spec_dict}` where spec keys include `value`, `type`, optional `min`/`max`/`choices`/`decimals`/`step`. Missing keys default to sensible widgets.
@@ -22,7 +22,7 @@ description: Practical orientation for AI copilots working on BigFit.
 - **Background exclusions**: ViewBox exclusion mode uses dashed orange rectangles (`excludeBoxDrawn`); extend exclusion logic in the viewmodel (`toggle_box_exclusion`) rather than in the view.
 - **Extending models**: When adding composite models (e.g., DHO+Voigt), keep heavy math in `models/`; surface UI-tunable values through `Parameter` instances so the auto-form keeps working.
 - **Dependencies**: Core runtime uses PySide6, pyqtgraph, numpy, scipy, pandas (CSV IO), matplotlib (only for separate experiments). Install via `pip install PySide6 pyqtgraph numpy scipy pandas matplotlib` before running the UI.
-- **Running locally**: From repo root, start the GUI with `python -m BigFit.main`. Visual Studio (.pyproj) already points to `main.py` if you use that IDE.
+- **Running locally**: From repo root, start the GUI with `python -m PUFFIN.main`. Visual Studio (.pyproj) already points to `main.py` if you use that IDE.
 - **Thread safety**: Only Qt signals cross threads. If you add long-running work, subclass `QThread` like `FitWorker` and emit results instead of touching widgets directly.
 - **Error handling**: Loader and fit paths wrap exceptions and broadcast user-friendly messages (`RuntimeError`, log text). Follow that precedent to avoid hard crashes in the GUI.
 - **Prototypes**: `Minis Testing/` contains archived PySide experiments; none are imported by the main app. Use them for reference but avoid introducing new dependencies there.
