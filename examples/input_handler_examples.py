@@ -1,7 +1,7 @@
 """
 Example demonstrating input_handler usage patterns.
 
-This example shows how to use the integrated input_handler in the BigFit
+This example shows how to use the integrated input_handler in the PUFFIN
 application, with patterns similar to PySide_Fitter_PyQtGraph.py.
 """
 

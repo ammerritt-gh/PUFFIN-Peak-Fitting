@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document provides technical implementation notes for the parameter linking feature added to BigFit.
+This document provides technical implementation notes for the parameter linking feature added to PUFFIN.
 
 ## Architecture
 

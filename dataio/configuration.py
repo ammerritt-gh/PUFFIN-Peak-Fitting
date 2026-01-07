@@ -68,7 +68,7 @@ class Config:
 _config_singleton: Optional[Config] = None
 
 def _default_repo_config_folder() -> Path:
-    # repo root is two levels up from this file: ...\BigFit\dataio\configuration.py
+    # repo root is two levels up from this file: ...\PUFFIN\dataio\configuration.py
     repo_root = Path(__file__).resolve().parent.parent
     return repo_root / "config"
 

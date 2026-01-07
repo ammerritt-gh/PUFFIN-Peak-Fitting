@@ -9,7 +9,7 @@ description: |
   Formula: Area * sqrt(4*ln(2)/pi) / Width * exp(-4*ln(2) * (x-Center)^2 / Width^2)
 
 version: 1
-author: BigFit Team
+author: PUFFIN Team
 category: peak
 
 parameters:

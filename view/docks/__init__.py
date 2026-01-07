@@ -1,5 +1,5 @@
 """
-Dock widgets package for the BigFit application.
+Dock widgets package for the PUFFIN application.
 
 Each dock is a self-contained module that can be developed independently.
 """

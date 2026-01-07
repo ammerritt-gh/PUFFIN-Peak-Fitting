@@ -171,7 +171,7 @@ def save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask
             delim_name = "tab" if delimiter == "\t" else ("space" if delimiter == " " else "comma")
             
             # Write header
-            f.write("# BigFit Data Export\n")
+            f.write("# PUFFIN Data Export\n")
             f.write(f"# Delimiter: {delim_name}\n")
             f.write("# \n")
             f.write("# Data columns (rows may be excluded from fit):\n")
@@ -287,7 +287,7 @@ def save_parameters(parameters, fit_result, save_path, model_name=None, delimite
             delim_name = "tab" if delimiter == "\t" else ("space" if delimiter == " " else "comma")
             
             # Write header
-            f.write("# BigFit Parameter Export\n")
+            f.write("# PUFFIN Parameter Export\n")
             if model_name:
                 f.write(f"# Model: {model_name}\n")
             f.write(f"# Delimiter: {delim_name}\n")

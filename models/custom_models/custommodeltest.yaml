@@ -1,7 +1,7 @@
 name: CustomModeltest
 description: 'Saved custom model: CustomModeltest'
 version: 1
-author: BigFit User
+author: PUFFIN User
 category: saved_custom_model
 components:
 - element: LinearBackground

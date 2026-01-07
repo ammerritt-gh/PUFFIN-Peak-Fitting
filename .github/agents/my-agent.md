@@ -1,6 +1,6 @@
 ---
-name: BigFit Agent
-description: Gives explanations to copilot agents for BigFit structure.
+name: PUFFIN Agent
+description: Gives explanations to copilot agents for PUFFIN structure.
 ---
 
 # My Agent

@@ -1,8 +1,8 @@
-# BigFit Save Functionality
+# PUFFIN Save Functionality
 
 ## Overview
 
-The BigFit application now provides comprehensive data export options through a dedicated "Save Data" dock (SaveDock). When you click the "Save Data" button, this persistent dock widget is shown or raised, and you can choose from four different save modes to export your data, fits, and parameters in various formats.
+The PUFFIN application now provides comprehensive data export options through a dedicated "Save Data" dock (SaveDock). When you click the "Save Data" button, this persistent dock widget is shown or raised, and you can choose from four different save modes to export your data, fits, and parameters in various formats.
 
 ## Save Modes
 

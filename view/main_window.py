@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
     parameters_updated = Signal()
     def __init__(self, viewmodel=None):
         super().__init__()
-        self.setWindowTitle("PUMA Peak Fitter")
+        self.setWindowTitle("PUFFIN Peak Fitter")
         self.viewmodel = viewmodel
         self.param_widgets = {}   # name -> widget
         self._param_last_values = {}
@@ -1970,7 +1970,7 @@ class MainWindow(QMainWindow):
                 save_path = dialog.get_save_path()
                 if save_path:
                     self.append_log(f"Element saved to: {save_path}")
-                    self.append_log("Restart BigFit to use the new element.")
+                    self.append_log("Restart PUFFIN to use the new element.")
         except Exception as e:
             self.append_log(f"Error creating element: {e}")
             import traceback

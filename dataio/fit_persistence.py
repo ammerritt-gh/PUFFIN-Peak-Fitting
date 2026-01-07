@@ -23,7 +23,7 @@ FIT_FILE_VERSION = 2  # Version 2: Human-readable format with grouped elements
 
 def _get_fits_folder() -> Path:
     """Get the fits folder path (repo_root/fits/)."""
-    # repo root is two levels up from this file: .../BigFit/dataio/fit_persistence.py
+    # repo root is two levels up from this file: .../PUFFIN/dataio/fit_persistence.py
     repo_root = Path(__file__).resolve().parent.parent
     return repo_root / "fits"
 

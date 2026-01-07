@@ -3006,7 +3006,7 @@ class FitterViewModel(QObject):
                 'name': model_name,
                 'description': description or f"Saved custom model: {model_name}",
                 'version': 1,
-                'author': 'BigFit User',
+                'author': 'PUFFIN User',
                 'category': 'saved_custom_model',  # Mark as saved custom model, not element
                 'components': []
             }

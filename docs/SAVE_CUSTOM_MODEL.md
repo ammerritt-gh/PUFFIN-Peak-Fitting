@@ -39,7 +39,7 @@ The Save Custom Model feature allows you to save your custom composite models as
 4. **The model is now available**:
    - The saved model will appear in the model selector
    - You can load it like any built-in model
-   - The model will be available every time you start BigFit
+   - The model will be available every time you start PUFFIN
 
 ### Loading a Saved Model
 
@@ -154,7 +154,7 @@ Area:
 
 ### Model doesn't appear in selector
 - Check that the file is saved in `models/model_elements/`
-- Restart BigFit to reload model elements
+- Restart PUFFIN to reload model elements
 - Check that the YAML syntax is valid
 
 ### Parameters not preserved correctly

@@ -1,7 +1,7 @@
 name: Triangle Peak
 description: It's a Triangle!
 version: 1
-author: BigFit User
+author: PUFFIN User
 category: peak
 parameters:
 - name: Width
