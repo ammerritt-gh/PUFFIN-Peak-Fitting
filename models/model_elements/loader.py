@@ -265,6 +265,7 @@ def _load_element_definition(filepath: Path) -> Dict[str, Any]:
 
 
 # Whitelist of allowed AST node types for expression validation
+# Build dynamically to support Python 3.8+ through 3.14+
 _ALLOWED_AST_NODES: Set[type] = {
     ast.Expression,
     ast.BinOp,       # Binary operations: +, -, *, /, etc.
@@ -272,17 +273,22 @@ _ALLOWED_AST_NODES: Set[type] = {
     ast.Compare,     # Comparisons (though not typically needed)
     ast.Call,        # Function calls
     ast.Name,        # Variable names
-    ast.Constant,    # Numeric/string constants
-    ast.Num,         # Numbers (Python 3.7 compat)
-    ast.Str,         # Strings (Python 3.7 compat)
+    ast.Constant,    # Numeric/string constants (Python 3.8+)
     ast.Load,        # Load context
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,  # Operators
     ast.FloorDiv, ast.USub, ast.UAdd,
     ast.Attribute,   # Allow numpy attribute access like np.sin
     ast.Subscript,   # Allow array indexing
-    ast.Index,       # Index context (Python 3.8 compat)
     ast.Slice,       # Allow slicing
 }
+
+# Add deprecated node types for backward compatibility (removed in Python 3.14)
+if hasattr(ast, 'Num'):
+    _ALLOWED_AST_NODES.add(ast.Num)  # Numbers (Python 3.7 compat)
+if hasattr(ast, 'Str'):
+    _ALLOWED_AST_NODES.add(ast.Str)  # Strings (Python 3.7 compat)
+if hasattr(ast, 'Index'):
+    _ALLOWED_AST_NODES.add(ast.Index)  # Index context (Python 3.8 compat)
 
 
 def _validate_expression_ast(expression: str, allowed_names: Set[str]) -> bool:
