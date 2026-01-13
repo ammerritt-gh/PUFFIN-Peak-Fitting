@@ -45,6 +45,12 @@ python main.py
 	- Click **Save Data** (Controls) to open the **Save Data** dock.
 	- Export plot images, ASCII data, and parameter summaries (or **Save All**).
 
+7. **Configure Instrument** (Optional)
+	- Open the **Instrument** dock from the **Docks** menu.
+	- Select an instrument configuration and click **Load**.
+	- Adjust slits, collimators, crystals, and other instrument-specific parameters.
+	- See [Instrument Configuration](docs/INSTRUMENT_CONFIGURATION.md) for details.
+
 ## Data Files
 
 - Supported: `.dat`, `.txt`, `.csv`
@@ -63,8 +69,9 @@ python main.py
 
 ## Tips
 
-- Use the **Docks** menu to show/hide panels (Controls, Parameters, Elements, Log, Save Data, Resolution, Fit Settings).
+- Use the **Docks** menu to show/hide panels (Controls, Parameters, Elements, Log, Save Data, Resolution, Fit Settings, Instrument).
 - On startup, PUFFIN can restore the last loaded dataset and any saved fit (when available).
+- Instrument configurations are stored in `config/instruments/` as YAML files — you can create new configurations for different spectrometers.
 
 ## License
 
