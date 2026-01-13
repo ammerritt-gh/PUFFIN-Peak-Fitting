@@ -1,0 +1,56 @@
+# Simple spectrometer configuration
+name: "Simple Spectrometer"
+type: "basic"
+description: "Basic spectrometer with minimal configuration"
+
+arm_lengths:
+  monochromator_to_sample: 1000.0
+  sample_to_analyzer: 1000.0
+  analyzer_to_detector: 500.0
+
+monochromator:
+  crystals:
+    - name: "PG(002)"
+      d_spacing: 3.354
+      mosaic: 0.4
+  focusing:
+    - "flat"
+    - "horizontal"
+
+analyzer:
+  crystals:
+    - name: "PG(002)"
+      d_spacing: 3.354
+      mosaic: 0.4
+  focusing:
+    - "flat"
+    - "horizontal"
+
+collimators:
+  positions:
+    - name: "before_sample"
+      label: "Before Sample"
+      options: [40, 60, "open"]
+    - name: "before_detector"
+      label: "Before Detector"
+      options: [40, 60, "open"]
+
+modules: []
+
+slits:
+  positions:
+    - name: "sample_slits"
+      label: "Sample Slits"
+      dimensions:
+        - name: "horizontal"
+          label: "Horizontal (mm)"
+          min: 0.0
+          max: 30.0
+          default: 10.0
+          step: 1.0
+        - name: "vertical"
+          label: "Vertical (mm)"
+          min: 0.0
+          max: 30.0
+          default: 10.0
+          step: 1.0

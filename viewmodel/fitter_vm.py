@@ -54,6 +54,10 @@ class FitterViewModel(QObject):
         self._pre_fit_stack = []  # list of dicts with "params" and "resolution" keys
         self._max_revert_stack_size = 20  # Maximum number of states to keep
         
+        # Instrument configuration state
+        self._instrument_config = None  # Current InstrumentConfig or None
+        self._instrument_state = {}  # Current instrument parameter values
+        
         # Debounce timer for auto-saving fit state after parameter changes
         self._fit_save_timer = QTimer()
         self._fit_save_timer.setSingleShot(True)
@@ -774,6 +778,149 @@ class FitterViewModel(QObject):
             self.update_plot()
         except Exception:
             pass
+
+    # --------------------------
+    # Instrument configuration management
+    # --------------------------
+    def load_instrument_from_name(self, instrument_name: str) -> bool:
+        """
+        Load instrument configuration by name.
+        
+        Args:
+            instrument_name: Name of the instrument to load
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            from dataio import list_available_instruments, load_instrument_config
+            from pathlib import Path
+            
+            # Find instrument by name
+            instruments = list_available_instruments()
+            for inst in instruments:
+                if inst.get('name') == instrument_name:
+                    path = inst.get('path')
+                    if path:
+                        config = load_instrument_config(Path(path))
+                        self._instrument_config = config
+                        self._instrument_state = self._initialize_instrument_state(config)
+                        self._log_message(f"Loaded instrument: {config.name}")
+                        return True
+            
+            self._log_message(f"Instrument not found: {instrument_name}")
+            return False
+        except Exception as e:
+            log_exception(f"Failed to load instrument '{instrument_name}'", e, vm=self)
+            return False
+    
+    def _initialize_instrument_state(self, config) -> dict:
+        """Initialize instrument state with default values from config."""
+        state = {
+            'slits': {},
+            'collimators': {},
+            'crystals': {},
+            'focusing': {},
+            'modules': {}
+        }
+        
+        # Initialize slits with default values
+        for slit_pos in config.slits:
+            state['slits'][slit_pos.name] = {}
+            for dim in slit_pos.dimensions:
+                state['slits'][slit_pos.name][dim.name] = dim.default
+        
+        # Initialize collimators with first option
+        for coll in config.collimators:
+            if coll.options:
+                state['collimators'][coll.name] = coll.options[0]
+        
+        # Initialize crystals with first option
+        if config.monochromator and config.monochromator.crystals:
+            state['crystals']['monochromator'] = config.monochromator.crystals[0].name
+        if config.analyzer and config.analyzer.crystals:
+            state['crystals']['analyzer'] = config.analyzer.crystals[0].name
+        
+        # Initialize focusing with first option
+        if config.monochromator and config.monochromator.focusing:
+            state['focusing']['monochromator'] = config.monochromator.focusing[0]
+        if config.analyzer and config.analyzer.focusing:
+            state['focusing']['analyzer'] = config.analyzer.focusing[0]
+        
+        # Initialize modules
+        for module in config.modules:
+            state['modules'][module.name] = {
+                'enabled': module.enabled,
+                'parameters': {}
+            }
+            for param in module.parameters:
+                state['modules'][module.name]['parameters'][param.name] = param.default
+        
+        return state
+    
+    def get_instrument_config(self):
+        """Get current instrument configuration."""
+        return self._instrument_config
+    
+    def get_instrument_state(self) -> dict:
+        """Get current instrument state (parameter values)."""
+        return self._instrument_state.copy()
+    
+    def set_slit_value(self, position: str, dimension: str, value: float):
+        """Set a slit dimension value."""
+        if 'slits' not in self._instrument_state:
+            self._instrument_state['slits'] = {}
+        if position not in self._instrument_state['slits']:
+            self._instrument_state['slits'][position] = {}
+        self._instrument_state['slits'][position][dimension] = value
+        self._log_message(f"Slit {position} {dimension}: {value:.1f} mm")
+    
+    def set_collimator_value(self, position: str, value):
+        """Set a collimator value."""
+        if 'collimators' not in self._instrument_state:
+            self._instrument_state['collimators'] = {}
+        self._instrument_state['collimators'][position] = value
+        self._log_message(f"Collimator {position}: {value}")
+    
+    def set_crystal(self, component: str, crystal_name: str):
+        """Set crystal for monochromator or analyzer."""
+        if 'crystals' not in self._instrument_state:
+            self._instrument_state['crystals'] = {}
+        self._instrument_state['crystals'][component] = crystal_name
+        self._log_message(f"{component.capitalize()} crystal: {crystal_name}")
+    
+    def set_focusing(self, component: str, focusing_type: str):
+        """Set focusing option for monochromator or analyzer."""
+        if 'focusing' not in self._instrument_state:
+            self._instrument_state['focusing'] = {}
+        self._instrument_state['focusing'][component] = focusing_type
+        self._log_message(f"{component.capitalize()} focusing: {focusing_type}")
+    
+    def set_module_enabled(self, module_name: str, enabled: bool):
+        """Enable or disable an experimental module."""
+        if 'modules' not in self._instrument_state:
+            self._instrument_state['modules'] = {}
+        if module_name not in self._instrument_state['modules']:
+            self._instrument_state['modules'][module_name] = {
+                'enabled': enabled,
+                'parameters': {}
+            }
+        else:
+            self._instrument_state['modules'][module_name]['enabled'] = enabled
+        status = "enabled" if enabled else "disabled"
+        self._log_message(f"Module {module_name}: {status}")
+    
+    def set_module_parameter(self, module_name: str, param_name: str, value):
+        """Set a module parameter value."""
+        if 'modules' not in self._instrument_state:
+            self._instrument_state['modules'] = {}
+        if module_name not in self._instrument_state['modules']:
+            self._instrument_state['modules'][module_name] = {
+                'enabled': False,
+                'parameters': {}
+            }
+        self._instrument_state['modules'][module_name]['parameters'][param_name] = value
+        self._log_message(f"Module {module_name} {param_name}: {value}")
 
     def handle_action(self, action: str, **kwargs):
         """

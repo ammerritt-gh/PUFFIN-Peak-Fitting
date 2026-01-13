@@ -26,6 +26,7 @@ from view.docks.log_dock import LogDock
 from view.docks.resolution_dock import ResolutionDock
 from view.docks.fit_dock import FitDock
 from view.docks.save_dock import SaveDock
+from view.docks.instrument_dock import InstrumentDock
 from models import CompositeModelSpec
 
 # -- color palette (change these) --
@@ -306,6 +307,10 @@ class MainWindow(QMainWindow):
             pass
         self.save_dock.hide()  # Start hidden; button shows it
         
+        # Create instrument dock (floating, initially hidden)
+        self.instrument_dock = InstrumentDock(self)
+        self.instrument_dock.hide()  # Start hidden; button opens it
+        
         # Set up backward compatibility aliases for old attribute names
         self.left_dock = self.controls_dock
         self.right_dock = self.parameters_dock
@@ -360,6 +365,7 @@ class MainWindow(QMainWindow):
             "Save Data": self.save_dock,
             "Resolution": self.resolution_dock,
             "Fit Settings": self.fit_dock,
+            "Instrument": self.instrument_dock,
         }
         
         # Add menu items for each dock
@@ -554,6 +560,26 @@ class MainWindow(QMainWindow):
                 self.viewmodel.parameters_updated.connect(self._on_parameters_updated_for_fit_dock)
         except Exception:
             pass
+        
+        # Instrument dock signals
+        try:
+            self.instrument_dock.instrument_selected.connect(self._on_instrument_selected)
+            self.instrument_dock.slit_changed.connect(self._on_slit_changed)
+            self.instrument_dock.collimator_changed.connect(self._on_collimator_changed)
+            self.instrument_dock.crystal_changed.connect(self._on_crystal_changed)
+            self.instrument_dock.focusing_changed.connect(self._on_focusing_changed)
+            self.instrument_dock.module_enabled_changed.connect(self._on_module_enabled_changed)
+            self.instrument_dock.module_parameter_changed.connect(self._on_module_parameter_changed)
+        except Exception as e:
+            self.append_log(f"Failed to connect instrument dock signals: {e}")
+        
+        # Load available instruments
+        try:
+            from dataio import list_available_instruments
+            instruments = list_available_instruments()
+            self.instrument_dock.populate_instruments(instruments)
+        except Exception as e:
+            self.append_log(f"Failed to load instrument list: {e}")
         
         # Initial population
         try:
@@ -2220,6 +2246,74 @@ class MainWindow(QMainWindow):
                 self._refresh_fit_bounds()
         except Exception:
             pass
+
+    # --------------------------
+    # Instrument Dock Handlers
+    # --------------------------
+    def _on_instrument_selected(self, instrument_name: str):
+        """Handle instrument selection from instrument dock."""
+        try:
+            if not self.viewmodel:
+                return
+            
+            # Load instrument configuration
+            success = self.viewmodel.load_instrument_from_name(instrument_name)
+            if success:
+                # Get the loaded config and update the dock
+                config = self.viewmodel.get_instrument_config()
+                if config:
+                    self.instrument_dock.set_instrument_config(config)
+                    self.append_log(f"Loaded instrument: {config.name}")
+        except Exception as e:
+            self.append_log(f"Error loading instrument: {e}")
+    
+    def _on_slit_changed(self, position: str, dimension: str, value: float):
+        """Handle slit value change from instrument dock."""
+        try:
+            if self.viewmodel:
+                self.viewmodel.set_slit_value(position, dimension, value)
+        except Exception as e:
+            self.append_log(f"Error updating slit: {e}")
+    
+    def _on_collimator_changed(self, position: str, value):
+        """Handle collimator value change from instrument dock."""
+        try:
+            if self.viewmodel:
+                self.viewmodel.set_collimator_value(position, value)
+        except Exception as e:
+            self.append_log(f"Error updating collimator: {e}")
+    
+    def _on_crystal_changed(self, component: str, crystal_name: str):
+        """Handle crystal selection change from instrument dock."""
+        try:
+            if self.viewmodel:
+                self.viewmodel.set_crystal(component, crystal_name)
+        except Exception as e:
+            self.append_log(f"Error updating crystal: {e}")
+    
+    def _on_focusing_changed(self, component: str, focusing_type: str):
+        """Handle focusing option change from instrument dock."""
+        try:
+            if self.viewmodel:
+                self.viewmodel.set_focusing(component, focusing_type)
+        except Exception as e:
+            self.append_log(f"Error updating focusing: {e}")
+    
+    def _on_module_enabled_changed(self, module_name: str, enabled: bool):
+        """Handle module enable/disable from instrument dock."""
+        try:
+            if self.viewmodel:
+                self.viewmodel.set_module_enabled(module_name, enabled)
+        except Exception as e:
+            self.append_log(f"Error updating module: {e}")
+    
+    def _on_module_parameter_changed(self, module_name: str, param_name: str, value):
+        """Handle module parameter change from instrument dock."""
+        try:
+            if self.viewmodel:
+                self.viewmodel.set_module_parameter(module_name, param_name, value)
+        except Exception as e:
+            self.append_log(f"Error updating module parameter: {e}")
 
     # --------------------------
     # Save Dock Handlers

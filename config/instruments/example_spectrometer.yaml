@@ -1,0 +1,139 @@
+# Example instrument configuration for a triple-axis spectrometer
+name: "Example Spectrometer"
+type: "triple_axis"
+description: "Example triple-axis spectrometer configuration"
+
+# Arm lengths (in mm) - used for angle/energy conversions
+arm_lengths:
+  monochromator_to_sample: 1500.0  # L1
+  sample_to_analyzer: 1200.0       # L2
+  analyzer_to_detector: 800.0      # L3
+
+# Monochromator crystal options
+monochromator:
+  crystals:
+    - name: "PG(002)"
+      d_spacing: 3.354  # Angstroms
+      mosaic: 0.4       # degrees
+    - name: "Cu(220)"
+      d_spacing: 1.278
+      mosaic: 0.2
+  # Focusing options for monochromator
+  focusing:
+    - "flat"
+    - "horizontal"
+    - "vertical"
+    - "double"
+
+# Analyzer crystal options
+analyzer:
+  crystals:
+    - name: "PG(002)"
+      d_spacing: 3.354
+      mosaic: 0.4
+    - name: "Cu(220)"
+      d_spacing: 1.278
+      mosaic: 0.2
+  focusing:
+    - "flat"
+    - "horizontal"
+    - "vertical"
+    - "double"
+
+# Collimators (in arcminutes)
+collimators:
+  positions:
+    - name: "before_monochromator"
+      label: "Before Mono"
+      options: [40, 60, 80, "open"]
+    - name: "before_sample"
+      label: "Before Sample"
+      options: [20, 40, 60, "open"]
+    - name: "before_analyzer"
+      label: "Before Analyzer"
+      options: [20, 40, 60, "open"]
+    - name: "before_detector"
+      label: "Before Detector"
+      options: [20, 40, 60, 80, "open"]
+
+# Experimental modules (sample environment, detectors, etc.)
+modules:
+  - name: "cryostat"
+    label: "Cryostat"
+    enabled: false
+    parameters:
+      - name: "temperature"
+        label: "Temperature (K)"
+        type: "float"
+        min: 1.5
+        max: 300.0
+        default: 10.0
+  - name: "furnace"
+    label: "Furnace"
+    enabled: false
+    parameters:
+      - name: "temperature"
+        label: "Temperature (K)"
+        type: "float"
+        min: 300.0
+        max: 1200.0
+        default: 500.0
+  - name: "magnetic_field"
+    label: "Magnetic Field"
+    enabled: false
+    parameters:
+      - name: "field"
+        label: "Field (T)"
+        type: "float"
+        min: -10.0
+        max: 10.0
+        default: 0.0
+
+# Slit configurations
+slits:
+  positions:
+    - name: "monochromator_slits"
+      label: "Monochromator Slits"
+      dimensions:
+        - name: "horizontal"
+          label: "Horizontal (mm)"
+          min: 0.0
+          max: 50.0
+          default: 20.0
+          step: 0.5
+        - name: "vertical"
+          label: "Vertical (mm)"
+          min: 0.0
+          max: 50.0
+          default: 20.0
+          step: 0.5
+    - name: "sample_slits"
+      label: "Sample Slits"
+      dimensions:
+        - name: "horizontal"
+          label: "Horizontal (mm)"
+          min: 0.0
+          max: 30.0
+          default: 10.0
+          step: 0.5
+        - name: "vertical"
+          label: "Vertical (mm)"
+          min: 0.0
+          max: 30.0
+          default: 10.0
+          step: 0.5
+    - name: "analyzer_slits"
+      label: "Analyzer Slits"
+      dimensions:
+        - name: "horizontal"
+          label: "Horizontal (mm)"
+          min: 0.0
+          max: 40.0
+          default: 15.0
+          step: 0.5
+        - name: "vertical"
+          label: "Vertical (mm)"
+          min: 0.0
+          max: 40.0
+          default: 15.0
+          step: 0.5
