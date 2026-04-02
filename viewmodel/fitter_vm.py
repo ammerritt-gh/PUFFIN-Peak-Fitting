@@ -1,4 +1,4 @@
-﻿﻿# viewmodel/fitter_vm.py
+﻿# viewmodel/fitter_vm.py
 from PySide6.QtCore import QObject, Signal, QTimer
 import numpy as np
 import os
@@ -3836,30 +3836,89 @@ class FitterViewModel(QObject):
             return
         
         try:
-            fixed_suffix = "__fixed"
-            link_suffix = "__link"
-            
-            for k, v in params.items():
+            try:
+                params = dict(params)
+            except Exception:
+                return
+
+            spec = self._resolution_spec
+            spec_params = getattr(spec, "params", {}) or {}
+            fixed_updates, link_updates, value_updates = self._split_parameter_updates(params)
+            applied = []
+            blocked_values = []
+
+            for base, link_val in link_updates.items():
+                if base in spec_params:
+                    try:
+                        spec_params[base].link_group = link_val
+                        applied.append(f"{base}__link")
+                    except Exception:
+                        pass
+
+            link_groups = self._collect_link_groups(spec)
+
+            for base, fixed_value in fixed_updates.items():
                 try:
-                    if isinstance(k, str) and k.endswith(fixed_suffix):
-                        base = k[: -len(fixed_suffix)]
-                        if base in self._resolution_spec.params:
-                            self._resolution_spec.params[base].fixed = bool(v)
-                    elif isinstance(k, str) and k.endswith(link_suffix):
-                        base = k[: -len(link_suffix)]
-                        if base in self._resolution_spec.params:
-                            try:
-                                self._resolution_spec.params[base].link_group = int(v) if v else None
-                            except Exception:
-                                self._resolution_spec.params[base].link_group = None
+                    self._apply_fixed_state_to_group(spec, None, base, bool(fixed_value), link_groups)
+                    applied.append(f"{base}__fixed")
+                except Exception:
+                    pass
+
+            for name, value in value_updates.items():
+                if name not in spec_params:
+                    continue
+
+                try:
+                    if bool(getattr(spec_params[name], "fixed", False)):
+                        current_val = getattr(spec_params[name], "value", None)
+                        if not self._values_close(current_val, value):
+                            blocked_values.append(name)
+                        continue
+                except Exception:
+                    pass
+
+                try:
+                    spec_params[name].value = value
+                    applied.append(name)
+                except Exception:
+                    continue
+
+                try:
+                    lg = getattr(spec_params[name], "link_group", None)
+                except Exception:
+                    lg = None
+                if lg and lg in link_groups:
+                    for linked_name in link_groups[lg]:
+                        if linked_name == name or linked_name not in spec_params:
+                            continue
+                        try:
+                            spec_params[linked_name].value = value
+                            if linked_name not in applied:
+                                applied.append(linked_name)
+                        except Exception:
+                            pass
+
+            if blocked_values:
+                try:
+                    if len(blocked_values) == 1:
+                        msg = f"Skipped resolution update: '{blocked_values[0]}' is fixed."
                     else:
-                        if k in self._resolution_spec.params:
-                            self._resolution_spec.params[k].value = v
+                        names = ", ".join(sorted(blocked_values))
+                        msg = f"Skipped resolution updates; fixed parameters: {names}."
+                    self.log_message.emit(msg)
                 except Exception:
                     pass
             
             try:
                 self.resolution_updated.emit()
+            except Exception:
+                pass
+
+            try:
+                if applied:
+                    self._log_message(
+                        f"Applied resolution parameters: {', '.join(applied)}"
+                    )
             except Exception:
                 pass
             
