@@ -306,8 +306,7 @@ class IterativeFitWorker(QThread):
                 self.error_occurred.emit(f"Fitting error: {error_msg}")
             self.finished.emit(None, None)
         except Exception as e:
-            error_msg = str(e)
-            print(f"[IterativeFitWorker] Error: {error_msg}")
+            error_msg = f"{type(e).__name__}: {e}"
             self.error_occurred.emit(f"Fitting error: {error_msg}")
             self.finished.emit(None, None)
 

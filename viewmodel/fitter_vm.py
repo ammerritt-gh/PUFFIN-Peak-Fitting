@@ -1,4 +1,4 @@
-﻿# viewmodel/fitter_vm.py
+﻿﻿# viewmodel/fitter_vm.py
 from PySide6.QtCore import QObject, Signal, QTimer
 import numpy as np
 import os
@@ -957,11 +957,12 @@ class FitterViewModel(QObject):
             try:
                 # Build prefixed names to avoid collisions with model parameters
                 res_full_values = {f"res__{k}": getattr(v, "value", None) for k, v in res_params_map.items()}
+                res_free_keys = []
                 for base_name, param in res_params_map.items():
                     prefixed = f"res__{base_name}"
                     res_name_map[prefixed] = base_name
                     if not bool(getattr(param, "fixed", False)):
-                        res_unique_free_keys.append(prefixed)
+                        res_free_keys.append(prefixed)
                         lg = getattr(param, "link_group", None)
                         if lg and lg > 0:
                             res_link_groups.setdefault(lg, []).append(base_name)
@@ -971,6 +972,12 @@ class FitterViewModel(QObject):
                         rep_pref = f"res__{names[0]}"
                         for n in names:
                             res_link_representatives[f"res__{n}"] = rep_pref
+                seen_res_representatives = set()
+                for prefixed in res_free_keys:
+                    rep_pref = res_link_representatives.get(prefixed, prefixed)
+                    if rep_pref not in seen_res_representatives:
+                        res_unique_free_keys.append(rep_pref)
+                        seen_res_representatives.add(rep_pref)
                 res_lower = [getattr(res_params_map[res_name_map[k]], "min", None) if getattr(res_params_map[res_name_map[k]], "min", None) is not None else -np.inf for k in res_unique_free_keys]
                 res_upper = [getattr(res_params_map[res_name_map[k]], "max", None) if getattr(res_params_map[res_name_map[k]], "max", None) is not None else np.inf for k in res_unique_free_keys]
             except Exception as e:
@@ -1369,15 +1376,6 @@ class FitterViewModel(QObject):
             self._log_message("A fit is already running.")
             return
         
-        # Store pre-fit state
-        self._store_pre_fit_state()
-        
-        # Emit fit started signal
-        try:
-            self.fit_started.emit()
-        except Exception:
-            pass
-
         # Get data
         try:
             x_incl, y_incl, err_incl = self.state.get_masked_data()
@@ -1461,11 +1459,12 @@ class FitterViewModel(QObject):
             if res_spec is not None:
                 try:
                     res_full_values = {f"res__{k}": getattr(v, "value", None) for k, v in res_params_map.items()}
+                    res_free_keys = []
                     for base_name, param in res_params_map.items():
                         pref = f"res__{base_name}"
                         res_name_map[pref] = base_name
                         if not bool(getattr(param, "fixed", False)):
-                            res_unique_free_keys.append(pref)
+                            res_free_keys.append(pref)
                             lg = getattr(param, "link_group", None)
                             if lg and lg > 0:
                                 res_link_groups.setdefault(lg, []).append(base_name)
@@ -1474,6 +1473,12 @@ class FitterViewModel(QObject):
                             rep_pref = f"res__{names[0]}"
                             for n in names:
                                 res_link_representatives[f"res__{n}"] = rep_pref
+                    seen_res_representatives = set()
+                    for pref in res_free_keys:
+                        rep_pref = res_link_representatives.get(pref, pref)
+                        if rep_pref not in seen_res_representatives:
+                            res_unique_free_keys.append(rep_pref)
+                            seen_res_representatives.add(rep_pref)
                     res_lower = [getattr(res_params_map[res_name_map[k]], "min", None) if getattr(res_params_map[res_name_map[k]], "min", None) is not None else -np.inf for k in res_unique_free_keys]
                     res_upper = [getattr(res_params_map[res_name_map[k]], "max", None) if getattr(res_params_map[res_name_map[k]], "max", None) is not None else np.inf for k in res_unique_free_keys]
                 except Exception as e:
@@ -1571,6 +1576,16 @@ class FitterViewModel(QObject):
             max_steps=num_steps,
             step_mode=live_preview
         )
+        # Only store revert state once the worker is ready to start.
+        try:
+            self._store_pre_fit_state()
+        except Exception:
+            pass
+
+        try:
+            self.fit_started.emit()
+        except Exception:
+            pass
         self._fit_worker = worker
 
         # Connect progress
