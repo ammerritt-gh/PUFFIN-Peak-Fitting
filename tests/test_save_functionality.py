@@ -6,6 +6,7 @@ Tests the data export functions without requiring the GUI.
 import numpy as np
 import sys
 import os
+import tempfile
 from pathlib import Path
 
 # Add parent directory to path
@@ -42,21 +43,22 @@ def test_ascii_export():
     excluded_mask[10:15] = True
     
     # Export
-    save_path = '/tmp/test_ascii_export.txt'
-    success = save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        save_path = os.path.join(tmp_dir, 'test_ascii_export.txt')
+        success = save_as_ascii(x_data, y_data, y_fit_dict, y_errors, save_path, excluded_mask)
     
-    if success and os.path.exists(save_path):
-        print(f"✓ ASCII export successful: {save_path}")
-        # Show first few lines
-        with open(save_path, 'r') as f:
-            lines = f.readlines()[:20]
-            print("  First 20 lines:")
-            for line in lines:
-                print(f"    {line.rstrip()}")
-        return True
-    else:
-        print("✗ ASCII export failed")
-        return False
+        if success and os.path.exists(save_path):
+            print(f"✓ ASCII export successful: {save_path}")
+            # Show first few lines
+            with open(save_path, 'r') as f:
+                lines = f.readlines()[:20]
+                print("  First 20 lines:")
+                for line in lines:
+                    print(f"    {line.rstrip()}")
+            return True
+
+    print("✗ ASCII export failed")
+    return False
 
 
 def test_parameter_export():
@@ -83,21 +85,22 @@ def test_parameter_export():
     }
     
     # Export
-    save_path = '/tmp/test_parameters.txt'
-    success = save_parameters(parameters, fit_result, save_path, model_name='TestModel')
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        save_path = os.path.join(tmp_dir, 'test_parameters.txt')
+        success = save_parameters(parameters, fit_result, save_path, model_name='TestModel')
     
-    if success and os.path.exists(save_path):
-        print(f"✓ Parameter export successful: {save_path}")
-        # Show content
-        with open(save_path, 'r') as f:
-            content = f.read()
-            print("  Content:")
-            for line in content.split('\n'):
-                print(f"    {line}")
-        return True
-    else:
-        print("✗ Parameter export failed")
-        return False
+        if success and os.path.exists(save_path):
+            print(f"✓ Parameter export successful: {save_path}")
+            # Show content
+            with open(save_path, 'r') as f:
+                content = f.read()
+                print("  Content:")
+                for line in content.split('\n'):
+                    print(f"    {line}")
+            return True
+
+    print("✗ Parameter export failed")
+    return False
 
 
 def test_image_export():
@@ -119,19 +122,20 @@ def test_image_export():
     }
     
     # Export with 10% margin
-    save_path = '/tmp/test_plot.png'
-    success = save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, 
-                           margin_percent=10.0, excluded_mask=None, file_info={'name': 'Test Data'})
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        save_path = os.path.join(tmp_dir, 'test_plot.png')
+        success = save_as_image(x_data, y_data, y_fit_dict, y_errors, save_path, 
+                               margin_percent=10.0, excluded_mask=None, file_info={'name': 'Test Data'})
     
-    if success and os.path.exists(save_path):
-        print(f"✓ Image export successful: {save_path}")
-        # Check file size
-        size = os.path.getsize(save_path)
-        print(f"  File size: {size} bytes")
-        return True
-    else:
-        print("✗ Image export failed")
-        return False
+        if success and os.path.exists(save_path):
+            print(f"✓ Image export successful: {save_path}")
+            # Check file size
+            size = os.path.getsize(save_path)
+            print(f"  File size: {size} bytes")
+            return True
+
+    print("✗ Image export failed")
+    return False
 
 
 def main():

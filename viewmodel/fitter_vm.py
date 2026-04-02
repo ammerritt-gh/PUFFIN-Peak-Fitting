@@ -55,7 +55,7 @@ class FitterViewModel(QObject):
         self._max_revert_stack_size = 20  # Maximum number of states to keep
         
         # Debounce timer for auto-saving fit state after parameter changes
-        self._fit_save_timer = QTimer()
+        self._fit_save_timer = QTimer(self)
         self._fit_save_timer.setSingleShot(True)
         self._fit_save_timer.setInterval(500)  # 500ms debounce
         self._fit_save_timer.timeout.connect(self._save_current_fit)
@@ -333,9 +333,7 @@ class FitterViewModel(QObject):
         except Exception:
             pass
 
-    def _apply_dataset_to_state(self, dataset: dict):
-        from .logging_helpers import safe_call
-        
+    def _prepare_dataset_state(self, dataset: dict, model_name: str = "Voigt") -> dict:
         x = dataset.get("x")
         y = dataset.get("y")
         err = dataset.get("err")
@@ -344,33 +342,54 @@ class FitterViewModel(QObject):
         x_arr = np.asarray(x, dtype=float)
         y_arr = np.asarray(y, dtype=float)
 
-        # Set data using set_data method if available, otherwise set directly
-        if hasattr(self.state, 'set_data'):
-            try:
-                self.state.set_data(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
-            except Exception:
-                # Fallback: set data directly and initialize
-                self.state.x_data = np.array(x_arr, copy=True)
-                self.state.y_data = np.array(y_arr, copy=True)
-                safe_call(self.state.model_spec.initialize, self.state.x_data, self.state.y_data,
-                         context="model_spec.initialize", vm=self)
-        else:
-            self.state.x_data = np.array(x_arr, copy=True)
-            self.state.y_data = np.array(y_arr, copy=True)
-        
-        # Ensure exclusion mask exists and matches data length
-        self.state.excluded = np.zeros_like(self.state.x_data, dtype=bool)
+        if x_arr.ndim != 1 or y_arr.ndim != 1:
+            raise ValueError("Dataset arrays must be one-dimensional.")
+        if len(x_arr) == 0 or len(y_arr) == 0:
+            raise ValueError("Dataset is empty.")
+        if len(x_arr) != len(y_arr):
+            raise ValueError("Dataset x/y lengths do not match.")
 
-        # Set errors with fallback to sqrt of data
         try:
-            self.state.errors = np.array(err, dtype=float, copy=True)
+            err_arr = np.asarray(err, dtype=float)
+            if err_arr.shape != x_arr.shape:
+                raise ValueError("Dataset errors length does not match x/y data.")
+            invalid_err = ~np.isfinite(err_arr) | (err_arr <= 0)
+            if np.any(invalid_err):
+                err_arr = np.array(err_arr, copy=True)
+                err_arr[invalid_err] = np.sqrt(np.clip(np.abs(y_arr[invalid_err]), 1e-12, np.inf))
         except Exception:
-            self.state.errors = np.sqrt(np.clip(np.abs(self.state.y_data), 1e-12, np.inf))
+            err_arr = np.sqrt(np.clip(np.abs(y_arr), 1e-12, np.inf))
 
-        # Set file_info if provided
-        if info:
-            safe_call(setattr, self.state, "file_info", info, 
-                     context="set file_info", vm=self)
+        model_spec = get_model_spec(model_name)
+        model_spec.initialize(np.array(x_arr, copy=True), np.array(y_arr, copy=True))
+
+        return {
+            "model_name": model_name,
+            "model_spec": model_spec,
+            "x_data": np.array(x_arr, copy=True),
+            "y_data": np.array(y_arr, copy=True),
+            "errors": np.array(err_arr, copy=True),
+            "excluded": np.zeros_like(x_arr, dtype=bool),
+            "file_info": dict(info) if isinstance(info, dict) else {},
+        }
+
+    def _apply_dataset_to_state(self, dataset: dict, model_name: str = "Voigt"):
+        prepared = self._prepare_dataset_state(dataset, model_name=model_name)
+
+        self.state.model_name = prepared["model_name"]
+        self.state.model_spec = prepared["model_spec"]
+        self.state.x_data = prepared["x_data"]
+        self.state.y_data = prepared["y_data"]
+        self.state.errors = prepared["errors"]
+        self.state.excluded = prepared["excluded"]
+        self.state.file_info = prepared["file_info"]
+        self.state.fit_result = None
+
+        try:
+            if hasattr(self.state, "model"):
+                delattr(self.state, "model")
+        except Exception:
+            pass
 
     def activate_file(self, index: int):
         from .logging_helpers import safe_call, safe_emit
@@ -405,26 +424,19 @@ class FitterViewModel(QObject):
         except Exception:
             pass
 
+        dataset = self._datasets[idx]
+
         # Reset any selected curve when swapping datasets so UI doesn't carry state.
         try:
             self.clear_selected_curve()
         except Exception:
             pass
 
-        # Always start from a clean model/fit state before applying new data.
-        # This prevents stale model_spec/model_name leaking between files.
         try:
-            from models import get_model_spec
-            setattr(self.state, "fit_result", None)
-            try:
-                if hasattr(self.state, "model"):
-                    delattr(self.state, "model")
-            except Exception:
-                pass
-            setattr(self.state, "model_name", "Voigt")
-            setattr(self.state, "model_spec", get_model_spec("Voigt"))
-        except Exception:
-            pass
+            self._apply_dataset_to_state(dataset, model_name="Voigt")
+        except Exception as exc:
+            log_exception(f"Failed to activate dataset at index {idx}", exc, vm=self)
+            return
 
         # Clear resolution state on file swap; file-specific fits may restore it.
         try:
@@ -437,8 +449,6 @@ class FitterViewModel(QObject):
         except Exception:
             pass
 
-        dataset = self._datasets[idx]
-        self._apply_dataset_to_state(dataset)
         self._active_dataset_index = idx
 
         # Extract dataset name for logging
@@ -858,18 +868,6 @@ class FitterViewModel(QObject):
             self._log_message("A fit is already running.")
             return
 
-        # Store pre-fit state so Run Fit behaves like Fit Dock and can be reverted
-        try:
-            self._store_pre_fit_state()
-        except Exception:
-            pass
-
-        # Emit fit_started signal so UI can disable buttons
-        try:
-            self.fit_started.emit()
-        except Exception:
-            pass
-
         # basic data checks
         # Use masked (included) data for fitting so excluded points are ignored
         try:
@@ -1046,17 +1044,39 @@ class FitterViewModel(QObject):
             return
 
         worker = FitWorker(x, y, wrapped_func, params, err, bounds)
+
+        # Store pre-fit state so Run Fit behaves like Fit Dock and can be reverted
+        try:
+            self._store_pre_fit_state()
+        except Exception:
+            pass
+
+        # Emit fit_started signal so UI can disable buttons
+        try:
+            self.fit_started.emit()
+        except Exception:
+            pass
+
         self._fit_worker = worker
 
         # connect progress updates
         worker.progress.connect(lambda p: self._log_message(f"Fit progress: {int(p*100)}%"))
 
+        def on_error(error_msg):
+            self._log_message(f"Fit error: {error_msg}")
+
+        worker.error_occurred.connect(on_error)
+
         # finished handler
         def on_finished(result, y_fit):
             try:
-                combined_result = result or {}
+                combined_result = dict(result or {})
+                fit_warnings = combined_result.pop("_warnings", []) if isinstance(combined_result, dict) else []
                 model_result = {k: v for k, v in combined_result.items() if not (isinstance(k, str) and k.startswith("res__"))}
                 resolution_result = {res_name_map.get(k, k): v for k, v in combined_result.items() if isinstance(k, str) and k.startswith("res__")}
+
+                for warning in fit_warnings:
+                    self._log_message(f"Fit warning: {warning}")
 
                 if combined_result:
                     # store fit result on state and update plot

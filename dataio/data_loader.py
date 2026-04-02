@@ -1,11 +1,9 @@
 ﻿# model/data_loader.py
 import os
-from typing import Optional
 import numpy as np
 import pandas as pd
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 import csv
-import io
 import re
 
 DATA_FILE_FILTER = "Data Files (*.dat *.txt *.csv)"
@@ -90,7 +88,7 @@ def load_data_from_file(filepath: str):
             toks = [t for t in toks if t != "" and t != ","]
             return toks
 
-        # Find first line that contains at least three numeric tokens (x, y, error).
+        # Find the first row that contains at least x/y numeric values.
         def numeric_tokens_from_line(line):
             toks = split_line(line)
             nums = []
@@ -105,16 +103,9 @@ def load_data_from_file(filepath: str):
         start_idx = None
         for i, line in enumerate(raw_lines):
             nums = numeric_tokens_from_line(line)
-            if len(nums) >= 3:
+            if len(nums) >= 2:
                 start_idx = i
                 break
-        # If no 3-number line found, fall back to first 2-number line
-        if start_idx is None:
-            for i, line in enumerate(raw_lines):
-                nums = numeric_tokens_from_line(line)
-                if len(nums) >= 2:
-                    start_idx = i
-                    break
         if start_idx is None:
             raise ValueError("No numeric data rows found in file.")
 
@@ -157,18 +148,21 @@ def load_data_from_file(filepath: str):
         counts = pd.to_numeric(df.iloc[:, 1], errors="coerce").to_numpy(dtype=float)
         errors = pd.to_numeric(df.iloc[:, 2], errors="coerce").to_numpy(dtype=float)
 
-        # If counts or energy contain NaNs, try to drop rows with NaNs
+        # Drop rows only when the required x/y values are invalid.
         valid_mask = np.isfinite(energy) & np.isfinite(counts)
-        if errors is not None:
-            valid_mask = valid_mask & np.isfinite(errors)
         energy = energy[valid_mask]
         counts = counts[valid_mask]
         if errors is not None:
             errors = errors[valid_mask]
 
-        # If no errors column, estimate from counts
+        # If no errors column or some rows omit it, estimate from counts.
         if errors is None or len(errors) == 0:
             errors = np.sqrt(np.clip(np.abs(counts), 1e-12, np.inf))
+        else:
+            invalid_errors = ~np.isfinite(errors) | (errors <= 0)
+            if np.any(invalid_errors):
+                errors = np.array(errors, copy=True)
+                errors[invalid_errors] = np.sqrt(np.clip(np.abs(counts[invalid_errors]), 1e-12, np.inf))
 
         file_info = {
             "path": filepath,

@@ -367,3 +367,7 @@ config/settings.json
 # Fit persistence files (auto-generated, not tracked)
 fits/*.json
 !fits/.gitkeep
+
+# virtual environments
+.venv/
+.venv310/

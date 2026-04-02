@@ -69,15 +69,17 @@ class FitWorker(QThread):
                 perr = np.sqrt(np.diag(pcov))
                 fit_result['perr'] = dict(zip(self.param_names, perr))
             except Exception:
-                # If covariance calculation failed, set errors to None
+                # If covariance calculation failed, keep the fit result but surface the missing uncertainties.
                 fit_result['perr'] = {name: None for name in self.param_names}
+                fit_result['_warnings'] = [
+                    "Covariance matrix could not be evaluated; parameter uncertainties were omitted."
+                ]
 
             self.progress.emit(1.0)
             self.finished.emit(fit_result, y_fit)
 
         except Exception as e:
-            error_msg = str(e)
-            print(f"[FitWorker] Error: {error_msg}")
+            error_msg = f"{type(e).__name__}: {e}"
             self.error_occurred.emit(error_msg)
             self.finished.emit(None, None)
 

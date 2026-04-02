@@ -12,6 +12,7 @@ description: Practical orientation for AI copilots working on PUFFIN.
 - **Data expectations**: `model_state` stores `x_data`, `y_data`, and `errors` as NumPy arrays. `plot_updated` consumers assume matching lengths; trim arrays before emitting.
 - **Fitting workflow**: `FitterViewModel.run_fit()` wraps `model_spec.evaluate` for SciPy `curve_fit`, spins up `worker/fit_worker.FitWorker` (QThread). Only update UI via its signals; never mutate widgets inside the worker thread.
 - **Fit results**: `FitWorker` emits `(fit_result_dict, y_fit)`; `on_finished` copies fitted values into both `state.model_spec.params` and `state.model`, then emits `parameters_updated` so the form rebuilds with latest numbers.
+- **Recent stability fixes**: `activate_file()` now stages dataset state before mutating the active model state, `data_loader.load_data_from_file()` preserves rows with missing error values by inferring them instead of dropping them, and file-specific fit restore validates normalized full paths before applying a saved state.
 - **Curve bookkeeping**: `MainWindow` tracks plotted items in `self.curves`; `InputHandler.detect_curve_at()` expects `viewmodel.curves` to map curve ids → `(x, y)` arrays. When adding new overlays, update both mappings to keep selection features alive.
 - **Logging**: Prefer emitting `log_message` from viewmodel/worker; the view routes it to the docked QTextEdit. Fall back to `print` only inside guarded `except` blocks as seen in existing code.
 - **Data loading**: `dataio/data_loader.py` prompts via QFileDialog, auto-detects delimiters, and returns `(energy, counts, errors, file_info)`. Errors are inferred if absent; respect these conventions when adding loaders.
@@ -22,7 +23,8 @@ description: Practical orientation for AI copilots working on PUFFIN.
 - **Background exclusions**: ViewBox exclusion mode uses dashed orange rectangles (`excludeBoxDrawn`); extend exclusion logic in the viewmodel (`toggle_box_exclusion`) rather than in the view.
 - **Extending models**: When adding composite models (e.g., DHO+Voigt), keep heavy math in `models/`; surface UI-tunable values through `Parameter` instances so the auto-form keeps working.
 - **Dependencies**: Core runtime uses PySide6, pyqtgraph, numpy, scipy, pandas (CSV IO), matplotlib (only for separate experiments). Install via `pip install PySide6 pyqtgraph numpy scipy pandas matplotlib` before running the UI.
-- **Running locally**: From repo root, start the GUI with `python -m PUFFIN.main`. Visual Studio (.pyproj) already points to `main.py` if you use that IDE.
+- **Python runtime note**: The current workspace `.venv` is Python 3.14 with an experimental Windows NumPy build that can crash during model imports and headless tests. Prefer recreating the environment on a stable Python 3.10-3.12 interpreter before deep fitting or regression work.
+- **Running locally**: From repo root, start the GUI with `python main.py`. Visual Studio (.pyproj) already points to `main.py` if you use that IDE.
 - **Thread safety**: Only Qt signals cross threads. If you add long-running work, subclass `QThread` like `FitWorker` and emit results instead of touching widgets directly.
 - **Error handling**: Loader and fit paths wrap exceptions and broadcast user-friendly messages (`RuntimeError`, log text). Follow that precedent to avoid hard crashes in the GUI.
 - **Prototypes**: `Minis Testing/` contains archived PySide experiments; none are imported by the main app. Use them for reference but avoid introducing new dependencies there.

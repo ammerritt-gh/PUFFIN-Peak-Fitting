@@ -1,5 +1,14 @@
 # Parameter Linking Implementation Notes
 
+## 2026-04 Stability Pass Notes
+
+- `dataio/data_loader.py`: mixed 2-column and 3-column numeric files now start at the first valid x/y row and infer missing error values row-by-row instead of dropping those rows.
+- `viewmodel/fitter_vm.py`: dataset activation now stages validated arrays and a fresh default model spec before mutating `state`, so a bad queued dataset no longer clears the current file/model state first.
+- `worker/fit_worker.py`: normal fits now surface worker failures through the viewmodel log path and record covariance warnings explicitly instead of printing directly.
+- `dataio/fit_persistence.py`: saved fits now validate normalized full paths on restore and warn when excluded-mask lengths do not match the currently loaded dataset.
+- `tests/test_save_functionality.py`: the save/export smoke test now uses portable temporary directories instead of Unix-only `/tmp` paths.
+- Runtime caveat: the checked-in `.venv` currently reports Python 3.14 with an experimental Windows NumPy build. Loader-only checks ran successfully, but imports involving `models.ModelState` crashed the interpreter during headless validation. Treat that as an environment blocker, not a confirmed regression in the new code.
+
 ## Overview
 
 This document provides technical implementation notes for the parameter linking feature added to PUFFIN.

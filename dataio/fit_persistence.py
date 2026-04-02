@@ -11,6 +11,7 @@ The fits are stored as JSON files in the 'fits/' folder under the repo root.
 import json
 import os
 import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any, Dict, Optional
 # Constants
 DEFAULT_FIT_FILENAME = "default_fit.json"
 FIT_FILE_VERSION = 2  # Version 2: Human-readable format with grouped elements
+logger = logging.getLogger(__name__)
 
 
 def _get_fits_folder() -> Path:
@@ -51,7 +53,7 @@ def _compute_file_signature(filepath: str) -> Dict[str, Any]:
       - size: file size in bytes
       - points: number of data points (if readable from fit context)
     """
-    sig = {
+    sig: Dict[str, Any] = {
         "path": filepath,
         "size": None,
         "points": None,
@@ -62,6 +64,15 @@ def _compute_file_signature(filepath: str) -> Dict[str, Any]:
     except Exception:
         pass
     return sig
+
+
+def _normalize_match_path(filepath: Optional[str]) -> Optional[str]:
+    if not filepath:
+        return None
+    try:
+        return os.path.normcase(os.path.abspath(os.path.normpath(str(filepath))))
+    except Exception:
+        return str(filepath)
 
 
 def _get_fit_filename_for_file(filepath: str) -> str:
@@ -115,7 +126,7 @@ def _extract_fit_state(model_state, resolution_state: Optional[Dict[str, Any]] =
         # Get file info for signature
         file_info = getattr(model_state, "file_info", None) or {}
         filepath = file_info.get("path") if isinstance(file_info, dict) else None
-        signature = _compute_file_signature(filepath) if filepath else {
+        signature: Dict[str, Any] = _compute_file_signature(filepath) if filepath else {
             "path": None, "size": None, "points": None
         }
 
@@ -241,9 +252,6 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
         - If parameters don't match, it applies what it can
         - The function never raises exceptions, returning False on failure
     """
-    import logging
-    logger = logging.getLogger(__name__)
-    
     try:
         import numpy as np
         from models import get_model_spec
@@ -433,12 +441,19 @@ def _apply_fit_state(model_state, fit_data: Dict[str, Any], apply_excluded: bool
                     x_data = getattr(model_state, "x_data", None)
                     if x_data is not None and len(excluded) == len(x_data):
                         model_state.excluded = np.asarray(excluded, dtype=bool)
+                    elif x_data is not None:
+                        logger.warning(
+                            "Skipped excluded-mask restore because saved mask length %s does not match data length %s.",
+                            len(excluded),
+                            len(x_data),
+                        )
                 except Exception:
-                    pass
+                    logger.exception("Failed to restore excluded mask from saved fit state")
 
         return True
 
     except Exception:
+        logger.exception("Failed to apply fit state")
         return False
 
 
@@ -471,6 +486,7 @@ def save_default_fit(model_state, resolution_state: Optional[Dict[str, Any]] = N
         return True
 
     except Exception:
+        logger.exception("Failed to save default fit")
         return False
 
 
@@ -503,6 +519,7 @@ def load_default_fit(model_state, apply_excluded: bool = False) -> tuple:
         return success, resolution_state
 
     except Exception:
+        logger.exception("Failed to load default fit")
         return False, None
 
 
@@ -538,10 +555,11 @@ def save_fit_for_file(model_state, filepath: str, resolution_state: Optional[Dic
             pass
 
         # Update source with file info
-        fit_data["source"] = {
+        source_info: Dict[str, Any] = {
             "path": filepath,
             "name": os.path.basename(filepath),
         }
+        fit_data["source"] = source_info
         try:
             if os.path.isfile(filepath):
                 fit_data["source"]["size"] = os.path.getsize(filepath)
@@ -559,6 +577,7 @@ def save_fit_for_file(model_state, filepath: str, resolution_state: Optional[Dic
         return True
 
     except Exception:
+        logger.exception("Failed to save fit for file '%s'", filepath)
         return False
 
 
@@ -597,8 +616,14 @@ def load_fit_for_file(model_state, filepath: str, apply_excluded: bool = True) -
         sig = fit_data.get("signature", {})
         saved_path = sig.get("path")
         if saved_path:
-            # Check that basenames match
-            if os.path.basename(saved_path) != os.path.basename(filepath):
+            saved_norm = _normalize_match_path(saved_path)
+            filepath_norm = _normalize_match_path(filepath)
+            if saved_norm and filepath_norm and saved_norm != filepath_norm:
+                logger.warning(
+                    "Skipped restoring fit because saved path '%s' does not match requested file '%s'.",
+                    saved_path,
+                    filepath,
+                )
                 return False, None
 
         success = _apply_fit_state(model_state, fit_data, apply_excluded=apply_excluded)
@@ -606,6 +631,7 @@ def load_fit_for_file(model_state, filepath: str, apply_excluded: bool = True) -
         return success, resolution_state
 
     except Exception:
+        logger.exception("Failed to load fit for file '%s'", filepath)
         return False, None
 
 
