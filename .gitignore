@@ -367,3 +367,6 @@ config/settings.json
 # Fit persistence files (auto-generated, not tracked)
 fits/*.json
 !fits/.gitkeep
+
+# Python virtual environment (created by uv / the installer; never tracked)
+.venv/

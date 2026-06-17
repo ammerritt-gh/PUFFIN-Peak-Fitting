@@ -3,6 +3,10 @@
 ###############################################################################
 * text=auto
 
+# Windows batch files must check out with CRLF line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 ###############################################################################
 # Set default behavior for command prompt diff.
 #

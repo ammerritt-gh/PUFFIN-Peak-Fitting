@@ -2,19 +2,26 @@
 
 PUFFIN is a desktop app for interactive 1D curve fitting (PySide6 + PyQtGraph + SciPy). Load a spectrum, pick/build a model, tweak parameters with live previews, exclude bad points, run a fit, and export results.
 
-## Install
+## Install (Windows, one-click)
 
-Requirements: Python 3.10+
+To install PUFFIN on a Windows PC (no Python required — a private copy is provisioned),
+download [`installer/WINDOWS-install-PUFFIN.bat`](installer/WINDOWS-install-PUFFIN.bat) and
+double-click it. It installs to `%USERPROFILE%\PUFFIN` and creates a desktop shortcut. See
+[installer/PUFFIN-Installation-README.md](installer/PUFFIN-Installation-README.md) for details.
+
+## Run (developer / from the repo)
+
+Requirements: Python 3.10+. The simplest path uses [uv](https://docs.astral.sh/uv/), which
+creates a `.venv` from the pinned lock file and launches the app:
+
+```bat
+run-puffin-dev.bat
+```
+
+Or set it up manually:
 
 ```bash
 python -m pip install -r requirements.txt
-```
-
-## Run
-
-From the repo root:
-
-```bash
 python main.py
 ```
 
