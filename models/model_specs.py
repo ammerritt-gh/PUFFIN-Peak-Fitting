@@ -790,10 +790,13 @@ def get_model_spec(model_name: str) -> BaseModelSpec:
     if name in ("composite", "custom", "custom model", "custommodel"):
         return CompositeModelSpec()
     
+    # Import here so the except clause below always has the name bound; a genuine
+    # import failure (e.g. a missing dependency) then surfaces the real error instead
+    # of masking it as an UnboundLocalError.
+    from models.model_elements import get_element_spec, ModelElementNotFoundError
+
     # Try to load from YAML-based model elements first
     try:
-        from models.model_elements import get_element_spec, ModelElementNotFoundError
-        
         # Map common aliases to element names
         alias_map = {
             "gauss": "gaussian",
