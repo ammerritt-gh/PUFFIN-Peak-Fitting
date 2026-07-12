@@ -1,5 +1,5 @@
 import sys, json
-sys.path.insert(0, r'c:/Users/AMM/Documents/Github/PUFFIN/PUFFIN')
+sys.path.insert(0, r'c:/Users/AMM/Documents/Github/Science/PUFFIN/PUFFIN')
 from viewmodel.fitter_vm import FitterViewModel
 
 vm = FitterViewModel()
