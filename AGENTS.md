@@ -7,7 +7,9 @@ export results. Strict MVVM on PySide6 + pyqtgraph.
 
 ## Quick Reference
 
-- **Runtime:** Python 3.12 in `.venv/` (repo declares 3.10+). Not a package — there is
+- **Runtime:** Python 3.12 in `.venv/` (repo declares 3.10+). The lock file is compiled
+  for 3.12, so rebuild the venv with `uv venv --python 3.12`: a plain `uv venv` picks the
+  uv-managed 3.13, where numpy 1.26.4 fails to import. Not a package — there is
   no root `__init__.py`; imports are top-level (`from models import ...`, `from view...`).
 - **Stack:** PySide6, pyqtgraph, numpy, scipy, pandas, PyYAML, matplotlib. Deps in
   `requirements.txt` (pinned lock: `requirements.lock.txt`). **PyYAML is required** —
