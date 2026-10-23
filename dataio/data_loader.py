@@ -8,7 +8,7 @@ import csv
 import io
 import re
 
-DATA_FILE_FILTER = "Data Files (*.dat *.txt *.csv)"
+DATA_FILE_FILTER = "Data Files (*.dat *.txt *.csv);;All Files (*)"
 
 
 def resolve_default_input_dir():
@@ -35,12 +35,44 @@ def resolve_default_input_dir():
     return docs
 
 
+def _load_bl43_analyzer(raw_lines):
+    """SPring-8 BL43LXU per-analyzer file (`..._aNN`): return (meV_sft, y_i, ye_i), or None if the
+    column-label line does not name those columns. Rows with npts == 0 or ye_i <= 0 are dropped."""
+    labels = None
+    for line in raw_lines:
+        s = line.strip()
+        if s.startswith("#"):
+            labels = s.lstrip("#").split()
+        elif s:
+            break  # first data row: the label line, if any, was the last comment above it
+    if not labels or not {"meV_sft", "y_i", "ye_i", "npts"} <= set(labels):
+        return None
+    ix, iy, ie, ipts = (labels.index(n) for n in ("meV_sft", "y_i", "ye_i", "npts"))
+    rows = [l.split() for l in raw_lines if l.strip() and not l.lstrip().startswith("#")]
+    bad = [i + 1 for i, r in enumerate(rows) if len(r) != len(labels)]
+    if bad:
+        raise ValueError(f"BL43LXU data rows {bad[:5]} do not have {len(labels)} columns")
+    arr = np.array(rows, dtype=float)
+    keep = (arr[:, ipts] > 0) & (arr[:, ie] > 0)
+    return arr[keep, ix], arr[keep, iy], arr[keep, ie]
+
+
 def load_data_from_file(filepath: str):
     """Load (x, y, error) data from a file. Returns (energy, counts, errors, file_info)."""
     try:
         # Read a chunk of the file to detect delimiter and find where numeric data starts
         with open(filepath, "r", encoding="utf-8", errors="replace") as fh:
             raw_lines = fh.readlines()
+
+        bl43 = _load_bl43_analyzer(raw_lines)
+        if bl43 is not None:
+            energy, counts, errors = bl43
+            file_info = {
+                "path": filepath,
+                "name": os.path.basename(filepath),
+                "size": os.path.getsize(filepath),
+            }
+            return energy, counts, errors, file_info
 
         # Improved delimiter detection: try csv.Sniffer then score common delimiters over many lines
         sample = "".join(raw_lines[:50])
