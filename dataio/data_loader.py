@@ -36,8 +36,10 @@ def resolve_default_input_dir():
 
 
 def _load_bl43_analyzer(raw_lines):
-    """SPring-8 BL43LXU per-analyzer file (`..._aNN`): return (meV_sft, y_i, ye_i), or None if the
-    column-label line does not name those columns. Rows with npts == 0 or ye_i <= 0 are dropped."""
+    """SPring-8 BL43LXU per-analyzer file (`..._aNN`): return (meV, y_i, ye_i), or None if the
+    column-label line does not name those columns. Rows with npts == 0 or ye_i <= 0 are dropped.
+    `meV` is the calibrated axis with the elastic line near 0; `meV_sft` is shifted to the biggest
+    peak (often a phonon), so it is never the energy zero."""
     labels = None
     for line in raw_lines:
         s = line.strip()
@@ -45,9 +47,9 @@ def _load_bl43_analyzer(raw_lines):
             labels = s.lstrip("#").split()
         elif s:
             break  # first data row: the label line, if any, was the last comment above it
-    if not labels or not {"meV_sft", "y_i", "ye_i", "npts"} <= set(labels):
+    if not labels or not {"meV", "y_i", "ye_i", "npts"} <= set(labels):
         return None
-    ix, iy, ie, ipts = (labels.index(n) for n in ("meV_sft", "y_i", "ye_i", "npts"))
+    ix, iy, ie, ipts = (labels.index(n) for n in ("meV", "y_i", "ye_i", "npts"))
     rows = [l.split() for l in raw_lines if l.strip() and not l.lstrip().startswith("#")]
     bad = [i + 1 for i, r in enumerate(rows) if len(r) != len(labels)]
     if bad:

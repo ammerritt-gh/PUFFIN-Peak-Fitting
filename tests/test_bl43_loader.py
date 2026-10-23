@@ -1,4 +1,4 @@
-"""Check that a BL43LXU per-analyzer file loads as (meV_sft, y_i, ye_i) with empty bins dropped.
+"""Check that a BL43LXU per-analyzer file loads as (meV, y_i, ye_i) with empty bins dropped.
 
 Run from the repo root: .venv\\Scripts\\python.exe tests\\test_bl43_loader.py
 """
@@ -25,10 +25,10 @@ def main():
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join([LABEL, *ROWS, "#Q=   18.815 /nm", "#T=  302.000 K"]) + "\n")
         x, y, e, _ = load_data_from_file(path)
-    assert list(x) == [-22.09, -21.69], x       # meV_sft, the npts == 0 row dropped
+    assert list(x) == [-16.00, -15.60], x       # meV, not meV_sft; the npts == 0 row dropped
     assert list(y) == [0.25349e-04, 0.22379e-04], y
     assert list(e) == [0.32163e-05, 0.67475e-05], e
-    print("PASS: BL43LXU analyzer file reads meV_sft / y_i / ye_i and drops empty bins")
+    print("PASS: BL43LXU analyzer file reads meV / y_i / ye_i and drops empty bins")
 
 
 if __name__ == "__main__":
